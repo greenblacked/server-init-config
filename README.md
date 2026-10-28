@@ -23,7 +23,7 @@ What a server built from this repo has:
 | `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
 | `scripts/` | host scripts: `health`, weekly cleanup, disk guard, image prewarm |
 | `systemd/` | services and timers for the scripts |
-| `install/` | idempotent installers for optional components, run on the server from a clone |
+| `install/` | idempotent installers for optional components, run on the server from a clone; `update.sh` updates everything installed |
 | `monitoring/`, `registry-cache/`, `npm-cache/` | Docker Compose stacks and their configs |
 | `ci/` | `.gitlab-ci.yml` snippets: smoke test, defaults, arm64 check, multi-arch mirroring |
 
@@ -65,6 +65,40 @@ What a server built from this repo has:
    ```
 
    Then run `ci/smoke.yml` in a project. Its log must show `on <your runner description>` and `aarch64`.
+
+## Update a server
+
+`install/update.sh` brings a running server to the state of the repo checkout. It only touches components that are installed: host tools, monitoring, registry cache, npm cache. It never touches secrets (`.env`, `config.toml`, tokens), the runner registration or `daemon.json`.
+
+```bash
+# 1. get the new repo state onto the server (scp copy, or a git clone there)
+scp -r server-init-config root@SERVER_IP:/root/
+ssh root@SERVER_IP
+
+# 2. preview, then apply
+cd /root/server-init-config
+install/update.sh --dry-run
+install/update.sh
+```
+
+| Option | Effect |
+|---|---|
+| `-n`, `--dry-run` | print what would change, change nothing |
+| `--pull` | `git pull --ff-only` in the checkout first (needs a git clone on the server) |
+| `--os` | also upgrade OS packages, Docker and GitLab Runner included; never reboots, only tells you when a reboot is advisable |
+| `--rollback` | restore the files from the newest backup and recreate the stacks |
+
+What it does on every run:
+
+- Validates before changing: `bash -n` for scripts, `promtool` for the Prometheus config, `jq` for the dashboard, `docker compose config` for stacks.
+- Backs up each changed file to `/var/backups/server-init-config/<timestamp>/` (last 5 runs kept). If validation fails or a stack does not come back healthy, the files changed in that run are restored automatically.
+- Reloads Prometheus, restarts Grafana only if its provisioning changed, and recreates a cache stack only if its config changed.
+- Skips steps that would interrupt CI (cache stacks, `--os`) while jobs are running, lists them at the end and exits with code `3`. Rerun when the runner is idle.
+- Finishes with `health -q`.
+
+Rollback: `install/update.sh --rollback` restores the newest backup. Running `update.sh` again re-applies the repo state. Older backups are plain file trees (paths mirror `/`), so you can copy single files back by hand.
+
+Not updated by this script: `/etc/gitlab-runner/config.toml` (use `install/register-runner.sh`, `shared-cache.sh`, `npm-cache.sh`), the Caddy override created by `grafana-domain.sh`, and files written by cloud-init (SSH, dnf-automatic, kernel settings).
 
 ## The `health` command
 
