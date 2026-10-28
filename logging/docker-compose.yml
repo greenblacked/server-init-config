@@ -1,0 +1,45 @@
+name: logging
+
+services:
+  loki:
+    image: grafana/loki:3.7.7
+    restart: unless-stopped
+    network_mode: host
+    mem_limit: 512m
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./loki.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+
+  # Root inside the container is needed to read the Docker socket and the journal.
+  # All capabilities are dropped and the root filesystem is read-only.
+  alloy:
+    image: grafana/alloy:v1.19.2
+    restart: unless-stopped
+    network_mode: host
+    mem_limit: 256m
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - label=disable
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    command:
+      - run
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/log/journal:/var/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    depends_on: [loki]
+
+volumes:
+  loki-data:
+  alloy-data:

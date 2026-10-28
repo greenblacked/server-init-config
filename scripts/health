@@ -571,6 +571,15 @@ check_caches() {
   else
     skip "monitoring stack not installed"
   fi
+
+  if [[ -d /opt/logging ]]; then
+    if [[ "$(http_code http://127.0.0.1:3100/ready 3)" == "200" ]]; then ok "Loki ready"
+    else fail "Loki not ready, logs are not stored"; fi
+    if [[ "$(http_code http://127.0.0.1:12345/-/ready 3)" == "200" ]]; then ok "Alloy ready"
+    else fail "Alloy not ready, logs are not collected"; fi
+  else
+    skip "logging (Loki + Alloy) not installed"
+  fi
   return 0
 }
 

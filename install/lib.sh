@@ -46,6 +46,18 @@ require_runner_idle() {
 
 backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
 
+# Prometheus scrape jobs for the logging stack, shared by install/logging.sh and install/update.sh.
+prom_jobs_logging() {
+  cat <<'YAML'
+  - job_name: loki
+    static_configs:
+      - targets: ["127.0.0.1:3100"]
+  - job_name: alloy
+    static_configs:
+      - targets: ["127.0.0.1:12345"]
+YAML
+}
+
 # Merge KEY=VALUE entries into the single [[runners]] environment line of config.toml.
 runner_env_merge() {
   local cfg=/etc/gitlab-runner/config.toml existing list key e line

@@ -3,7 +3,7 @@
 Bootstrap and operations config for a self-hosted GitLab Runner on Hetzner Cloud.
 It's built for an ARM64 CAX11 running Rocky Linux 10. Debian 13 and x86_64 work too.
 
-The quickest path on Rocky is [`gitlab-runner/`](gitlab-runner/README.md): paste one init into Hetzner, wait, and register the runner with `setup.sh --register`. The rest of this file describes the full layout and the step-by-step variant.
+The quickest path on Rocky is [`gitlab-runner/`](gitlab-runner/README.md): a base init, then every component installed with `setup.sh --<component>` or a copy-paste command block. The rest of this file describes the full layout and the step-by-step variant.
 
 What a server built from this repo has:
 
@@ -13,6 +13,7 @@ What a server built from this repo has:
 - Optionally, a daily prewarm of the CI images from GitLab Container Registry
 - Weekly cleanup, plus an emergency disk guard at 85%
 - Optionally, Prometheus, node_exporter and Grafana, all bound to `127.0.0.1`, plus Grafana on an HTTPS domain via Caddy
+- Optionally, log collection: Loki + Grafana Alloy for container logs and the systemd journal, 7 days, queried in Grafana
 - A `health` command: one report covering the system, security, services, runner, containers, caches and 24h trends
 - SSH hardening, automatic security updates, SELinux enforcing (on Rocky)
 
@@ -22,12 +23,12 @@ What a server built from this repo has:
 |---|---|
 | `cloud-init/rocky.yaml`, `cloud-init/debian.yaml` | user-data for new servers (generated, do not edit) |
 | `cloud-init/templates/` | sources for the cloud-init files |
-| `gitlab-runner/` | **start here for a Rocky runner**: one init that installs everything, `setup.sh` for the optional parts, `update.sh`, everyday commands and troubleshooting (see its README) |
-| `tools/render-cloud-init.py` | renders templates, embeds repo files and the base bundle of `gitlab-runner/`; `--check` detects stale output |
+| `gitlab-runner/` | **start here for a Rocky runner**: base init, `setup.sh` and copy-paste blocks for every component, `update.sh`, everyday commands and troubleshooting (see its README) |
+| `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
 | `scripts/` | host scripts: `health`, weekly cleanup, disk guard, image prewarm |
 | `systemd/` | services and timers for the scripts |
 | `install/` | idempotent installers for optional components, run on the server from a clone; `update.sh` updates everything installed |
-| `monitoring/`, `registry-cache/`, `npm-cache/` | Docker Compose stacks and their configs |
+| `monitoring/`, `logging/`, `registry-cache/`, `npm-cache/` | Docker Compose stacks and their configs |
 | `ci/` | `.gitlab-ci.yml` snippets: smoke test, defaults, arm64 check, multi-arch mirroring |
 
 ## Build a new server
@@ -53,6 +54,7 @@ What a server built from this repo has:
 
    ```bash
    install/monitoring.sh
+   install/logging.sh
    install/npm-cache.sh
    install/shared-cache.sh
    install/image-prewarm.sh
@@ -71,7 +73,7 @@ What a server built from this repo has:
 
 ## Update a server
 
-`install/update.sh` brings a running server to the state of the repo checkout. It only touches components that are installed: host tools, monitoring, registry cache, npm cache. It never touches secrets (`.env`, `config.toml`, tokens), the runner registration or `daemon.json`.
+`install/update.sh` brings a running server to the state of the repo checkout. It only touches components that are installed: host tools, monitoring, logging, registry cache, npm cache. It never touches secrets (`.env`, `config.toml`, tokens), the runner registration or `daemon.json`.
 
 ```bash
 # 1. get the new repo state onto the server (scp copy, or a git clone there)

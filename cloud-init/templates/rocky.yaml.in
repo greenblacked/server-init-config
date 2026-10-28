@@ -12,6 +12,12 @@ packages:
   - tmux
   - dnf-automatic
   - policycoreutils-python-utils
+  - bind-utils
+  - lsof
+  - sysstat
+  - tcpdump
+  - traceroute
+  - nmap-ncat
 
 ssh_pwauth: false
 
@@ -21,6 +27,7 @@ write_files:
 runcmd:
   - restorecon -Rv /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /usr/local/bin /etc/systemd/system
   - [systemctl, reload, sshd]
+  - [sh, -c, "dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done"]
   - sed -i -E 's/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/' /etc/dnf/automatic.conf
   - [systemctl, enable, --now, dnf-automatic.timer]
   - [systemctl, restart, systemd-journald]
