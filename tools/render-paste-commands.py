@@ -69,8 +69,8 @@ BLOCKS = [
     Block("users", "Users: admin, service accounts, SSH hardening",
           "Creates the admin user `ops` with sudo without password and the keys from "
           "root, the service accounts `gitlab-runner` (the runner service then runs as it) and `monitoring` (runs the "
-          "monitoring and logging containers), and the SSH drop-in: keys only, only the `ssh-users` group, port 22022 next to 22. Root and port 22 stay "
-          "open until the [Lock root SSH](#lock-root) block. Allow TCP 22022 in the Hetzner Firewall. Run it first; safe to rerun.",
+          "monitoring and logging containers), and the SSH drop-in: keys only, only the `ssh-users` group. Root keeps SSH by key "
+          "until the [Lock root SSH](#lock-root) block. Run it first; safe to rerun.",
           ["install/users.sh"], run=["install/users.sh"]),
     Block("packages", "Admin tools: htop, btop, ncdu, iotop and others",
           "htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, "
@@ -111,9 +111,9 @@ BLOCKS = [
     Block("selinux", "SELinux enforcing",
           "Switches SELinux to enforcing now and after reboot, then checks Docker and the runner.",
           ["install/selinux-enforcing.sh"], run=["install/selinux-enforcing.sh"]),
-    Block("lock-root", "Lock root SSH and port 22",
-          "Only after this works from your laptop: `ssh -p 22022 ops@SERVER_IP 'sudo -n true && echo ok'`. Sets "
-          "`PermitRootLogin no` and leaves only port 22022. Refuses to run while the admin has no SSH key. Undo, from a "
+    Block("lock-root", "Lock root SSH",
+          "Only after this works from your laptop: `ssh ops@SERVER_IP 'sudo -n true && echo ok'`. Sets "
+          "`PermitRootLogin no`. Refuses to run while the admin has no SSH key. Undo, from a "
           "session that is still open: `sudo bash /root/server-init-config/install/users.sh --unlock-root`.",
           ["install/users.sh", "install/lock-root.sh"], run=["install/lock-root.sh"]),
     Block("update", "Update everything installed",
@@ -184,8 +184,8 @@ def render_base() -> str:
     lines += ["", "systemctl is-active docker gitlab-runner", "INSTALL"]
     return ('<a id="base"></a>\n## Base host: Docker, GitLab Runner, tools\n\n'
             "The same steps as `cloud-init-rocky.yaml`, for a Rocky server created without it. Skip this if you used the init. "
-            "Paste it as root (that is how a server without the init is reached). It creates the `ops` admin and opens port 22022 next to 22; root SSH "
-            "and port 22 stay open until the [Lock root SSH](#lock-root) block.\n\n"
+            "Paste it as root (that is how a server without the init is reached). It creates the `ops` admin; root SSH "
+            "stays open until the [Lock root SSH](#lock-root) block.\n\n"
             "````bash\n" + "\n".join(lines) + "\n````\n")
 
 
