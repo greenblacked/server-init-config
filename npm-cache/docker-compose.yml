@@ -6,6 +6,10 @@ services:
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
+    # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
+    # and exposes the cache (access: $all) on every interface. install/npm-cache.sh and update.sh
+    # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
+    command: ["verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
     volumes:
       - ./config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio-storage:/verdaccio/storage
