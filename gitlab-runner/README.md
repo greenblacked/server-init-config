@@ -50,15 +50,17 @@ All commands below run on the server in `/root/server-init-config`. If a script 
 
 ```bash
 gitlab-runner/setup.sh --list                       # what is installed
-gitlab-runner/setup.sh --all                        # tools, runner, Docker Hub cache, monitoring, logging, npm and shared cache
+gitlab-runner/setup.sh --all                        # admin tools, tools, runner, Docker Hub cache, monitoring, logging, npm and shared cache
+gitlab-runner/setup.sh --packages                   # only htop, btop, ncdu and the other admin tools
 gitlab-runner/setup.sh --register --monitoring      # or pick components
 DOMAIN=grafana.example.com ACME_EMAIL=you@example.com gitlab-runner/setup.sh --grafana-domain
 ```
 
 | Flag | Installs |
 |---|---|
-| `--base` | tools + registry-cache + monitoring |
+| `--base` | packages + tools + registry-cache + monitoring |
 | `--all` | `--base` + register + logging + npm-cache + shared-cache |
+| `--packages` | admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, sar, ...), aliases, tmux config |
 | `--tools` | `health`, weekly cleanup, disk guard and their timers |
 | `--register` | registers the runner (asks for the token) |
 | `--registry-cache` | Docker Hub pull-through cache on `127.0.0.1:5000` |
@@ -79,7 +81,8 @@ Components are installed in that order whatever the order of the flags. If one f
 | Block | What it does |
 |---|---|
 | [Base host](COMMANDS.md#base) | Docker, GitLab Runner and tools, the same as the init; only for a server created without it |
-| [Tools](COMMANDS.md#tools) | `health`, weekly cleanup, disk guard |
+| [Admin tools](COMMANDS.md#packages) | htop, btop, ncdu, iotop and others, aliases, tmux config |
+| [Health + cleanup](COMMANDS.md#tools) | `health`, weekly cleanup, disk guard |
 | [Register](COMMANDS.md#register) | registers the runner (asks for the token) |
 | [Docker Hub cache](COMMANDS.md#registry-cache) | pull-through cache on `127.0.0.1:5000` |
 | [Monitoring](COMMANDS.md#monitoring) | Prometheus, node_exporter, Grafana |
@@ -123,6 +126,22 @@ dstats            # docker stats --no-stream
 gitlab-runner list ; gitlab-runner verify
 docker image prune -af --filter until=168h
 ```
+
+### Cleanup
+
+Installed by `--tools` (or the [Health + cleanup](COMMANDS.md#tools) block). The weekly run is on Monday 03:30; the disk guard checks every 30 minutes and runs an emergency cleanup with 1-day retention when `/` reaches 85%.
+
+```bash
+DRY_RUN=1 runner-weekly-cleanup.sh                 # show what would be removed, remove nothing
+runner-weekly-cleanup.sh                           # run now (skips the runner cache wipe while jobs run)
+RETENTION_DAYS=1 runner-weekly-cleanup.sh          # aggressive: keep only the last day
+runner-weekly-cleanup.sh --help                    # all settings
+systemctl list-timers 'runner-*' --no-pager        # next runs
+journalctl -t runner-weekly-cleanup --since "-7d" --no-pager | tail -40   # what it removed, disk before/after
+journalctl -t runner-disk-guard --since "-7d" --no-pager                  # emergency runs
+```
+
+To change the schedule, edit `systemd/runner-weekly-cleanup.timer` in the repo and run the update. The thresholds are environment variables of the scripts (`RETENTION_DAYS`, `SHARED_CACHE_MAX_AGE_DAYS`, `HARD_LIMIT`).
 
 ### Grafana, Prometheus and logs
 

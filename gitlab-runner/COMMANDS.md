@@ -8,7 +8,8 @@ what you don't need. Long blocks paste best into a plain terminal or tmux; if a 
 whole block again, the installers are safe to rerun or tell you the component is already installed.
 
 - [Base host](#base) (only if the server was created without the init)
-- [Tools: health, weekly cleanup, disk guard](#tools)
+- [Admin tools: htop, btop, ncdu, iotop and others](#packages)
+- [Health + cleanup: health, weekly cleanup, disk guard](#tools)
 - [Register the runner](#register)
 - [Docker Hub pull-through cache](#registry-cache)
 - [Monitoring: Prometheus, node_exporter, Grafana](#monitoring)
@@ -109,10 +110,193 @@ systemctl is-active docker gitlab-runner
 INSTALL
 ````
 
-<a id="tools"></a>
-## Tools: health, weekly cleanup, disk guard
+<a id="packages"></a>
+## Admin tools: htop, btop, ncdu, iotop and others
 
-Installs `/usr/local/bin/health`, the Monday 03:30 cleanup and the 85% disk guard with their timers.
+htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, plus the shell aliases and tmux config. For a server created with an older init; safe to rerun.
+
+````bash
+bash <<'INSTALL'
+set -Eeuo pipefail
+R=/root/server-init-config
+
+install -d "$R/install"
+cat > "$R/install/lib.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Shared helpers for install/*.sh. Sourced, not executed.
+# shellcheck shell=bash
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export REPO_ROOT
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+require_root() { [[ $EUID -eq 0 ]] || die "run as root"; }
+
+selinux_on() { command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; }
+
+pkg_install() {
+  if command -v dnf >/dev/null 2>&1; then
+    dnf -y -q install "$@"
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update -q && apt-get install -y -q "$@"
+  else
+    die "no supported package manager"
+  fi
+}
+
+# Label a directory so containers may read files in it (no-op without SELinux).
+selinux_label_dir() {
+  local dir="$1"
+  install -d -m 0755 "$dir"
+  selinux_on || return 0
+  command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
+  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+    semanage fcontext -a -t container_file_t "${dir}(/.*)?"
+  fi
+  restorecon -R "$dir"
+}
+
+restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+
+require_runner_idle() {
+  local n
+  n=$(ci_jobs_running)
+  (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
+}
+
+backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+
+# Prometheus scrape jobs for the logging stack, shared by install/logging.sh and install/update.sh.
+prom_jobs_logging() {
+  cat <<'YAML'
+  - job_name: loki
+    static_configs:
+      - targets: ["127.0.0.1:3100"]
+  - job_name: alloy
+    static_configs:
+      - targets: ["127.0.0.1:12345"]
+YAML
+}
+
+# Merge KEY=VALUE entries into the single [[runners]] environment line of config.toml.
+runner_env_merge() {
+  local cfg=/etc/gitlab-runner/config.toml existing list key e line
+  [[ $(grep -c '^\[\[runners\]\]' "$cfg") -eq 1 ]] || die "expected exactly one [[runners]] block in $cfg"
+  existing=$(grep -E '^  environment = \[' "$cfg" | sed -E 's/^  environment = \[(.*)\]$/\1/' || true)
+  list="$existing"
+  for e in "$@"; do
+    key="${e%%=*}"
+    if grep -q "\"${key}=" <<<"$list"; then
+      list=$(sed -E "s|\"${key}=[^\"]*\"|\"${e}\"|" <<<"$list")
+    else
+      list="${list:+${list}, }\"${e}\""
+    fi
+  done
+  line="  environment = [${list}]"
+  if grep -qE '^  environment = \[' "$cfg"; then
+    sed -i -E "s|^  environment = \[.*\]$|${line}|" "$cfg"
+  else
+    sed -i -E "0,/^  executor = .*/s||${line}\n&|" "$cfg"
+  fi
+  chmod 600 "$cfg"
+}
+__SIC_EOF__
+chmod 755 "$R/install/lib.sh"
+
+install -d "$R/install"
+cat > "$R/install/admin-tools.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo.
+# Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
+# Also installs the shell aliases and, if there is none yet, the tmux config from the init. Safe to rerun.
+set -Eeuo pipefail
+# shellcheck source=install/lib.sh
+source "$(dirname "$0")/lib.sh"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, ...), aliases and tmux config"
+  exit 0
+fi
+require_root
+
+if command -v dnf >/dev/null 2>&1; then
+  dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
+  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
+        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl)
+  pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
+elif command -v apt-get >/dev/null 2>&1; then
+  apt-get update -q >/dev/null
+  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
+        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl)
+  pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
+else
+  die "no supported package manager"
+fi
+
+installed=()
+missing=()
+for p in "${PKGS[@]}"; do
+  if pkg_one "$p"; then
+    installed+=("$p")
+  else
+    missing+=("$p")
+  fi
+done
+
+if [[ -f /etc/default/sysstat ]]; then
+  sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat
+fi
+if systemctl cat sysstat >/dev/null 2>&1; then
+  systemctl enable --now sysstat >/dev/null 2>&1 || log "WARN: could not enable sysstat collection"
+fi
+
+cat > /etc/profile.d/ci-runner.sh <<'EOF'
+alias runner-logs='journalctl -u gitlab-runner -f'
+alias runner-errors='journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
+alias runner-jobs='docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
+alias runner-metrics='curl -s 127.0.0.1:9252/metrics | grep "^gitlab_runner_"'
+alias dfd='df -h / ; docker system df'
+alias dstats='docker stats --no-stream'
+EOF
+chmod 644 /etc/profile.d/ci-runner.sh
+restorecon_if /etc/profile.d/ci-runner.sh
+
+if [[ -f /root/.tmux.conf ]]; then
+  log "kept existing /root/.tmux.conf"
+else
+  cat > /root/.tmux.conf <<'EOF'
+set -g mouse on
+set -g history-limit 50000
+set -g base-index 1
+set -g status-right '#H  %H:%M'
+EOF
+  chmod 644 /root/.tmux.conf
+fi
+
+log "installed or already present (${#installed[@]}): ${installed[*]}"
+if (( ${#missing[@]} )); then
+  log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
+fi
+for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar; do
+  if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
+done
+log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh)"
+__SIC_EOF__
+chmod 755 "$R/install/admin-tools.sh"
+
+echo "files written to $R: 2"
+bash "$R/install/admin-tools.sh" </dev/null
+INSTALL
+````
+
+<a id="tools"></a>
+## Health + cleanup: health, weekly cleanup, disk guard
+
+Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency cleanup every 30 minutes when the disk is 85% full. Ends with a dry run of the cleanup.
 
 ````bash
 bash <<'INSTALL'
@@ -3472,6 +3656,87 @@ __SIC_EOF__
 chmod 755 "$R/install/lib.sh"
 
 install -d "$R/install"
+cat > "$R/install/admin-tools.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo.
+# Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
+# Also installs the shell aliases and, if there is none yet, the tmux config from the init. Safe to rerun.
+set -Eeuo pipefail
+# shellcheck source=install/lib.sh
+source "$(dirname "$0")/lib.sh"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, ...), aliases and tmux config"
+  exit 0
+fi
+require_root
+
+if command -v dnf >/dev/null 2>&1; then
+  dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
+  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
+        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl)
+  pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
+elif command -v apt-get >/dev/null 2>&1; then
+  apt-get update -q >/dev/null
+  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
+        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl)
+  pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
+else
+  die "no supported package manager"
+fi
+
+installed=()
+missing=()
+for p in "${PKGS[@]}"; do
+  if pkg_one "$p"; then
+    installed+=("$p")
+  else
+    missing+=("$p")
+  fi
+done
+
+if [[ -f /etc/default/sysstat ]]; then
+  sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat
+fi
+if systemctl cat sysstat >/dev/null 2>&1; then
+  systemctl enable --now sysstat >/dev/null 2>&1 || log "WARN: could not enable sysstat collection"
+fi
+
+cat > /etc/profile.d/ci-runner.sh <<'EOF'
+alias runner-logs='journalctl -u gitlab-runner -f'
+alias runner-errors='journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
+alias runner-jobs='docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
+alias runner-metrics='curl -s 127.0.0.1:9252/metrics | grep "^gitlab_runner_"'
+alias dfd='df -h / ; docker system df'
+alias dstats='docker stats --no-stream'
+EOF
+chmod 644 /etc/profile.d/ci-runner.sh
+restorecon_if /etc/profile.d/ci-runner.sh
+
+if [[ -f /root/.tmux.conf ]]; then
+  log "kept existing /root/.tmux.conf"
+else
+  cat > /root/.tmux.conf <<'EOF'
+set -g mouse on
+set -g history-limit 50000
+set -g base-index 1
+set -g status-right '#H  %H:%M'
+EOF
+  chmod 644 /root/.tmux.conf
+fi
+
+log "installed or already present (${#installed[@]}): ${installed[*]}"
+if (( ${#missing[@]} )); then
+  log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
+fi
+for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar; do
+  if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
+done
+log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh)"
+__SIC_EOF__
+chmod 755 "$R/install/admin-tools.sh"
+
+install -d "$R/install"
 cat > "$R/install/grafana-domain.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Publish Grafana on an HTTPS domain via Caddy (automatic Let's Encrypt).
@@ -6275,7 +6540,7 @@ volumes:
 __SIC_EOF__
 chmod 644 "$R/npm-cache/docker-compose.yml"
 
-echo "files written to $R: 38"
+echo "files written to $R: 39"
 INSTALL
 bash /root/server-init-config/install/update.sh
 ````
@@ -6283,7 +6548,7 @@ bash /root/server-init-config/install/update.sh
 <a id="all"></a>
 ## Everything at once
 
-Tools, Docker Hub cache, monitoring and logging are installed first; the last line asks for the runner token and then sets up the npm and shared caches.
+Admin tools, host tools, Docker Hub cache, monitoring and logging are installed first; the last line asks for the runner token and then sets up the npm and shared caches.
 
 ````bash
 bash <<'INSTALL'
@@ -6378,6 +6643,87 @@ __SIC_EOF__
 chmod 755 "$R/install/lib.sh"
 
 install -d "$R/install"
+cat > "$R/install/admin-tools.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo.
+# Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
+# Also installs the shell aliases and, if there is none yet, the tmux config from the init. Safe to rerun.
+set -Eeuo pipefail
+# shellcheck source=install/lib.sh
+source "$(dirname "$0")/lib.sh"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, ...), aliases and tmux config"
+  exit 0
+fi
+require_root
+
+if command -v dnf >/dev/null 2>&1; then
+  dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
+  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
+        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl)
+  pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
+elif command -v apt-get >/dev/null 2>&1; then
+  apt-get update -q >/dev/null
+  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
+        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl)
+  pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
+else
+  die "no supported package manager"
+fi
+
+installed=()
+missing=()
+for p in "${PKGS[@]}"; do
+  if pkg_one "$p"; then
+    installed+=("$p")
+  else
+    missing+=("$p")
+  fi
+done
+
+if [[ -f /etc/default/sysstat ]]; then
+  sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat
+fi
+if systemctl cat sysstat >/dev/null 2>&1; then
+  systemctl enable --now sysstat >/dev/null 2>&1 || log "WARN: could not enable sysstat collection"
+fi
+
+cat > /etc/profile.d/ci-runner.sh <<'EOF'
+alias runner-logs='journalctl -u gitlab-runner -f'
+alias runner-errors='journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
+alias runner-jobs='docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
+alias runner-metrics='curl -s 127.0.0.1:9252/metrics | grep "^gitlab_runner_"'
+alias dfd='df -h / ; docker system df'
+alias dstats='docker stats --no-stream'
+EOF
+chmod 644 /etc/profile.d/ci-runner.sh
+restorecon_if /etc/profile.d/ci-runner.sh
+
+if [[ -f /root/.tmux.conf ]]; then
+  log "kept existing /root/.tmux.conf"
+else
+  cat > /root/.tmux.conf <<'EOF'
+set -g mouse on
+set -g history-limit 50000
+set -g base-index 1
+set -g status-right '#H  %H:%M'
+EOF
+  chmod 644 /root/.tmux.conf
+fi
+
+log "installed or already present (${#installed[@]}): ${installed[*]}"
+if (( ${#missing[@]} )); then
+  log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
+fi
+for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar; do
+  if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
+done
+log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh)"
+__SIC_EOF__
+chmod 755 "$R/install/admin-tools.sh"
+
+install -d "$R/install"
 cat > "$R/install/grafana-domain.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Publish Grafana on an HTTPS domain via Caddy (automatic Let's Encrypt).
@@ -9181,7 +9527,8 @@ volumes:
 __SIC_EOF__
 chmod 644 "$R/npm-cache/docker-compose.yml"
 
-echo "files written to $R: 38"
+echo "files written to $R: 39"
+bash "$R/install/admin-tools.sh" </dev/null
 bash "$R/install/host-tools.sh" </dev/null
 bash "$R/install/registry-cache.sh" </dev/null
 bash "$R/install/monitoring.sh" </dev/null
