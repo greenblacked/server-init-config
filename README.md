@@ -20,6 +20,7 @@ What a server built from this repo has:
 |---|---|
 | `cloud-init/rocky.yaml`, `cloud-init/debian.yaml` | user-data for new servers (generated, do not edit) |
 | `cloud-init/templates/` | sources for the cloud-init files |
+| `gitlab-runner/` | minimal standalone setup: Rocky init, `register.sh`, everyday commands and troubleshooting (see its README) |
 | `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
 | `scripts/` | host scripts: `health`, weekly cleanup, disk guard, image prewarm |
 | `systemd/` | services and timers for the scripts |
