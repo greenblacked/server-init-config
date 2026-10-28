@@ -129,10 +129,13 @@ check_system() {
     info "swap: none"
   fi
 
-  local ooms
-  ooms=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep -ciE 'out of memory|oom-kill' || true)
-  if (( ${ooms:-0} > 0 )); then
-    warn "${ooms} OOM events since boot (journalctl -k -b | grep -i oom)"
+  local kills ooms victims
+  # Count kills, not every related kernel line. One kill emits several matches.
+  kills=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep 'Out of memory: Killed process' || true)
+  if [[ -n "$kills" ]]; then
+    ooms=$(grep -c . <<<"$kills")
+    victims=$(sed -nE 's/.*Killed process [0-9]+ \(([^)]+)\).*/\1/p' <<<"$kills" | sort | uniq -c | awk '{printf "%s x%s, ", $2, $1}' | sed 's/, $//')
+    warn "${ooms} OOM kill(s) since boot${victims:+ (${victims})} (journalctl -k -b | grep 'Killed process')"
   else
     ok "no OOM kills since boot"
   fi
@@ -195,18 +198,31 @@ check_system() {
 check_security() {
   section "Security"
   if have getenforce; then
-    local mode denials
+    local mode denials raw rc=0
     mode=$(getenforce 2>/dev/null || true)
     case "$mode" in
       Enforcing) ok "SELinux enforcing" ;;
       Permissive) warn "SELinux permissive (logs only, does not block)" ;;
       *) warn "SELinux ${mode:-unknown}" ;;
     esac
-    denials=$(ausearch -m avc -ts today 2>/dev/null | grep -c 'avc:' || true)
-    if (( ${denials:-0} > 0 )); then
-      warn "${denials} SELinux denials today (ausearch -m avc -ts today)"
+    # ausearch treats a pipe on stdin as the audit log and blocks until it closes.
+    # health is often started over ssh, so force the on-disk logs and bound the query.
+    if ! have ausearch; then
+      skip "ausearch not installed"
     else
-      ok "no SELinux denials today"
+      raw=$(timeout 10 ausearch --input-logs -m avc -ts today </dev/null 2>/dev/null) || rc=$?
+      if (( rc == 124 )); then
+        skip "SELinux denial query timed out"
+      elif (( rc != 0 && rc != 1 )); then
+        skip "could not query SELinux denials (ausearch exit ${rc})"
+      else
+        denials=$(grep -c 'avc:' <<<"$raw" || true)
+        if (( ${denials:-0} > 0 )); then
+          warn "${denials} SELinux denials today (ausearch --input-logs -m avc -ts today)"
+        else
+          ok "no SELinux denials today"
+        fi
+      fi
     fi
   fi
 
