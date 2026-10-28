@@ -1,0 +1,31 @@
+groups:
+  - name: runner-host
+    rules:
+      - alert: GitLabRunnerDown
+        expr: up{job="gitlab-runner"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: GitLab Runner metrics endpoint is down
+      - alert: DiskSpaceHigh
+        expr: (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!="rootfs"}) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Root filesystem usage above 80%
+      - alert: MemoryHigh
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Memory usage above 90%
+      - alert: RunnerJobFailures
+        expr: sum(increase(gitlab_runner_failed_jobs_total[30m])) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 3 runner job failures in 30 minutes

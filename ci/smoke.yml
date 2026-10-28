@@ -1,0 +1,9 @@
+# Quick check that jobs land on the self-hosted ARM runner.
+# Replace arm64 with the tag set on your runner in the GitLab UI.
+arm_smoke:
+  image: alpine:3.20
+  tags: [arm64]
+  script:
+    - uname -m
+    - head -2 /etc/os-release
+    - nproc && free -m

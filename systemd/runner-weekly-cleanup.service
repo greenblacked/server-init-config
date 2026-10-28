@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly cleanup of GitLab Runner host
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/runner-weekly-cleanup.sh
+Nice=10
+IOSchedulingClass=idle

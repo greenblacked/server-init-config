@@ -1,0 +1,10 @@
+[Unit]
+Description=Pre-pull CI images daily and after boot
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

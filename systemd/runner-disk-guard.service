@@ -1,0 +1,7 @@
+[Unit]
+Description=Emergency disk cleanup when usage is high
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/runner-disk-guard.sh

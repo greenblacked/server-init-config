@@ -1,0 +1,14 @@
+name: registry-cache
+
+services:
+  registry:
+    image: registry:2.8.3
+    restart: unless-stopped
+    network_mode: host
+    mem_limit: 128m
+    volumes:
+      - ./config.yml:/etc/docker/registry/config.yml:ro
+      - registry-data:/var/lib/registry
+
+volumes:
+  registry-data:

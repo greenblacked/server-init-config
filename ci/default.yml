@@ -1,0 +1,13 @@
+# Defaults for projects running on the self-hosted runner.
+# npm registry (Verdaccio) and npm/Sonar cache dirs come from the runner environment,
+# so NPM_CONFIG_CACHE and registry settings are intentionally not set here.
+default:
+  image: $CI_IMAGE_NODE
+  tags: [arm64]
+  interruptible: true
+  retry: 0
+
+variables:
+  # Use a multi-arch index digest; check with:
+  #   docker buildx imagetools inspect node:22-alpine | grep -m1 '^Digest:'
+  CI_IMAGE_NODE: node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
