@@ -56,7 +56,12 @@ hours=$(( RETENTION_DAYS * 24 ))
 log "start (dry_run=${DRY_RUN}), disk before: $(disk)"
 
 if command -v docker >/dev/null 2>&1; then
-  running=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" | wc -l)
+  # Never guess the job count: if docker does not answer, a default of 0 would wipe the caches under running jobs.
+  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>&1); then
+    log "ERROR: docker is not responding, cleanup skipped: ${job_ids}"
+    exit 1
+  fi
+  running=$(wc -w <<<"$job_ids")
   if (( running > 0 )); then
     log "WARN: ${running} job container(s) running, skipping cache wipe"
   else
