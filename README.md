@@ -3,7 +3,7 @@
 Bootstrap and operations config for a self-hosted GitLab Runner on Hetzner Cloud.
 It's built for an ARM64 CAX11 running Rocky Linux 10. Debian 13 and x86_64 work too.
 
-The quickest path on Rocky is [`gitlab-runner/`](gitlab-runner/README.md): a base init, then every component installed with `setup.sh --<component>` or a self-contained copy-paste block from `gitlab-runner/COMMANDS.md`. The rest of this file describes the full layout and the step-by-step variant.
+The quickest path on Rocky is [`gitlab-runner/`](gitlab-runner/README.md): a base init, then every component installed with `setup.sh --<component>` or a self-contained copy-paste block from `gitlab-runner/COMMANDS.md`. Its README starts with [the plan: what to apply in which order](gitlab-runner/README.md#plan-what-to-apply-in-which-order). The rest of this file describes the full layout and the step-by-step variant.
 
 What a server built from this repo has:
 
