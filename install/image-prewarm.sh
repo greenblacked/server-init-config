@@ -44,6 +44,11 @@ read -rp "Paste the full path of ${first_repo} (copy icon in Container Registry)
 ref="${ref%%:*}"
 [[ "$ref" == registry.gitlab.com/*/"${first_repo}" ]] || die "expected registry.gitlab.com/.../${first_repo}, got: $ref"
 BASE="${ref%/"${first_repo}"}"
+# /etc/ci-prewarm.conf is sourced as root: accept only plain registry path characters.
+path_re='^[A-Za-z0-9._/-]+$'
+[[ "$BASE" =~ $path_re ]] || die "registry path contains unexpected characters: $BASE"
+read -ra repo_list <<<"$REPOS"
+for r in "${repo_list[@]}"; do [[ "$r" =~ $path_re ]] || die "REPOS entry contains unexpected characters: $r"; done
 
 read -rp "Deploy token username (gitlab+deploy-token-...): " dt_user
 read -rsp "Deploy token: " dt_token; echo
@@ -54,8 +59,8 @@ chmod 600 /root/.docker/config.json
 crane ls "$BASE/$first_repo" >/dev/null || die "cannot list $BASE/$first_repo with this token"
 
 {
-  echo "BASE=\"${BASE}\""
-  printf 'REPOS=(%s)\n' "$REPOS"
+  printf 'BASE=%q\n' "$BASE"
+  printf 'REPOS=(%s)\n' "$(printf '%q ' "${repo_list[@]}")"
 } > "$CONF"
 chmod 644 "$CONF"
 
