@@ -22,6 +22,10 @@ USAGE
 fi
 require_root
 command -v gitlab-runner >/dev/null || die "gitlab-runner not installed"
+systemctl is-active --quiet docker || die "docker is not running"
+if [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG"; then
+  die "a runner is already registered in ${CFG}. Remove it first: gitlab-runner unregister --all-runners"
+fi
 
 read -rsp "Runner authentication token (glrt-...): " token; echo
 [[ "$token" == glrt-* ]] || die "token must start with glrt-"
