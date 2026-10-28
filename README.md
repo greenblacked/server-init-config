@@ -3,6 +3,8 @@
 Bootstrap and operations config for a self-hosted GitLab Runner on Hetzner Cloud.
 It's built for an ARM64 CAX11 running Rocky Linux 10. Debian 13 and x86_64 work too.
 
+The quickest path on Rocky is [`gitlab-runner/`](gitlab-runner/README.md): paste one init into Hetzner, wait, and register the runner with `setup.sh --register`. The rest of this file describes the full layout and the step-by-step variant.
+
 What a server built from this repo has:
 
 - Docker Engine and GitLab Runner (docker executor), with job pickup tuned via `request_concurrency`
@@ -20,8 +22,8 @@ What a server built from this repo has:
 |---|---|
 | `cloud-init/rocky.yaml`, `cloud-init/debian.yaml` | user-data for new servers (generated, do not edit) |
 | `cloud-init/templates/` | sources for the cloud-init files |
-| `gitlab-runner/` | minimal standalone setup: Rocky init, `register.sh`, everyday commands and troubleshooting (see its README) |
-| `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
+| `gitlab-runner/` | **start here for a Rocky runner**: one init that installs everything, `setup.sh` for the optional parts, `update.sh`, everyday commands and troubleshooting (see its README) |
+| `tools/render-cloud-init.py` | renders templates, embeds repo files and the base bundle of `gitlab-runner/`; `--check` detects stale output |
 | `scripts/` | host scripts: `health`, weekly cleanup, disk guard, image prewarm |
 | `systemd/` | services and timers for the scripts |
 | `install/` | idempotent installers for optional components, run on the server from a clone; `update.sh` updates everything installed |
