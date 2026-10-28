@@ -25,7 +25,7 @@ cp -a "$REPO_ROOT/monitoring/prometheus" "$REPO_ROOT/monitoring/grafana" "$DIR/"
 
 if [[ ! -f "$DIR/.env" ]]; then
   pw=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)
-  sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
+  (umask 077; sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/monitoring/env.example" | grep -v '^#' > "$DIR/.env")
   unset pw
 fi
 chmod 600 "$DIR/.env"
