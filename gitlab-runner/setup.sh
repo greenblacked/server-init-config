@@ -8,13 +8,14 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 CFG=/etc/gitlab-runner/config.toml
 CURRENT=""
 
-COMPONENTS=(tools register registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux)
+COMPONENTS=(packages tools register registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux)
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 describe() {
   case "$1" in
+    packages)       echo "admin tools: htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, aliases" ;;
     tools)          echo "health, weekly cleanup, disk guard and their timers" ;;
     register)       echo "register the runner (asks for the glrt- token)" ;;
     registry-cache) echo "Docker Hub pull-through cache on 127.0.0.1:5000" ;;
@@ -30,6 +31,7 @@ describe() {
 
 script_for() {
   case "$1" in
+    packages)       echo "${ROOT}/install/admin-tools.sh" ;;
     tools)          echo "${ROOT}/install/host-tools.sh" ;;
     register)       echo "${HERE}/register.sh" ;;
     registry-cache) echo "${ROOT}/install/registry-cache.sh" ;;
@@ -55,6 +57,7 @@ is_component() {
 
 is_installed() {
   case "$1" in
+    packages)       command -v htop >/dev/null 2>&1 && [[ -f /etc/profile.d/ci-runner.sh ]] ;;
     tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh ]] ;;
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;
     registry-cache) [[ -f /opt/registry-cache/docker-compose.yml ]] ;;
@@ -74,7 +77,7 @@ usage() {
   cat <<USAGE
 Usage: $0 [--base] [--all] [--list] [--COMPONENT ...]
 
-  --base   tools + registry-cache + monitoring (no questions asked)
+  --base   packages + tools + registry-cache + monitoring (no questions asked)
   --all    --base + register + logging + npm-cache + shared-cache (asks for the runner token)
   --list   show what is installed and exit
 
@@ -150,8 +153,8 @@ main() {
   local c
   while (( $# )); do
     case "$1" in
-      --base) for c in tools registry-cache monitoring; do WANT[$c]=1; done ;;
-      --all)  for c in tools register registry-cache monitoring logging npm-cache shared-cache; do WANT[$c]=1; done ;;
+      --base) for c in packages tools registry-cache monitoring; do WANT[$c]=1; done ;;
+      --all)  for c in packages tools register registry-cache monitoring logging npm-cache shared-cache; do WANT[$c]=1; done ;;
       --list) LIST=1 ;;
       -h|--help) usage; exit 0 ;;
       --*)

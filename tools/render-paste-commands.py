@@ -66,8 +66,15 @@ PREWARM = ["install/image-prewarm.sh", "scripts/ci-image-prewarm.sh",
 EVERYTHING = ["install", "scripts", "systemd", "monitoring", "logging", "registry-cache", "npm-cache"]
 
 BLOCKS = [
-    Block("tools", "Tools: health, weekly cleanup, disk guard",
-          "Installs `/usr/local/bin/health`, the Monday 03:30 cleanup and the 85% disk guard with their timers.",
+    Block("packages", "Admin tools: htop, btop, ncdu, iotop and others",
+          "htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, "
+          "sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, plus the shell aliases and tmux config. "
+          "For a server created with an older init; safe to rerun.",
+          ["install/admin-tools.sh"], run=["install/admin-tools.sh"]),
+    Block("tools", "Health + cleanup: health, weekly cleanup, disk guard",
+          "Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, "
+          "runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency "
+          "cleanup every 30 minutes when the disk is 85% full. Ends with a dry run of the cleanup.",
           TOOLS, run=["install/host-tools.sh"]),
     Block("register", "Register the runner",
           "Asks for the `glrt-` token (GitLab: Settings > CI/CD > Runners > New runner). Change `DESCRIPTION` if you like.",
@@ -103,10 +110,10 @@ BLOCKS = [
           "Add `--dry-run` to the last line to preview, `--os` to upgrade packages too.",
           EVERYTHING, interactive=["bash {d}/install/update.sh"]),
     Block("all", "Everything at once",
-          "Tools, Docker Hub cache, monitoring and logging are installed first; the last line asks for the runner token "
+          "Admin tools, host tools, Docker Hub cache, monitoring and logging are installed first; the last line asks for the runner token "
           "and then sets up the npm and shared caches.",
           EVERYTHING,
-          run=["install/host-tools.sh", "install/registry-cache.sh", "install/monitoring.sh", "install/logging.sh"],
+          run=["install/admin-tools.sh", "install/host-tools.sh", "install/registry-cache.sh", "install/monitoring.sh", "install/logging.sh"],
           interactive=[("DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh && "
                         "bash {d}/install/npm-cache.sh && bash {d}/install/shared-cache.sh && health -q")]),
 ]
