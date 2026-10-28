@@ -438,7 +438,7 @@ update_registry_cache() {
 }
 
 update_npm_cache() {
-  local dir=/opt/npm-cache bridge cfg="${WORK}/npm-config.yaml"
+  local dir=/opt/npm-cache bridge cfg="${WORK}/npm-config.yaml" compose="${WORK}/npm-compose.yml"
   if [[ ! -f "${dir}/docker-compose.yml" ]]; then
     log "npm-cache: not installed, skipping"
     return 0
@@ -450,8 +450,8 @@ update_npm_cache() {
     return 0
   fi
   sed "s/172\.17\.0\.1:4873/${bridge}:4873/" "${REPO_ROOT}/npm-cache/config.yaml" > "$cfg"
-  stack_sync npm-cache "$dir" "$cfg" config.yaml \
-    "${REPO_ROOT}/npm-cache/docker-compose.yml" "http://${bridge}:4873/-/ping"
+  sed "s/172\.17\.0\.1:4873/${bridge}:4873/" "${REPO_ROOT}/npm-cache/docker-compose.yml" > "$compose"
+  stack_sync npm-cache "$dir" "$cfg" config.yaml "$compose" "http://${bridge}:4873/-/ping"
 }
 
 do_rollback() {

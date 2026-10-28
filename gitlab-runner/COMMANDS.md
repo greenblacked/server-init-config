@@ -3728,7 +3728,7 @@ require_runner_idle
 
 selinux_label_dir "$DIR"
 sed "s/172\.17\.0\.1:4873/${BRIDGE_IP}:4873/" "$REPO_ROOT/npm-cache/config.yaml" > "$DIR/config.yaml"
-cp -a "$REPO_ROOT/npm-cache/docker-compose.yml" "$DIR/"
+sed "s/172\.17\.0\.1:4873/${BRIDGE_IP}:4873/" "$REPO_ROOT/npm-cache/docker-compose.yml" > "$DIR/docker-compose.yml"
 restorecon_if -R "$DIR"
 
 cd "$DIR"
@@ -3737,6 +3737,9 @@ docker compose pull -q
 docker compose up -d
 for _ in $(seq 1 20); do curl -fsS "${REG}-/ping" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "verdaccio did not start"; }
+
+exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
+[[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
 backup "$CFG"
 runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
@@ -3807,6 +3810,10 @@ services:
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
+    # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
+    # and exposes the cache (access: $all) on every interface. install/npm-cache.sh and update.sh
+    # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
+    command: ["verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
     volumes:
       - ./config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio-storage:/verdaccio/storage
@@ -6032,7 +6039,7 @@ require_runner_idle
 
 selinux_label_dir "$DIR"
 sed "s/172\.17\.0\.1:4873/${BRIDGE_IP}:4873/" "$REPO_ROOT/npm-cache/config.yaml" > "$DIR/config.yaml"
-cp -a "$REPO_ROOT/npm-cache/docker-compose.yml" "$DIR/"
+sed "s/172\.17\.0\.1:4873/${BRIDGE_IP}:4873/" "$REPO_ROOT/npm-cache/docker-compose.yml" > "$DIR/docker-compose.yml"
 restorecon_if -R "$DIR"
 
 cd "$DIR"
@@ -6041,6 +6048,9 @@ docker compose pull -q
 docker compose up -d
 for _ in $(seq 1 20); do curl -fsS "${REG}-/ping" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "verdaccio did not start"; }
+
+exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
+[[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
 backup "$CFG"
 runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
@@ -6711,7 +6721,7 @@ update_registry_cache() {
 }
 
 update_npm_cache() {
-  local dir=/opt/npm-cache bridge cfg="${WORK}/npm-config.yaml"
+  local dir=/opt/npm-cache bridge cfg="${WORK}/npm-config.yaml" compose="${WORK}/npm-compose.yml"
   if [[ ! -f "${dir}/docker-compose.yml" ]]; then
     log "npm-cache: not installed, skipping"
     return 0
@@ -6723,8 +6733,8 @@ update_npm_cache() {
     return 0
   fi
   sed "s/172\.17\.0\.1:4873/${bridge}:4873/" "${REPO_ROOT}/npm-cache/config.yaml" > "$cfg"
-  stack_sync npm-cache "$dir" "$cfg" config.yaml \
-    "${REPO_ROOT}/npm-cache/docker-compose.yml" "http://${bridge}:4873/-/ping"
+  sed "s/172\.17\.0\.1:4873/${bridge}:4873/" "${REPO_ROOT}/npm-cache/docker-compose.yml" > "$compose"
+  stack_sync npm-cache "$dir" "$cfg" config.yaml "$compose" "http://${bridge}:4873/-/ping"
 }
 
 do_rollback() {
@@ -8778,6 +8788,10 @@ services:
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
+    # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
+    # and exposes the cache (access: $all) on every interface. install/npm-cache.sh and update.sh
+    # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
+    command: ["verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
     volumes:
       - ./config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio-storage:/verdaccio/storage
@@ -9477,7 +9491,7 @@ require_runner_idle
 
 selinux_label_dir "$DIR"
 sed "s/172\.17\.0\.1:4873/${BRIDGE_IP}:4873/" "$REPO_ROOT/npm-cache/config.yaml" > "$DIR/config.yaml"
-cp -a "$REPO_ROOT/npm-cache/docker-compose.yml" "$DIR/"
+sed "s/172\.17\.0\.1:4873/${BRIDGE_IP}:4873/" "$REPO_ROOT/npm-cache/docker-compose.yml" > "$DIR/docker-compose.yml"
 restorecon_if -R "$DIR"
 
 cd "$DIR"
@@ -9486,6 +9500,9 @@ docker compose pull -q
 docker compose up -d
 for _ in $(seq 1 20); do curl -fsS "${REG}-/ping" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "verdaccio did not start"; }
+
+exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
+[[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
 backup "$CFG"
 runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
@@ -10156,7 +10173,7 @@ update_registry_cache() {
 }
 
 update_npm_cache() {
-  local dir=/opt/npm-cache bridge cfg="${WORK}/npm-config.yaml"
+  local dir=/opt/npm-cache bridge cfg="${WORK}/npm-config.yaml" compose="${WORK}/npm-compose.yml"
   if [[ ! -f "${dir}/docker-compose.yml" ]]; then
     log "npm-cache: not installed, skipping"
     return 0
@@ -10168,8 +10185,8 @@ update_npm_cache() {
     return 0
   fi
   sed "s/172\.17\.0\.1:4873/${bridge}:4873/" "${REPO_ROOT}/npm-cache/config.yaml" > "$cfg"
-  stack_sync npm-cache "$dir" "$cfg" config.yaml \
-    "${REPO_ROOT}/npm-cache/docker-compose.yml" "http://${bridge}:4873/-/ping"
+  sed "s/172\.17\.0\.1:4873/${bridge}:4873/" "${REPO_ROOT}/npm-cache/docker-compose.yml" > "$compose"
+  stack_sync npm-cache "$dir" "$cfg" config.yaml "$compose" "http://${bridge}:4873/-/ping"
 }
 
 do_rollback() {
@@ -12223,6 +12240,10 @@ services:
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
+    # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
+    # and exposes the cache (access: $all) on every interface. install/npm-cache.sh and update.sh
+    # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
+    command: ["verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
     volumes:
       - ./config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio-storage:/verdaccio/storage
