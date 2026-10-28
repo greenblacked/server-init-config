@@ -28,7 +28,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"

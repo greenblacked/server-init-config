@@ -20,7 +20,7 @@ require_runner_idle
 install -d -m 1777 "$HOST_DIR" "$HOST_DIR/npm" "$HOST_DIR/sonar"
 if selinux_on; then
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  semanage fcontext -l | grep -q "^${HOST_DIR}(/\.\*)?" || semanage fcontext -a -t container_file_t "${HOST_DIR}(/.*)?"
+  grep -q "^${HOST_DIR}(/\.\*)?" <<<"$(semanage fcontext -l)" || semanage fcontext -a -t container_file_t "${HOST_DIR}(/.*)?"
   restorecon -R "$HOST_DIR"
 fi
 

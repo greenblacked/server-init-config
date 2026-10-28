@@ -155,7 +155,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -610,7 +611,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -873,7 +875,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -2082,7 +2085,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -2262,7 +2266,7 @@ sleep 3
 
 gitlab-runner verify 2>&1 | grep -E 'is valid|is not valid' || true
 grep -nE '^concurrent|^listen_address|request_concurrency|executor' "$CFG"
-if journalctl -u gitlab-runner --since "-1min" --no-pager | grep -qi bottleneck; then
+if grep -qi bottleneck <<<"$(journalctl -u gitlab-runner --since "-1min" --no-pager)"; then
   log "WARN: runner still reports a request bottleneck"
 else
   log "OK: runner registered"
@@ -2317,7 +2321,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -2609,7 +2614,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -3082,7 +3088,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -3569,7 +3576,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -3855,7 +3863,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -4004,7 +4013,7 @@ require_runner_idle
 install -d -m 1777 "$HOST_DIR" "$HOST_DIR/npm" "$HOST_DIR/sonar"
 if selinux_on; then
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  semanage fcontext -l | grep -q "^${HOST_DIR}(/\.\*)?" || semanage fcontext -a -t container_file_t "${HOST_DIR}(/.*)?"
+  grep -q "^${HOST_DIR}(/\.\*)?" <<<"$(semanage fcontext -l)" || semanage fcontext -a -t container_file_t "${HOST_DIR}(/.*)?"
   restorecon -R "$HOST_DIR"
 fi
 
@@ -4074,7 +4083,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -4408,7 +4418,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -4700,7 +4711,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -4905,7 +4917,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -5376,7 +5389,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -6099,7 +6113,7 @@ sleep 3
 
 gitlab-runner verify 2>&1 | grep -E 'is valid|is not valid' || true
 grep -nE '^concurrent|^listen_address|request_concurrency|executor' "$CFG"
-if journalctl -u gitlab-runner --since "-1min" --no-pager | grep -qi bottleneck; then
+if grep -qi bottleneck <<<"$(journalctl -u gitlab-runner --since "-1min" --no-pager)"; then
   log "WARN: runner still reports a request bottleneck"
 else
   log "OK: runner registered"
@@ -6232,7 +6246,7 @@ require_runner_idle
 install -d -m 1777 "$HOST_DIR" "$HOST_DIR/npm" "$HOST_DIR/sonar"
 if selinux_on; then
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  semanage fcontext -l | grep -q "^${HOST_DIR}(/\.\*)?" || semanage fcontext -a -t container_file_t "${HOST_DIR}(/.*)?"
+  grep -q "^${HOST_DIR}(/\.\*)?" <<<"$(semanage fcontext -l)" || semanage fcontext -a -t container_file_t "${HOST_DIR}(/.*)?"
   restorecon -R "$HOST_DIR"
 fi
 
@@ -8820,7 +8834,8 @@ selinux_label_dir() {
   install -d -m 0755 "$dir"
   selinux_on || return 0
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  if ! semanage fcontext -l | grep -q "^${dir}(/\.\*)?"; then
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
     semanage fcontext -a -t container_file_t "${dir}(/.*)?"
   fi
   restorecon -R "$dir"
@@ -9543,7 +9558,7 @@ sleep 3
 
 gitlab-runner verify 2>&1 | grep -E 'is valid|is not valid' || true
 grep -nE '^concurrent|^listen_address|request_concurrency|executor' "$CFG"
-if journalctl -u gitlab-runner --since "-1min" --no-pager | grep -qi bottleneck; then
+if grep -qi bottleneck <<<"$(journalctl -u gitlab-runner --since "-1min" --no-pager)"; then
   log "WARN: runner still reports a request bottleneck"
 else
   log "OK: runner registered"
@@ -9676,7 +9691,7 @@ require_runner_idle
 install -d -m 1777 "$HOST_DIR" "$HOST_DIR/npm" "$HOST_DIR/sonar"
 if selinux_on; then
   command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
-  semanage fcontext -l | grep -q "^${HOST_DIR}(/\.\*)?" || semanage fcontext -a -t container_file_t "${HOST_DIR}(/.*)?"
+  grep -q "^${HOST_DIR}(/\.\*)?" <<<"$(semanage fcontext -l)" || semanage fcontext -a -t container_file_t "${HOST_DIR}(/.*)?"
   restorecon -R "$HOST_DIR"
 fi
 
