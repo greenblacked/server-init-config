@@ -76,7 +76,7 @@ What a server built from this repo has:
 
 ## Update a server
 
-`install/update.sh` brings a running server to the state of the repo checkout. It only touches components that are installed: host tools, monitoring, logging, registry cache, npm cache. It never touches secrets (passwords, tokens, `config.toml`), the runner registration or `daemon.json`. In the monitoring and logging `.env` files it only sets `MON_UID` and `MON_GID` (logging also `DOCKER_GID`) and keeps the file root-only at mode `600`.
+`install/update.sh` brings a running server to the state of the repo checkout. It only touches components that are installed: host tools, monitoring, logging, registry cache, npm cache. It never touches secrets (passwords, tokens, `config.toml`), the runner registration or `daemon.json`. In the monitoring and logging `.env` files it only sets `MON_UID` and `MON_GID` (logging also `DOCKER_GID`) and keeps the file root-only at mode `600`. For logging it also creates or removes `/opt/logging/docker-compose.override.yml` (extra `group_add` for the journal group, only when its gid differs from the docker gid).
 
 ```bash
 # 1. get the new repo state onto the server (scp copy, or a git clone there)
@@ -140,6 +140,7 @@ The cloud-init output stays under Hetzner's 32 KiB user-data limit (the renderer
 - Users: you log in as the admin `ops`, by key, with sudo. `gitlab-runner` and `monitoring` are service accounts without login; the runner service and the monitoring and logging containers run as them. Nobody you log in as is in the `docker` group, which is root-equivalent. Details and the reasoning are in [`gitlab-runner/README.md`](gitlab-runner/README.md#users).
 - `/etc/gitlab-runner/config.toml` (owned by `gitlab-runner`) and `/root/.docker/config.json` contain credentials and are kept at mode `600`.
 - Job containers are not privileged. Enable `privileged = true` only for trusted projects that need Docker-in-Docker.
+- Verdaccio binds to the `docker0` bridge IP. If that IP changes (`bip` in `daemon.json`), the container restart-loops until you rerun `install/update.sh` or `install/npm-cache.sh`.
 - `/srv/ci-cache` and the npm cache are shared by every project on the runner. Don't attach untrusted projects or forks.
 - All monitoring and cache ports listen on `127.0.0.1` or the `docker0` bridge. Reach Grafana and Prometheus through an SSH tunnel: `ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ops@SERVER_IP`.
 

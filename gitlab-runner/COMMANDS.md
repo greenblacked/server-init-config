@@ -454,9 +454,16 @@ EOF
       restart=1
     fi
     if (( restart )); then
-      jobs=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null || true; } | wc -l)
-      if (( jobs > 0 )); then
-        log "WARN: ${jobs} CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
+      main_pid=$(systemctl show -p MainPID --value gitlab-runner)
+      if [[ "${main_pid:-0}" == 0 ]]; then
+        # Stopped service: nothing to interrupt, and the idle gate would only block the start.
+        systemctl start gitlab-runner
+        sleep 3
+      elif ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+        # A docker failure is not "0 jobs": restarting could kill running CI jobs.
+        log "WARN: cannot confirm that no CI job is running (docker does not answer), gitlab-runner not restarted; check with: docker ps --filter label=com.gitlab.gitlab-runner.managed=true, then: systemctl restart gitlab-runner"
+      elif [[ -n "$job_ids" ]]; then
+        log "WARN: $(wc -w <<<"$job_ids") CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
       else
         systemctl restart gitlab-runner
         sleep 3
@@ -1932,8 +1939,11 @@ log "start (dry_run=${DRY_RUN}), disk before: $(disk)"
 
 if command -v docker >/dev/null 2>&1; then
   # Never guess the job count: if docker does not answer, a default of 0 would wipe the caches under running jobs.
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>&1); then
-    log "ERROR: docker is not responding, cleanup skipped: ${job_ids}"
+  # stderr goes to a temp file so a docker WARNING is never counted as a running job.
+  ps_err=$(mktemp)
+  trap 'rm -f "$ps_err"' EXIT
+  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+    log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
   running=$(wc -w <<<"$job_ids")
@@ -3578,7 +3588,7 @@ INSTALL
 <a id="npm-cache"></a>
 ## npm cache (Verdaccio)
 
-Needs a registered runner. Points `npm` and `yarn` in jobs at the cache. Run it while no jobs are running.
+Needs a registered runner. Points `npm` and `yarn` in jobs at the cache. Run it while no jobs are running. Verdaccio binds to the docker0 IP: if it changes (`bip` in daemon.json), rerun this block or `install/update.sh`.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -4315,7 +4325,9 @@ if ! command -v crane >/dev/null; then
   restorecon_if /usr/local/bin/crane
 fi
 
-first_repo="${REPOS%% *}"
+read -ra repo_list <<<"$REPOS"
+[[ ${#repo_list[@]} -gt 0 ]] || die "REPOS is empty"
+first_repo="${repo_list[0]}"
 read -rp "Paste the full path of ${first_repo} (copy icon in Container Registry): " ref
 ref="${ref%%:*}"
 [[ "$ref" == registry.gitlab.com/*/"${first_repo}" ]] || die "expected registry.gitlab.com/.../${first_repo}, got: $ref"
@@ -4323,7 +4335,6 @@ BASE="${ref%/"${first_repo}"}"
 # /etc/ci-prewarm.conf is sourced as root: accept only plain registry path characters.
 path_re='^[A-Za-z0-9._/-]+$'
 [[ "$BASE" =~ $path_re ]] || die "registry path contains unexpected characters: $BASE"
-read -ra repo_list <<<"$REPOS"
 for r in "${repo_list[@]}"; do [[ "$r" =~ $path_re ]] || die "REPOS entry contains unexpected characters: $r"; done
 
 read -rp "Deploy token username (gitlab+deploy-token-...): " dt_user
@@ -5294,9 +5305,16 @@ EOF
       restart=1
     fi
     if (( restart )); then
-      jobs=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null || true; } | wc -l)
-      if (( jobs > 0 )); then
-        log "WARN: ${jobs} CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
+      main_pid=$(systemctl show -p MainPID --value gitlab-runner)
+      if [[ "${main_pid:-0}" == 0 ]]; then
+        # Stopped service: nothing to interrupt, and the idle gate would only block the start.
+        systemctl start gitlab-runner
+        sleep 3
+      elif ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+        # A docker failure is not "0 jobs": restarting could kill running CI jobs.
+        log "WARN: cannot confirm that no CI job is running (docker does not answer), gitlab-runner not restarted; check with: docker ps --filter label=com.gitlab.gitlab-runner.managed=true, then: systemctl restart gitlab-runner"
+      elif [[ -n "$job_ids" ]]; then
+        log "WARN: $(wc -w <<<"$job_ids") CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
       else
         systemctl restart gitlab-runner
         sleep 3
@@ -5863,7 +5881,9 @@ if ! command -v crane >/dev/null; then
   restorecon_if /usr/local/bin/crane
 fi
 
-first_repo="${REPOS%% *}"
+read -ra repo_list <<<"$REPOS"
+[[ ${#repo_list[@]} -gt 0 ]] || die "REPOS is empty"
+first_repo="${repo_list[0]}"
 read -rp "Paste the full path of ${first_repo} (copy icon in Container Registry): " ref
 ref="${ref%%:*}"
 [[ "$ref" == registry.gitlab.com/*/"${first_repo}" ]] || die "expected registry.gitlab.com/.../${first_repo}, got: $ref"
@@ -5871,7 +5891,6 @@ BASE="${ref%/"${first_repo}"}"
 # /etc/ci-prewarm.conf is sourced as root: accept only plain registry path characters.
 path_re='^[A-Za-z0-9._/-]+$'
 [[ "$BASE" =~ $path_re ]] || die "registry path contains unexpected characters: $BASE"
-read -ra repo_list <<<"$REPOS"
 for r in "${repo_list[@]}"; do [[ "$r" =~ $path_re ]] || die "REPOS entry contains unexpected characters: $r"; done
 
 read -rp "Deploy token username (gitlab+deploy-token-...): " dt_user
@@ -6371,7 +6390,8 @@ cat > "$R/install/update.sh" <<'__SIC_EOF__'
 # Bring a server built from this repo up to the current repo state, for the installed components only.
 # Syncs scripts, systemd units and stack configs. Never touches secrets (passwords, config.toml, tokens),
 # the runner registration, daemon.json or SSH settings. In the stacks' .env it only sets MON_UID and MON_GID
-# (logging also DOCKER_GID) and keeps the file root-only at mode 600.
+# (logging also DOCKER_GID) and keeps the file root-only at mode 600. For logging it also creates or removes
+# /opt/logging/docker-compose.override.yml (extra group_add for the journal gid, only when it differs from docker's).
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -7104,9 +7124,16 @@ EOF
       restart=1
     fi
     if (( restart )); then
-      jobs=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null || true; } | wc -l)
-      if (( jobs > 0 )); then
-        log "WARN: ${jobs} CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
+      main_pid=$(systemctl show -p MainPID --value gitlab-runner)
+      if [[ "${main_pid:-0}" == 0 ]]; then
+        # Stopped service: nothing to interrupt, and the idle gate would only block the start.
+        systemctl start gitlab-runner
+        sleep 3
+      elif ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+        # A docker failure is not "0 jobs": restarting could kill running CI jobs.
+        log "WARN: cannot confirm that no CI job is running (docker does not answer), gitlab-runner not restarted; check with: docker ps --filter label=com.gitlab.gitlab-runner.managed=true, then: systemctl restart gitlab-runner"
+      elif [[ -n "$job_ids" ]]; then
+        log "WARN: $(wc -w <<<"$job_ids") CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
       else
         systemctl restart gitlab-runner
         sleep 3
@@ -8175,8 +8202,11 @@ log "start (dry_run=${DRY_RUN}), disk before: $(disk)"
 
 if command -v docker >/dev/null 2>&1; then
   # Never guess the job count: if docker does not answer, a default of 0 would wipe the caches under running jobs.
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>&1); then
-    log "ERROR: docker is not responding, cleanup skipped: ${job_ids}"
+  # stderr goes to a temp file so a docker WARNING is never counted as a running job.
+  ps_err=$(mktemp)
+  trap 'rm -f "$ps_err"' EXIT
+  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+    log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
   running=$(wc -w <<<"$job_ids")
@@ -9332,7 +9362,9 @@ if ! command -v crane >/dev/null; then
   restorecon_if /usr/local/bin/crane
 fi
 
-first_repo="${REPOS%% *}"
+read -ra repo_list <<<"$REPOS"
+[[ ${#repo_list[@]} -gt 0 ]] || die "REPOS is empty"
+first_repo="${repo_list[0]}"
 read -rp "Paste the full path of ${first_repo} (copy icon in Container Registry): " ref
 ref="${ref%%:*}"
 [[ "$ref" == registry.gitlab.com/*/"${first_repo}" ]] || die "expected registry.gitlab.com/.../${first_repo}, got: $ref"
@@ -9340,7 +9372,6 @@ BASE="${ref%/"${first_repo}"}"
 # /etc/ci-prewarm.conf is sourced as root: accept only plain registry path characters.
 path_re='^[A-Za-z0-9._/-]+$'
 [[ "$BASE" =~ $path_re ]] || die "registry path contains unexpected characters: $BASE"
-read -ra repo_list <<<"$REPOS"
 for r in "${repo_list[@]}"; do [[ "$r" =~ $path_re ]] || die "REPOS entry contains unexpected characters: $r"; done
 
 read -rp "Deploy token username (gitlab+deploy-token-...): " dt_user
@@ -9840,7 +9871,8 @@ cat > "$R/install/update.sh" <<'__SIC_EOF__'
 # Bring a server built from this repo up to the current repo state, for the installed components only.
 # Syncs scripts, systemd units and stack configs. Never touches secrets (passwords, config.toml, tokens),
 # the runner registration, daemon.json or SSH settings. In the stacks' .env it only sets MON_UID and MON_GID
-# (logging also DOCKER_GID) and keeps the file root-only at mode 600.
+# (logging also DOCKER_GID) and keeps the file root-only at mode 600. For logging it also creates or removes
+# /opt/logging/docker-compose.override.yml (extra group_add for the journal gid, only when it differs from docker's).
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -10573,9 +10605,16 @@ EOF
       restart=1
     fi
     if (( restart )); then
-      jobs=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null || true; } | wc -l)
-      if (( jobs > 0 )); then
-        log "WARN: ${jobs} CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
+      main_pid=$(systemctl show -p MainPID --value gitlab-runner)
+      if [[ "${main_pid:-0}" == 0 ]]; then
+        # Stopped service: nothing to interrupt, and the idle gate would only block the start.
+        systemctl start gitlab-runner
+        sleep 3
+      elif ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+        # A docker failure is not "0 jobs": restarting could kill running CI jobs.
+        log "WARN: cannot confirm that no CI job is running (docker does not answer), gitlab-runner not restarted; check with: docker ps --filter label=com.gitlab.gitlab-runner.managed=true, then: systemctl restart gitlab-runner"
+      elif [[ -n "$job_ids" ]]; then
+        log "WARN: $(wc -w <<<"$job_ids") CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
       else
         systemctl restart gitlab-runner
         sleep 3
@@ -11644,8 +11683,11 @@ log "start (dry_run=${DRY_RUN}), disk before: $(disk)"
 
 if command -v docker >/dev/null 2>&1; then
   # Never guess the job count: if docker does not answer, a default of 0 would wipe the caches under running jobs.
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>&1); then
-    log "ERROR: docker is not responding, cleanup skipped: ${job_ids}"
+  # stderr goes to a temp file so a docker WARNING is never counted as a running job.
+  ps_err=$(mktemp)
+  trap 'rm -f "$ps_err"' EXIT
+  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+    log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
   running=$(wc -w <<<"$job_ids")

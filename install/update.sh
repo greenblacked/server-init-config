@@ -2,7 +2,8 @@
 # Bring a server built from this repo up to the current repo state, for the installed components only.
 # Syncs scripts, systemd units and stack configs. Never touches secrets (passwords, config.toml, tokens),
 # the runner registration, daemon.json or SSH settings. In the stacks' .env it only sets MON_UID and MON_GID
-# (logging also DOCKER_GID) and keeps the file root-only at mode 600.
+# (logging also DOCKER_GID) and keeps the file root-only at mode 600. For logging it also creates or removes
+# /opt/logging/docker-compose.override.yml (extra group_add for the journal gid, only when it differs from docker's).
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
