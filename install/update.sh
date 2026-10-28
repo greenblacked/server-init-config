@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Bring a server built from this repo up to the current repo state, for the installed components only.
-# Syncs scripts, systemd units and stack configs. Never touches secrets (.env, config.toml, tokens),
-# the runner registration, daemon.json or SSH settings.
+# Syncs scripts, systemd units and stack configs. Never touches secrets (passwords, config.toml, tokens),
+# the runner registration, daemon.json or SSH settings. In the stacks' .env it only sets MON_UID and MON_GID
+# (logging also DOCKER_GID) and keeps the file root-only at mode 600.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
