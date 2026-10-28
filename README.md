@@ -76,7 +76,7 @@ What a server built from this repo has:
 
 ## Update a server
 
-`install/update.sh` brings a running server to the state of the repo checkout. It only touches components that are installed: host tools, monitoring, logging, registry cache, npm cache. It never touches secrets (`.env`, `config.toml`, tokens), the runner registration or `daemon.json`.
+`install/update.sh` brings a running server to the state of the repo checkout. It only touches components that are installed: host tools, monitoring, logging, registry cache, npm cache. It never touches secrets (passwords, tokens, `config.toml`), the runner registration or `daemon.json`. In the monitoring and logging `.env` files it only sets `MON_UID` and `MON_GID` (logging also `DOCKER_GID`) and keeps the file root-only at mode `600`.
 
 ```bash
 # 1. get the new repo state onto the server (scp copy, or a git clone there)

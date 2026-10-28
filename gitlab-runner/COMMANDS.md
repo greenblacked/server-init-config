@@ -28,7 +28,7 @@ whole block again, the installers are safe to rerun or tell you the component is
 <a id="base"></a>
 ## Base host: Docker, GitLab Runner, tools
 
-The same steps as `cloud-init-rocky.yaml`, for a Rocky server created without it. Skip this if you used the init. Paste it as root (that is how a server without the init is reached). It creates the `ops` admin; root SSH stays open until the [Lock root SSH](#lock-root) block.
+The same steps as `cloud-init-rocky.yaml`, for a Rocky server created without it. Skip this if you used the init. Paste it as root (that is how a server without the init is reached). It does not create the `ops` admin: paste the [Users](#users) block next. Root SSH stays open until the [Lock root SSH](#lock-root) block.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -6369,8 +6369,9 @@ install -d "$R/install"
 cat > "$R/install/update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Bring a server built from this repo up to the current repo state, for the installed components only.
-# Syncs scripts, systemd units and stack configs. Never touches secrets (.env, config.toml, tokens),
-# the runner registration, daemon.json or SSH settings.
+# Syncs scripts, systemd units and stack configs. Never touches secrets (passwords, config.toml, tokens),
+# the runner registration, daemon.json or SSH settings. In the stacks' .env it only sets MON_UID and MON_GID
+# (logging also DOCKER_GID) and keeps the file root-only at mode 600.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -9837,8 +9838,9 @@ install -d "$R/install"
 cat > "$R/install/update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Bring a server built from this repo up to the current repo state, for the installed components only.
-# Syncs scripts, systemd units and stack configs. Never touches secrets (.env, config.toml, tokens),
-# the runner registration, daemon.json or SSH settings.
+# Syncs scripts, systemd units and stack configs. Never touches secrets (passwords, config.toml, tokens),
+# the runner registration, daemon.json or SSH settings. In the stacks' .env it only sets MON_UID and MON_GID
+# (logging also DOCKER_GID) and keeps the file root-only at mode 600.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
