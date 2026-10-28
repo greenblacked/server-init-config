@@ -25,6 +25,7 @@ Usage: $0 [--dry-run] [--pull] [--os] [--rollback]
 Updates what is installed on this server to the state of this repo checkout:
   host tools     health, cleanup, disk guard (+ prewarm if configured) and their systemd units
   monitoring     /opt/monitoring (Prometheus, Grafana, node_exporter, Caddy override if present)
+  logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
   npm-cache      /opt/npm-cache
 Components that are not installed are skipped.
@@ -262,6 +263,9 @@ update_monitoring() {
       - targets: ["127.0.0.1:5001"]
 YAML
   fi
+  if [[ -f /opt/logging/docker-compose.yml ]] && ! grep -q 'job_name: loki' "${stage}/prometheus.yml"; then
+    prom_jobs_logging >> "${stage}/prometheus.yml"
+  fi
   chmod -R a+rX "$stage"
 
   if command -v jq >/dev/null 2>&1; then
@@ -362,6 +366,56 @@ stack_sync() {
   log "${name}: done"
 }
 
+# Loki + Alloy. Restarting them does not affect CI jobs, so no idle check.
+update_logging() {
+  local dir=/opt/logging ds=/opt/monitoring/grafana/provisioning/datasources/loki.yml f changed=0 ds_changed=0 ok=0
+  if [[ ! -f "${dir}/docker-compose.yml" ]]; then
+    log "logging: not installed, skipping"
+    return 0
+  fi
+  for f in loki.yaml config.alloy docker-compose.yml; do
+    if sync_file "${REPO_ROOT}/logging/${f}" "${dir}/${f}" 0644 inplace; then
+      changed=1
+      CHANGED+=("logging/${f}")
+    fi
+  done
+  if [[ -f /opt/monitoring/docker-compose.yml ]] && sync_file "${REPO_ROOT}/logging/grafana-datasource.yml" "$ds" 0644 inplace; then
+    ds_changed=1
+    CHANGED+=("logging/grafana-datasource.yml")
+  fi
+  if (( DRYRUN )); then
+    return 0
+  fi
+
+  if (( changed )); then
+    if ! (cd "$dir" && docker compose config -q); then
+      restore_files
+      die "logging: compose config invalid, files restored"
+    fi
+    (cd "$dir" && docker compose pull -q && docker compose up -d --force-recreate)
+  else
+    (cd "$dir" && docker compose up -d)
+  fi
+  for _ in $(seq 1 45); do
+    if wait_url http://127.0.0.1:3100/ready 1 && wait_url http://127.0.0.1:12345/-/ready 1; then
+      ok=1
+      break
+    fi
+  done
+  if (( ! ok )); then
+    (cd "$dir" && docker compose logs --tail 30) || true
+    if (( changed )); then
+      restore_files
+      (cd "$dir" && docker compose up -d --force-recreate) || true
+    fi
+    die "logging: Loki or Alloy not ready"
+  fi
+  if (( ds_changed )); then
+    (cd /opt/monitoring && docker compose restart grafana >/dev/null)
+  fi
+  log "logging: done"
+}
+
 update_registry_cache() {
   local dir=/opt/registry-cache
   if [[ ! -f "${dir}/docker-compose.yml" ]]; then
@@ -401,6 +455,9 @@ do_rollback() {
   if command -v docker >/dev/null 2>&1; then
     if [[ -f /opt/monitoring/docker-compose.yml ]]; then
       (cd /opt/monitoring && docker compose up -d --force-recreate)
+    fi
+    if [[ -f /opt/logging/docker-compose.yml ]]; then
+      (cd /opt/logging && docker compose up -d --force-recreate)
     fi
     if need_idle "stack-recreate"; then
       if [[ -f /opt/registry-cache/docker-compose.yml ]]; then
@@ -471,6 +528,7 @@ main() {
   update_host_tools
   if command -v docker >/dev/null 2>&1; then
     update_monitoring
+    update_logging
     update_registry_cache
     update_npm_cache
   else

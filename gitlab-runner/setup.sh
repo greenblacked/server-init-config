@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One entry point for the runner host: installs the components of this repo in the right order.
-# Run as root on the server, from a full copy of the repo (cloud-init puts it in /opt/server-init-config).
+# Run as root on the server, from a full copy of the repo (for example /root/server-init-config).
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +8,7 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 CFG=/etc/gitlab-runner/config.toml
 CURRENT=""
 
-COMPONENTS=(tools register registry-cache monitoring npm-cache shared-cache prewarm grafana-domain selinux)
+COMPONENTS=(tools register registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux)
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -19,6 +19,7 @@ describe() {
     register)       echo "register the runner (asks for the glrt- token)" ;;
     registry-cache) echo "Docker Hub pull-through cache on 127.0.0.1:5000" ;;
     monitoring)     echo "Prometheus, node_exporter, Grafana (127.0.0.1 only)" ;;
+    logging)        echo "Loki + Grafana Alloy: container logs and the journal in Grafana" ;;
     npm-cache)      echo "Verdaccio npm cache for CI jobs" ;;
     shared-cache)   echo "shared /srv/ci-cache for npm and Sonar, mounted into jobs" ;;
     prewarm)        echo "daily pre-pull of CI images (asks for a deploy token)" ;;
@@ -33,6 +34,7 @@ script_for() {
     register)       echo "${HERE}/register.sh" ;;
     registry-cache) echo "${ROOT}/install/registry-cache.sh" ;;
     monitoring)     echo "${ROOT}/install/monitoring.sh" ;;
+    logging)        echo "${ROOT}/install/logging.sh" ;;
     npm-cache)      echo "${ROOT}/install/npm-cache.sh" ;;
     shared-cache)   echo "${ROOT}/install/shared-cache.sh" ;;
     prewarm)        echo "${ROOT}/install/image-prewarm.sh" ;;
@@ -57,6 +59,7 @@ is_installed() {
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;
     registry-cache) [[ -f /opt/registry-cache/docker-compose.yml ]] ;;
     monitoring)     [[ -f /opt/monitoring/docker-compose.yml ]] ;;
+    logging)        [[ -f /opt/logging/docker-compose.yml ]] ;;
     npm-cache)      [[ -f /opt/npm-cache/docker-compose.yml ]] ;;
     shared-cache)   [[ -f "$CFG" ]] && grep -q '/srv/ci-cache:/ci-cache' "$CFG" ;;
     prewarm)        [[ -f /etc/ci-prewarm.conf ]] ;;
@@ -71,8 +74,8 @@ usage() {
   cat <<USAGE
 Usage: $0 [--base] [--all] [--list] [--COMPONENT ...]
 
-  --base   tools + registry-cache + monitoring (no questions asked; cloud-init runs this on first boot)
-  --all    --base + register + npm-cache + shared-cache (asks for the runner token)
+  --base   tools + registry-cache + monitoring (no questions asked)
+  --all    --base + register + logging + npm-cache + shared-cache (asks for the runner token)
   --list   show what is installed and exit
 
 Components, installed in this order whatever the order of the flags:
@@ -133,7 +136,7 @@ run_component() {
   CURRENT="$name"
   local script
   script="$(script_for "$name")"
-  [[ -f "$script" ]] || die "${name}: ${script} is missing. The copy made by cloud-init holds only the base set; copy the full repository (scp -r or git clone) and run setup.sh from there."
+  [[ -f "$script" ]] || die "${name}: ${script} is missing, copy the full repository again"
   log "=== ${name}: $(describe "$name") ==="
   bash "$script"
   log "${name}: done"
@@ -148,7 +151,7 @@ main() {
   while (( $# )); do
     case "$1" in
       --base) for c in tools registry-cache monitoring; do WANT[$c]=1; done ;;
-      --all)  for c in tools register registry-cache monitoring npm-cache shared-cache; do WANT[$c]=1; done ;;
+      --all)  for c in tools register registry-cache monitoring logging npm-cache shared-cache; do WANT[$c]=1; done ;;
       --list) LIST=1 ;;
       -h|--help) usage; exit 0 ;;
       --*)
