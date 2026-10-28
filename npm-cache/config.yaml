@@ -1,0 +1,38 @@
+storage: /verdaccio/storage/data
+plugins: /verdaccio/plugins
+
+listen:
+  - 172.17.0.1:4873
+
+auth:
+  htpasswd:
+    file: /verdaccio/storage/htpasswd
+    max_users: -1
+
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+    timeout: 60s
+    maxage: 30m
+    cache: true
+
+packages:
+  '@*/*':
+    access: $all
+    publish: $authenticated
+    proxy: npmjs
+  '**':
+    access: $all
+    publish: $authenticated
+    proxy: npmjs
+
+server:
+  keepAliveTimeout: 60
+
+web:
+  enable: false
+
+log:
+  type: stdout
+  format: pretty
+  level: warn

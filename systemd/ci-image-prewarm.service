@@ -1,0 +1,10 @@
+[Unit]
+Description=Pre-pull CI images from GitLab Registry
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ci-image-prewarm.sh
+Nice=10
+IOSchedulingClass=idle

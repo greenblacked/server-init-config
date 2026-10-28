@@ -1,0 +1,9 @@
+# Never commit secrets or generated runtime files
+.env
+*.env
+!monitoring/env.example
+*.bak.*
+config.toml
+*.log
+__pycache__/
+.DS_Store

@@ -1,0 +1,14 @@
+name: npm-cache
+
+services:
+  verdaccio:
+    image: verdaccio/verdaccio:6.1.2
+    restart: unless-stopped
+    network_mode: host
+    mem_limit: 256m
+    volumes:
+      - ./config.yaml:/verdaccio/conf/config.yaml:ro
+      - verdaccio-storage:/verdaccio/storage
+
+volumes:
+  verdaccio-storage:

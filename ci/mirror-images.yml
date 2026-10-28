@@ -1,0 +1,17 @@
+# Mirrors upstream images into this project's registry keeping all architectures (crane copy).
+# Set the tags below to the ones your pipelines use; keep Playwright in sync with @playwright/test.
+mirror_images:
+  image:
+    name: gcr.io/go-containerregistry/crane:debug
+    entrypoint: [""]
+  tags: [arm64]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - crane auth login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD"
+    - crane copy docker.io/library/alpine:3.20 "$CI_REGISTRY_IMAGE/mirror/alpine:3.20"
+    - crane copy docker.io/library/node:22-alpine "$CI_REGISTRY_IMAGE/mirror/node:22-alpine"
+    - crane copy mcr.microsoft.com/playwright:v1.49.1-noble "$CI_REGISTRY_IMAGE/mirror/playwright:v1.49.1-noble"
+    - crane copy docker.io/sonarsource/sonar-scanner-cli:11 "$CI_REGISTRY_IMAGE/mirror/sonar-scanner-cli:11"
+    - crane copy docker.io/snyk/snyk:node "$CI_REGISTRY_IMAGE/mirror/snyk:node"
