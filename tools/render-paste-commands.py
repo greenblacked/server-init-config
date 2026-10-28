@@ -184,8 +184,8 @@ def render_base() -> str:
     lines += ["", "systemctl is-active docker gitlab-runner", "INSTALL"]
     return ('<a id="base"></a>\n## Base host: Docker, GitLab Runner, tools\n\n'
             "The same steps as `cloud-init-rocky.yaml`, for a Rocky server created without it. Skip this if you used the init. "
-            "Paste it as root (that is how a server without the init is reached). It creates the `ops` admin; root SSH "
-            "stays open until the [Lock root SSH](#lock-root) block.\n\n"
+            "Paste it as root (that is how a server without the init is reached). It does not create the `ops` admin: "
+            "paste the [Users](#users) block next. Root SSH stays open until the [Lock root SSH](#lock-root) block.\n\n"
             "````bash\n" + "\n".join(lines) + "\n````\n")
 
 

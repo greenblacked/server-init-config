@@ -7,7 +7,7 @@ The init installs only the base host: Docker, GitLab Runner, admin tools, securi
 
 | File | Purpose |
 |---|---|
-| `cloud-init-rocky.yaml` | user-data for a new server: users, SSH hardening, Docker, GitLab Runner, security updates, admin tools, aliases, tmux config (generated) |
+| `cloud-init-rocky.yaml` | user-data for a new server: SSH hardening, Docker, GitLab Runner, security updates, admin tools, aliases, tmux config (generated) |
 | `setup.sh` | installs components (variant A); `--list` shows what is installed |
 | `register.sh` | registers the runner (asks for the `glrt-` token); wrapper over `install/register-runner.sh` |
 | `update.sh` | updates installed components to the repo state; wrapper over `install/update.sh` |
@@ -115,7 +115,7 @@ Rollback if the admin login fails: in the still-open session, `sudo install/user
 Logged in as `rocky`:
 
 ```bash
-sudo ADMIN_USER=ops /usr/local/sbin/server-users   # creates ops with root's keys and sudo; keeps the root lock
+sudo ADMIN_USER=ops ~/server-init-config/install/users.sh   # creates ops with root's keys and sudo; keeps the root lock
 ```
 
 From a second terminal on your laptop, with the `rocky` session still open: `ssh ops@SERVER_IP 'sudo -n true && echo ok'`. It must print `ok`. Then, logged in as `ops`, remove the old admin (this deletes `/home/rocky`):
@@ -173,7 +173,7 @@ Components are installed in that order whatever the order of the flags. If one f
 
 ### B. Copy-paste
 
-[`COMMANDS.md`](COMMANDS.md) has one self-contained block per component, in the style of `sudo bash <<'INSTALL' ... INSTALL`. Paste a block into an SSH session as `rocky`. It writes the files it needs to `/root/server-init-config` and runs the installer, so it works without copying the repo. Blocks that ask for input (runner token, deploy token, update) run the installer on their last line, so the prompt reads from your keyboard and not from the rest of the paste.
+[`COMMANDS.md`](COMMANDS.md) has one self-contained block per component, in the style of `sudo bash <<'INSTALL' ... INSTALL`. Paste a block into an SSH session as `ops` (as root before the [Users](COMMANDS.md#users) block has run). It writes the files it needs to `/root/server-init-config` and runs the installer, so it works without copying the repo. Blocks that ask for input (runner token, deploy token, update) run the installer on their last line, so the prompt reads from your keyboard and not from the rest of the paste.
 
 | Block | What it does |
 |---|---|
