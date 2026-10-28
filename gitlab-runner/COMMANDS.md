@@ -1044,6 +1044,7 @@ ONLY_CONTAINERS=0
 COLOR=1
 CFG=/etc/gitlab-runner/config.toml
 PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
+FORECAST_MIN_HISTORY_H="${FORECAST_MIN_HISTORY_H:-6}"
 
 usage() {
   cat <<'USAGE'
@@ -1707,10 +1708,14 @@ check_trends() {
     fi
   fi
 
+  # A forecast from minutes of data mostly measures the install itself (image pulls, package updates),
+  # so it needs FORECAST_MIN_HISTORY_H hours of metrics before it can warn or fail.
   local avail deriv days
   avail=$(prom_q 'node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"}')
   deriv=$(prom_q 'deriv(node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"}[12h])')
-  if isnum "$avail" && isnum "$deriv"; then
+  if ! isnum "${hist_h:-}" || (( hist_h < FORECAST_MIN_HISTORY_H )); then
+    skip "disk forecast: needs ${FORECAST_MIN_HISTORY_H}h of metrics (have ${hist_h:-0}h)"
+  elif isnum "$avail" && isnum "$deriv"; then
     if awk -v d="$deriv" 'BEGIN { exit !(d < 0) }'; then
       days=$(awk -v a="$avail" -v d="$deriv" 'BEGIN { printf "%.1f", a / (-d) / 86400 }')
       if gt 3 "$days"; then
@@ -7136,6 +7141,7 @@ ONLY_CONTAINERS=0
 COLOR=1
 CFG=/etc/gitlab-runner/config.toml
 PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
+FORECAST_MIN_HISTORY_H="${FORECAST_MIN_HISTORY_H:-6}"
 
 usage() {
   cat <<'USAGE'
@@ -7799,10 +7805,14 @@ check_trends() {
     fi
   fi
 
+  # A forecast from minutes of data mostly measures the install itself (image pulls, package updates),
+  # so it needs FORECAST_MIN_HISTORY_H hours of metrics before it can warn or fail.
   local avail deriv days
   avail=$(prom_q 'node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"}')
   deriv=$(prom_q 'deriv(node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"}[12h])')
-  if isnum "$avail" && isnum "$deriv"; then
+  if ! isnum "${hist_h:-}" || (( hist_h < FORECAST_MIN_HISTORY_H )); then
+    skip "disk forecast: needs ${FORECAST_MIN_HISTORY_H}h of metrics (have ${hist_h:-0}h)"
+  elif isnum "$avail" && isnum "$deriv"; then
     if awk -v d="$deriv" 'BEGIN { exit !(d < 0) }'; then
       days=$(awk -v a="$avail" -v d="$deriv" 'BEGIN { printf "%.1f", a / (-d) / 86400 }')
       if gt 3 "$days"; then
@@ -10559,6 +10569,7 @@ ONLY_CONTAINERS=0
 COLOR=1
 CFG=/etc/gitlab-runner/config.toml
 PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
+FORECAST_MIN_HISTORY_H="${FORECAST_MIN_HISTORY_H:-6}"
 
 usage() {
   cat <<'USAGE'
@@ -11222,10 +11233,14 @@ check_trends() {
     fi
   fi
 
+  # A forecast from minutes of data mostly measures the install itself (image pulls, package updates),
+  # so it needs FORECAST_MIN_HISTORY_H hours of metrics before it can warn or fail.
   local avail deriv days
   avail=$(prom_q 'node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"}')
   deriv=$(prom_q 'deriv(node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"}[12h])')
-  if isnum "$avail" && isnum "$deriv"; then
+  if ! isnum "${hist_h:-}" || (( hist_h < FORECAST_MIN_HISTORY_H )); then
+    skip "disk forecast: needs ${FORECAST_MIN_HISTORY_H}h of metrics (have ${hist_h:-0}h)"
+  elif isnum "$avail" && isnum "$deriv"; then
     if awk -v d="$deriv" 'BEGIN { exit !(d < 0) }'; then
       days=$(awk -v a="$avail" -v d="$deriv" 'BEGIN { printf "%.1f", a / (-d) / 86400 }')
       if gt 3 "$days"; then
