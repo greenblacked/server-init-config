@@ -15,7 +15,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 describe() {
   case "$1" in
-    users)          echo "admin user (rocky/debian, sudo), service users gitlab-runner and monitoring, SSH on port 22022" ;;
+    users)          echo "admin user ops (sudo), service users gitlab-runner and monitoring, SSH on port 22022" ;;
     packages)       echo "admin tools: htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, aliases" ;;
     tools)          echo "health, weekly cleanup, disk guard and their timers" ;;
     register)       echo "register the runner (asks for the glrt- token)" ;;
