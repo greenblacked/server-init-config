@@ -3,7 +3,7 @@
 Bootstrap and operations config for a self-hosted GitLab Runner on Hetzner Cloud.
 It's built for an ARM64 CAX11 running Rocky Linux 10. Debian 13 and x86_64 work too.
 
-The quickest path on Rocky is [`gitlab-runner/`](gitlab-runner/README.md): a base init, then every component installed with `setup.sh --<component>` or a copy-paste command block. The rest of this file describes the full layout and the step-by-step variant.
+The quickest path on Rocky is [`gitlab-runner/`](gitlab-runner/README.md): a base init, then every component installed with `setup.sh --<component>` or a self-contained copy-paste block from `gitlab-runner/COMMANDS.md`. The rest of this file describes the full layout and the step-by-step variant.
 
 What a server built from this repo has:
 
@@ -25,6 +25,7 @@ What a server built from this repo has:
 | `cloud-init/templates/` | sources for the cloud-init files |
 | `gitlab-runner/` | **start here for a Rocky runner**: base init, `setup.sh` and copy-paste blocks for every component, `update.sh`, everyday commands and troubleshooting (see its README) |
 | `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
+| `tools/render-paste-commands.py` | renders `gitlab-runner/COMMANDS.md` from the repo files; `--check` detects stale output |
 | `scripts/` | host scripts: `health`, weekly cleanup, disk guard, image prewarm |
 | `systemd/` | services and timers for the scripts |
 | `install/` | idempotent installers for optional components, run on the server from a clone; `update.sh` updates everything installed |
@@ -123,6 +124,8 @@ Edit the source files, then regenerate the cloud-init files before committing:
 ```bash
 tools/render-cloud-init.py
 tools/render-cloud-init.py --check
+tools/render-paste-commands.py
+tools/render-paste-commands.py --check
 shellcheck scripts/* install/*.sh
 ```
 
