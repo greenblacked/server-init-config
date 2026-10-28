@@ -1,7 +1,9 @@
 #cloud-config
 # Minimal GitLab Runner host for Rocky Linux 9/10 (ARM64 and x86_64): Docker Engine + GitLab Runner (docker executor).
-# Paste into Hetzner "Cloud config" when creating the server, then run gitlab-runner/register.sh on it.
-# The full setup (caches, cleanup timers, monitoring, SELinux enforcing) lives in ../cloud-init/rocky.yaml.
+# Paste into Hetzner "Cloud config" when creating the server, then install components with gitlab-runner/setup.sh or COMMANDS.md.
+# Admin tools (htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dnf-utils)
+# are installed in runcmd after EPEL is enabled, one by one: htop and several others come from EPEL,
+# so listing it under packages: would break the whole package step. Missing ones go to /var/log/ci-bootstrap-failed.log.
 package_update: true
 package_upgrade: true
 
