@@ -66,6 +66,12 @@ PREWARM = ["install/image-prewarm.sh", "scripts/ci-image-prewarm.sh",
 EVERYTHING = ["install", "scripts", "systemd", "monitoring", "logging", "registry-cache", "npm-cache"]
 
 BLOCKS = [
+    Block("users", "Users: admin, service accounts, SSH hardening",
+          "Creates the admin user named after the OS (`rocky` on Rocky) with sudo without password and the keys from "
+          "root, the service accounts `gitlab-runner` (the runner service then runs as it) and `monitoring` (runs the "
+          "monitoring and logging containers), and the SSH drop-in: keys only, only the `ssh-users` group, port 22022 next to 22. Root and port 22 stay "
+          "open until the [Lock root SSH](#lock-root) block. Allow TCP 22022 in the Hetzner Firewall. Run it first; safe to rerun.",
+          ["install/users.sh"], run=["install/users.sh"]),
     Block("packages", "Admin tools: htop, btop, ncdu, iotop and others",
           "htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, "
           "sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, plus the shell aliases and tmux config. "
@@ -78,7 +84,7 @@ BLOCKS = [
           TOOLS, run=["install/host-tools.sh"]),
     Block("register", "Register the runner",
           "Asks for the `glrt-` token (GitLab: Settings > CI/CD > Runners > New runner). Change `DESCRIPTION` if you like.",
-          ["install/register-runner.sh"], interactive=["DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh"]),
+          ["install/register-runner.sh"], interactive=["sudo DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh"]),
     Block("registry-cache", "Docker Hub pull-through cache",
           "Cache on `127.0.0.1:5000`, set as the Docker mirror. Restarts Docker: run it while no jobs are running.",
           REGISTRY, run=["install/registry-cache.sh"]),
@@ -96,26 +102,33 @@ BLOCKS = [
           ["install/shared-cache.sh"], run=["install/shared-cache.sh"]),
     Block("prewarm", "Image prewarm",
           "Asks for the path of one image (copy icon in Container Registry) and a deploy token with `read_registry`.",
-          PREWARM, interactive=["bash {d}/install/image-prewarm.sh"]),
+          PREWARM, interactive=["sudo bash {d}/install/image-prewarm.sh"]),
     Block("grafana-domain", "Grafana on a domain (HTTPS via Caddy)",
           "First: A record to the server IP, ports 80/443 open in the Hetzner Firewall. "
           "Replace `grafana.example.com` and `you@example.com` on the last line with your domain and email.",
           ["install/grafana-domain.sh", "monitoring/caddy/Caddyfile.tmpl"],
-          interactive=["DOMAIN=grafana.example.com ACME_EMAIL=you@example.com bash {d}/install/grafana-domain.sh"]),
+          interactive=["sudo DOMAIN=grafana.example.com ACME_EMAIL=you@example.com bash {d}/install/grafana-domain.sh"]),
     Block("selinux", "SELinux enforcing",
           "Switches SELinux to enforcing now and after reboot, then checks Docker and the runner.",
           ["install/selinux-enforcing.sh"], run=["install/selinux-enforcing.sh"]),
+    Block("lock-root", "Lock root SSH and port 22",
+          "Only after this works from your laptop: `ssh -p 22022 rocky@SERVER_IP 'sudo -n true && echo ok'`. Sets "
+          "`PermitRootLogin no` and leaves only port 22022. Refuses to run while the admin has no SSH key. Undo, from a "
+          "session that is still open: `sudo bash /root/server-init-config/install/users.sh --unlock-root`.",
+          ["install/users.sh", "install/lock-root.sh"], run=["install/lock-root.sh"]),
     Block("update", "Update everything installed",
           "Writes the current repo files and runs `update.sh`: syncs what is installed, backs up and restores on failure. "
           "Add `--dry-run` to the last line to preview, `--os` to upgrade packages too.",
-          EVERYTHING, interactive=["bash {d}/install/update.sh"]),
+          EVERYTHING, interactive=["sudo bash {d}/install/update.sh"]),
     Block("all", "Everything at once",
-          "Admin tools, host tools, Docker Hub cache, monitoring and logging are installed first; the last line asks for the runner token "
-          "and then sets up the npm and shared caches.",
+          "Users, admin tools, host tools, Docker Hub cache, monitoring and logging are installed first; the last line asks for the "
+          "runner token and then sets up the npm and shared caches. Root SSH stays open: lock it with the Lock root SSH block "
+          "after the admin login works.",
           EVERYTHING,
-          run=["install/admin-tools.sh", "install/host-tools.sh", "install/registry-cache.sh", "install/monitoring.sh", "install/logging.sh"],
-          interactive=[("DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh && "
-                        "bash {d}/install/npm-cache.sh && bash {d}/install/shared-cache.sh && health -q")]),
+          run=["install/users.sh", "install/admin-tools.sh", "install/host-tools.sh", "install/registry-cache.sh", "install/monitoring.sh", "install/logging.sh"],
+          interactive=[("sudo DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh && "
+                        "sudo bash {d}/install/npm-cache.sh && sudo bash {d}/install/shared-cache.sh && "
+                        "sudo /usr/local/bin/health -q")]),
 ]
 
 
@@ -130,7 +143,7 @@ def file_heredoc(rel: str) -> list[str]:
 
 def render_block(b: Block) -> str:
     files = expand(["install/lib.sh", *b.files])
-    lines = ["bash <<'INSTALL'", "set -Eeuo pipefail", f"R={DEST}", ""]
+    lines = ["sudo bash <<'INSTALL'", "set -Eeuo pipefail", f"R={DEST}", ""]
     for rel in files:
         lines += file_heredoc(rel) + [""]
     lines.append(f'echo "files written to $R: {len(files)}"')
@@ -146,7 +159,7 @@ def render_block(b: Block) -> str:
 
 def render_base() -> str:
     data = yaml.safe_load(INIT.read_text(encoding="utf-8"))
-    lines = ["bash <<'INSTALL'", "set -Eeuo pipefail", "dnf -y -q upgrade --refresh",
+    lines = ["sudo bash <<'INSTALL'", "set -Eeuo pipefail", "dnf -y -q upgrade --refresh",
              "dnf -y -q install " + " ".join(data["packages"]), ""]
     for f in data["write_files"]:
         path, content = f["path"], f["content"].rstrip("\n")
@@ -164,10 +177,15 @@ def render_base() -> str:
             lines.append(f"chmod {f['permissions'][-3:]} {shlex.quote(path)}")
         lines.append("")
     for cmd in data["runcmd"]:
-        lines.append(cmd if isinstance(cmd, str) else shlex.join(str(c) for c in cmd))
+        line = cmd if isinstance(cmd, str) else shlex.join(str(c) for c in cmd)
+        if "--lock-root" in line:
+            continue  # pasted on a live server: lock root only after the admin login is tested
+        lines.append(line)
     lines += ["", "systemctl is-active docker gitlab-runner", "INSTALL"]
     return ('<a id="base"></a>\n## Base host: Docker, GitLab Runner, tools\n\n'
-            "The same steps as `cloud-init-rocky.yaml`, for a Rocky server created without it. Skip this if you used the init.\n\n"
+            "The same steps as `cloud-init-rocky.yaml`, for a Rocky server created without it. Skip this if you used the init. "
+            "Paste it as root (that is how a server without the init is reached). It creates the `rocky` admin and opens port 22022 next to 22; root SSH "
+            "and port 22 stay open until the [Lock root SSH](#lock-root) block.\n\n"
             "````bash\n" + "\n".join(lines) + "\n````\n")
 
 
@@ -178,7 +196,8 @@ def render() -> str:
 
 Generated by tools/render-paste-commands.py from the repo files. Do not edit by hand.
 
-Each block is self-contained: paste it into an SSH session on the server as root. It writes the files it needs to
+Each block is self-contained: paste it into an SSH session on the server as the admin user (`rocky`); the
+blocks use `sudo`. Before the users block has run, paste as root, which works too. A block writes the files it needs to
 `{DEST}` and runs the installer, which checks its own result at the end. Use the blocks in the order below and skip
 what you don't need. Long blocks paste best into a plain terminal or tmux; if a paste breaks off, just paste the
 whole block again, the installers are safe to rerun or tell you the component is already installed.

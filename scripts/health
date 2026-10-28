@@ -235,17 +235,55 @@ check_security() {
       fail "SSH password login enabled"
     fi
     root_login=$(awk '/^permitrootlogin / { print $2 }' <<<"$sshd_t")
-    if [[ "$root_login" == "yes" ]]; then
-      fail "SSH root login with password allowed"
+    case "$root_login" in
+      no)  ok "SSH root login disabled" ;;
+      yes) fail "SSH root login with password allowed" ;;
+      *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo install/users.sh --lock-root" ;;
+    esac
+    if grep -q '^allowgroups ' <<<"$sshd_t"; then
+      ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
     else
-      ok "SSH root login: ${root_login:-unknown}"
+      warn "SSH not limited by AllowGroups (install/users.sh sets it)"
     fi
   fi
 
-  local exposed
+  local members u shell pid ru
+  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vx 'gitlab-runner' | grep . | tr '\n' ' ' || true)
+  if [[ -n "${members// /}" ]]; then
+    warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
+  else
+    ok "docker group: only gitlab-runner"
+  fi
+  for u in gitlab-runner monitoring; do
+    id "$u" >/dev/null 2>&1 || continue
+    shell=$(getent passwd "$u" | cut -d: -f7)
+    case "$shell" in
+      */nologin|*/false) ok "service user ${u}: no login shell" ;;
+      *) warn "service user ${u} has login shell ${shell}" ;;
+    esac
+  done
+  if have systemctl && systemctl is-active --quiet gitlab-runner 2>/dev/null; then
+    pid=$(systemctl show -p MainPID --value gitlab-runner 2>/dev/null || true)
+    ru=$(ps -o user= -p "${pid:-0}" 2>/dev/null | tr -d ' ' || true)
+    if [[ "$ru" == root ]]; then
+      warn "gitlab-runner service runs as root (install/users.sh switches it to gitlab-runner)"
+    elif [[ -n "$ru" ]]; then
+      ok "gitlab-runner service runs as ${ru}"
+    fi
+  fi
+
+  local exposed ssh_ports allowed
+  ssh_ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+  ssh_ports="${ssh_ports:-22 }"
+  allowed="$(tr ' ' '|' <<<"${ssh_ports% }")|80|443"
+  if [[ " ${ssh_ports}" == *" 22 "* ]]; then
+    info "SSH listens on: ${ssh_ports}(port 22 closes with install/users.sh --lock-root)"
+  else
+    ok "SSH port: ${ssh_ports% }"
+  fi
   exposed=$(ss -ltnH 2>/dev/null | awk '{ print $4 }' \
     | grep -vE '^(127\.|\[::1\]|172\.17\.)' \
-    | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE '22|80|443' | tr '\n' ' ' || true)
+    | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE "$allowed" | tr '\n' ' ' || true)
   if [[ -n "${exposed// /}" ]]; then
     warn "ports listening on public interfaces: ${exposed}(make sure the Hetzner firewall blocks them)"
   else

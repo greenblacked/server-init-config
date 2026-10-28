@@ -44,27 +44,37 @@ if systemctl cat sysstat >/dev/null 2>&1; then
 fi
 
 cat > /etc/profile.d/ci-runner.sh <<'EOF'
-alias runner-logs='journalctl -u gitlab-runner -f'
-alias runner-errors='journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
-alias runner-jobs='docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
+alias health='sudo health'
+alias runner-logs='sudo journalctl -u gitlab-runner -f'
+alias runner-errors='sudo journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
+alias runner-jobs='sudo docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
 alias runner-metrics='curl -s 127.0.0.1:9252/metrics | grep "^gitlab_runner_"'
-alias dfd='df -h / ; docker system df'
-alias dstats='docker stats --no-stream'
+alias dfd='df -h / ; sudo docker system df'
+alias dstats='sudo docker stats --no-stream'
 EOF
 chmod 644 /etc/profile.d/ci-runner.sh
 restorecon_if /etc/profile.d/ci-runner.sh
 
-if [[ -f /root/.tmux.conf ]]; then
-  log "kept existing /root/.tmux.conf"
-else
-  cat > /root/.tmux.conf <<'EOF'
+# root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none
+homes=(/root)
+while IFS= read -r u; do
+  [[ -n "$u" ]] && homes+=("$(getent passwd "$u" | cut -d: -f6)")
+done < <(getent group ssh-users | cut -d: -f4 | tr ',' '\n')
+for home in "${homes[@]}"; do
+  [[ -d "$home" ]] || continue
+  if [[ -f "${home}/.tmux.conf" ]]; then
+    log "kept existing ${home}/.tmux.conf"
+    continue
+  fi
+  cat > "${home}/.tmux.conf" <<'EOF'
 set -g mouse on
 set -g history-limit 50000
 set -g base-index 1
 set -g status-right '#H  %H:%M'
 EOF
-  chmod 644 /root/.tmux.conf
-fi
+  chown "$(stat -c '%U:%G' "$home")" "${home}/.tmux.conf"
+  chmod 644 "${home}/.tmux.conf"
+done
 
 log "installed or already present (${#installed[@]}): ${installed[*]}"
 if (( ${#missing[@]} )); then
@@ -73,4 +83,4 @@ fi
 for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar; do
   if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
 done
-log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh)"
+log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"

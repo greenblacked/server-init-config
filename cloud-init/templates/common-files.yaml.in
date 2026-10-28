@@ -1,10 +1,7 @@
-  - path: /etc/ssh/sshd_config.d/60-ci-hardening.conf
-    permissions: '0600'
+  - path: /usr/local/sbin/server-users
+    permissions: '0755'
     content: |
-      PasswordAuthentication no
-      KbdInteractiveAuthentication no
-      PermitRootLogin prohibit-password
-      X11Forwarding no
+@@FILE install/users.sh@@
 
   - path: /etc/gai.conf
     append: true
