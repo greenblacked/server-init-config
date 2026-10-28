@@ -2291,8 +2291,11 @@ require_root
 command -v docker >/dev/null || die "docker not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v jq >/dev/null || pkg_install jq
-[[ -f "${DIR}/docker-compose.yml" ]] && die "${DIR} already installed, refresh it with install/update.sh"
-if ss -ltn | awk '$4 ~ /:(3100|9096|12345)$/' | grep -q .; then die "port 3100, 9096 or 12345 already in use"; fi
+if [[ -f "${DIR}/docker-compose.yml" ]]; then
+  log "${DIR} exists: re-applying the repo files and finishing the setup (safe after a failed run)"
+elif ss -ltn | awk '$4 ~ /:(3100|9096|12345)$/' | grep -q .; then
+  die "port 3100, 9096 or 12345 already in use"
+fi
 [[ -f /etc/machine-id ]] || die "/etc/machine-id missing, the journal cannot be read"
 
 if [[ ! -d /var/log/journal ]]; then
@@ -2316,7 +2319,7 @@ docker run --rm -v "${DIR}/loki.yaml:/etc/loki/config.yaml:ro" "$loki_image" \
   -config.file=/etc/loki/config.yaml -verify-config || die "Loki rejected loki.yaml"
 docker run --rm --entrypoint /bin/alloy -v "${DIR}/config.alloy:/etc/alloy/config.alloy:ro" "$alloy_image" \
   fmt /etc/alloy/config.alloy >/dev/null || die "Alloy rejected config.alloy"
-docker compose up -d
+docker compose up -d --force-recreate
 
 ready=0
 for _ in $(seq 1 45); do
@@ -2332,7 +2335,8 @@ if (( ! ready )); then
 fi
 
 if [[ -d "${MON}/grafana/provisioning/datasources" ]]; then
-  install -m 0644 "${REPO_ROOT}/logging/grafana-datasource.yml" "$DATASOURCE"
+  cp "${REPO_ROOT}/logging/grafana-datasource.yml" "$DATASOURCE"
+  chmod 644 "$DATASOURCE"
   restorecon_if "$DATASOURCE"
   (cd "$MON" && docker compose restart grafana >/dev/null)
   log "Loki added to Grafana as a datasource"
@@ -2468,7 +2472,8 @@ services:
       - loki-data:/loki
 
   # Root inside the container is needed to read the Docker socket and the journal.
-  # All capabilities are dropped and the root filesystem is read-only.
+  # DAC_OVERRIDE is the only capability kept: the image owns /var/lib/alloy as user "alloy",
+  # and root without it cannot enter that directory. The root filesystem is read-only.
   alloy:
     image: grafana/alloy:v1.19.2
     restart: unless-stopped
@@ -2477,6 +2482,7 @@ services:
     user: "0:0"
     read_only: true
     cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
     security_opt:
       - label=disable
       - no-new-privileges:true
@@ -3964,8 +3970,11 @@ require_root
 command -v docker >/dev/null || die "docker not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v jq >/dev/null || pkg_install jq
-[[ -f "${DIR}/docker-compose.yml" ]] && die "${DIR} already installed, refresh it with install/update.sh"
-if ss -ltn | awk '$4 ~ /:(3100|9096|12345)$/' | grep -q .; then die "port 3100, 9096 or 12345 already in use"; fi
+if [[ -f "${DIR}/docker-compose.yml" ]]; then
+  log "${DIR} exists: re-applying the repo files and finishing the setup (safe after a failed run)"
+elif ss -ltn | awk '$4 ~ /:(3100|9096|12345)$/' | grep -q .; then
+  die "port 3100, 9096 or 12345 already in use"
+fi
 [[ -f /etc/machine-id ]] || die "/etc/machine-id missing, the journal cannot be read"
 
 if [[ ! -d /var/log/journal ]]; then
@@ -3989,7 +3998,7 @@ docker run --rm -v "${DIR}/loki.yaml:/etc/loki/config.yaml:ro" "$loki_image" \
   -config.file=/etc/loki/config.yaml -verify-config || die "Loki rejected loki.yaml"
 docker run --rm --entrypoint /bin/alloy -v "${DIR}/config.alloy:/etc/alloy/config.alloy:ro" "$alloy_image" \
   fmt /etc/alloy/config.alloy >/dev/null || die "Alloy rejected config.alloy"
-docker compose up -d
+docker compose up -d --force-recreate
 
 ready=0
 for _ in $(seq 1 45); do
@@ -4005,7 +4014,8 @@ if (( ! ready )); then
 fi
 
 if [[ -d "${MON}/grafana/provisioning/datasources" ]]; then
-  install -m 0644 "${REPO_ROOT}/logging/grafana-datasource.yml" "$DATASOURCE"
+  cp "${REPO_ROOT}/logging/grafana-datasource.yml" "$DATASOURCE"
+  chmod 644 "$DATASOURCE"
   restorecon_if "$DATASOURCE"
   (cd "$MON" && docker compose restart grafana >/dev/null)
   log "Loki added to Grafana as a datasource"
@@ -6324,7 +6334,8 @@ services:
       - loki-data:/loki
 
   # Root inside the container is needed to read the Docker socket and the journal.
-  # All capabilities are dropped and the root filesystem is read-only.
+  # DAC_OVERRIDE is the only capability kept: the image owns /var/lib/alloy as user "alloy",
+  # and root without it cannot enter that directory. The root filesystem is read-only.
   alloy:
     image: grafana/alloy:v1.19.2
     restart: unless-stopped
@@ -6333,6 +6344,7 @@ services:
     user: "0:0"
     read_only: true
     cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
     security_opt:
       - label=disable
       - no-new-privileges:true
@@ -6951,8 +6963,11 @@ require_root
 command -v docker >/dev/null || die "docker not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v jq >/dev/null || pkg_install jq
-[[ -f "${DIR}/docker-compose.yml" ]] && die "${DIR} already installed, refresh it with install/update.sh"
-if ss -ltn | awk '$4 ~ /:(3100|9096|12345)$/' | grep -q .; then die "port 3100, 9096 or 12345 already in use"; fi
+if [[ -f "${DIR}/docker-compose.yml" ]]; then
+  log "${DIR} exists: re-applying the repo files and finishing the setup (safe after a failed run)"
+elif ss -ltn | awk '$4 ~ /:(3100|9096|12345)$/' | grep -q .; then
+  die "port 3100, 9096 or 12345 already in use"
+fi
 [[ -f /etc/machine-id ]] || die "/etc/machine-id missing, the journal cannot be read"
 
 if [[ ! -d /var/log/journal ]]; then
@@ -6976,7 +6991,7 @@ docker run --rm -v "${DIR}/loki.yaml:/etc/loki/config.yaml:ro" "$loki_image" \
   -config.file=/etc/loki/config.yaml -verify-config || die "Loki rejected loki.yaml"
 docker run --rm --entrypoint /bin/alloy -v "${DIR}/config.alloy:/etc/alloy/config.alloy:ro" "$alloy_image" \
   fmt /etc/alloy/config.alloy >/dev/null || die "Alloy rejected config.alloy"
-docker compose up -d
+docker compose up -d --force-recreate
 
 ready=0
 for _ in $(seq 1 45); do
@@ -6992,7 +7007,8 @@ if (( ! ready )); then
 fi
 
 if [[ -d "${MON}/grafana/provisioning/datasources" ]]; then
-  install -m 0644 "${REPO_ROOT}/logging/grafana-datasource.yml" "$DATASOURCE"
+  cp "${REPO_ROOT}/logging/grafana-datasource.yml" "$DATASOURCE"
+  chmod 644 "$DATASOURCE"
   restorecon_if "$DATASOURCE"
   (cd "$MON" && docker compose restart grafana >/dev/null)
   log "Loki added to Grafana as a datasource"
@@ -9311,7 +9327,8 @@ services:
       - loki-data:/loki
 
   # Root inside the container is needed to read the Docker socket and the journal.
-  # All capabilities are dropped and the root filesystem is read-only.
+  # DAC_OVERRIDE is the only capability kept: the image owns /var/lib/alloy as user "alloy",
+  # and root without it cannot enter that directory. The root filesystem is read-only.
   alloy:
     image: grafana/alloy:v1.19.2
     restart: unless-stopped
@@ -9320,6 +9337,7 @@ services:
     user: "0:0"
     read_only: true
     cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
     security_opt:
       - label=disable
       - no-new-privileges:true
