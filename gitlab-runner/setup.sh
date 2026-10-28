@@ -201,7 +201,9 @@ main() {
     /usr/local/bin/health -q --no-color || log "health exit code $? (1 = warnings, 2 = failures)"
   fi
   if is_installed monitoring; then
-    log "Grafana: ssh -N -L 3000:127.0.0.1:3000 root@<server-ip>, then http://localhost:3000 (password: grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env)"
+    local login=root
+    if id ops >/dev/null 2>&1; then login=ops; fi
+    log "Grafana: ssh -N -L 3000:127.0.0.1:3000 ${login}@<server-ip>, then http://localhost:3000 (password: sudo grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env)"
   fi
 }
 
