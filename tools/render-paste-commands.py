@@ -109,7 +109,7 @@ BLOCKS = [
           ["install/grafana-domain.sh", "monitoring/caddy/Caddyfile.tmpl"],
           interactive=["sudo DOMAIN=grafana.example.com ACME_EMAIL=you@example.com bash {d}/install/grafana-domain.sh"]),
     Block("selinux", "SELinux enforcing",
-          "Switches SELinux to enforcing now and after reboot, then checks Docker and the runner.",
+          "Switches SELinux to enforcing now and after reboot, then restarts and checks Docker and the runner. Refuses to run while CI jobs are running.",
           ["install/selinux-enforcing.sh"], run=["install/selinux-enforcing.sh"]),
     Block("lock-root", "Lock root SSH",
           "Only after this works from your laptop: `ssh ops@SERVER_IP 'sudo -n true && echo ok'`. Sets "

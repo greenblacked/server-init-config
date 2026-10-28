@@ -36,7 +36,7 @@ Do the steps top to bottom. Each step has a check; go on only when it passes. St
 | 11 | *Optional:* shared cache | `sudo gitlab-runner/setup.sh --shared-cache` | [Shared cache](COMMANDS.md#shared-cache) | `sudo grep 'volumes =' /etc/gitlab-runner/config.toml` | needs 5; trusted projects only |
 | 12 | *Optional:* image prewarm | `sudo gitlab-runner/setup.sh --prewarm` | [Image prewarm](COMMANDS.md#prewarm) | `systemctl list-timers ci-image-prewarm.timer` | asks for a deploy token with `read_registry` |
 | 13 | *Optional:* Grafana on a domain | `sudo DOMAIN=... ACME_EMAIL=... gitlab-runner/setup.sh --grafana-domain` | [Grafana domain](COMMANDS.md#grafana-domain) | `curl -sI https://YOUR_DOMAIN/api/health` | needs 8, an A record and TCP 80/443 in the Firewall |
-| 14 | *Optional:* SELinux enforcing | `sudo gitlab-runner/setup.sh --selinux` | [SELinux](COMMANDS.md#selinux) | `getenforce` shows `Enforcing`; `health` shows no denials | last, after everything runs; the runner init leaves SELinux as the image has it |
+| 14 | *Optional:* SELinux enforcing | `sudo gitlab-runner/setup.sh --selinux` | [SELinux](COMMANDS.md#selinux) | `getenforce` shows `Enforcing`; `health` shows no denials | last, after everything runs; the runner init leaves SELinux as the image has it; restarts Docker: no jobs running |
 | 15 | Final check | `sudo gitlab-runner/setup.sh --list` | | `sudo health` without failures; a second smoke job | |
 | 16 | *Optional:* lock root SSH | `sudo gitlab-runner/setup.sh --lock-root` | [Lock root SSH](COMMANDS.md#lock-root) | `ssh ops@SERVER_IP` works, `ssh root@SERVER_IP` is refused | only after 3a works from your laptop; refuses to run while `ops` has no key |
 
