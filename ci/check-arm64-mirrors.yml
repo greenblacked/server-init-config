@@ -11,7 +11,8 @@ check_arm64_mirrors:
     - crane auth login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD"
     - |
       for repo in mirror/alpine mirror/node mirror/playwright mirror/snyk mirror/sonar-scanner-cli docker; do
-        for tag in $(crane ls "$CI_REGISTRY_IMAGE/$repo"); do
+        tags=$(crane ls "$CI_REGISTRY_IMAGE/$repo") || { echo "FAIL    cannot list tags of $CI_REGISTRY_IMAGE/$repo"; exit 1; }
+        for tag in $tags; do
           ref="$CI_REGISTRY_IMAGE/$repo:$tag"
           if crane manifest "$ref" | grep -q '"architecture": *"arm64"'; then
             echo "OK      $ref (multi-arch)"
