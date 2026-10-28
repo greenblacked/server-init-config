@@ -3,6 +3,7 @@ name: monitoring
 services:
   prometheus:
     image: prom/prometheus:v3.4.0
+    user: "${MON_UID:?run install/users.sh first}:${MON_GID:?run install/users.sh first}"
     restart: unless-stopped
     network_mode: host
     mem_limit: 512m
@@ -20,6 +21,7 @@ services:
 
   node-exporter:
     image: prom/node-exporter:v1.9.1
+    user: "${MON_UID:?run install/users.sh first}:${MON_GID:?run install/users.sh first}"
     restart: unless-stopped
     network_mode: host
     pid: host
@@ -34,6 +36,7 @@ services:
 
   grafana:
     image: grafana/grafana:12.0.0
+    user: "${MON_UID:?run install/users.sh first}:${MON_GID:?run install/users.sh first}"
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m

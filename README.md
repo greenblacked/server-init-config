@@ -15,7 +15,8 @@ What a server built from this repo has:
 - Optionally, Prometheus, node_exporter and Grafana, all bound to `127.0.0.1`, plus Grafana on an HTTPS domain via Caddy
 - Optionally, log collection: Loki + Grafana Alloy for container logs and the systemd journal, 7 days, queried in Grafana
 - A `health` command: one report covering the system, security, services, runner, containers, caches and 24h trends
-- SSH hardening, automatic security updates, SELinux enforcing (on Rocky)
+- An admin login named after the OS (`rocky`, `debian`) with sudo; `gitlab-runner` and `monitoring` as service accounts without login; root SSH closed
+- SSH on port 22022, keys only, automatic security updates, SELinux enforcing (on Rocky)
 
 ## Layout
 
@@ -35,39 +36,40 @@ What a server built from this repo has:
 ## Build a new server
 
 1. **Hetzner Console**: create the server (CAX11, `nbg1`, Rocky Linux 10 or Debian 13), add your SSH key, and paste `cloud-init/rocky.yaml` or `cloud-init/debian.yaml` as Cloud config.
-2. **Firewall**: inbound TCP 22 from your IP only, ICMP optional, outbound left empty (empty means allow all). Open 80/443 only if you publish Grafana.
-3. **Wait for cloud-init**, then copy the repo to the server. The repo is private, so either use `scp -r` from your laptop or a read-only deploy key:
+2. **Firewall**: inbound TCP 22022 from your IP only, ICMP optional, outbound left empty (empty means allow all). Open 80/443 only if you publish Grafana.
+3. **Wait for cloud-init**, then copy the repo to the server. You log in as `rocky` (`debian` on Debian) on port 22022; root SSH and port 22 are closed at the end of the first boot. The repo is private, so either use `scp` from your laptop or a read-only deploy key:
 
    ```bash
-   cloud-init status --wait
-   scp -r server-init-config root@SERVER_IP:/root/
+   ssh -p 22022 rocky@SERVER_IP cloud-init status --wait
+   scp -P 22022 -r server-init-config rocky@SERVER_IP:
+   ssh -p 22022 rocky@SERVER_IP
    ```
 
 4. **Install the host tools and register the runner.** Create the runner in GitLab first (Settings → CI/CD → Runners → New runner) and copy its `glrt-` token:
 
    ```bash
-   cd /root/server-init-config
-   install/host-tools.sh
-   DESCRIPTION=hetzner-cax11 install/register-runner.sh
+   cd ~/server-init-config
+   sudo install/host-tools.sh
+   sudo DESCRIPTION=hetzner-cax11 install/register-runner.sh
    ```
 
 5. **Optional components**, in this order:
 
    ```bash
-   install/monitoring.sh
-   install/logging.sh
-   install/npm-cache.sh
-   install/shared-cache.sh
-   install/image-prewarm.sh
-   DOMAIN=grafana.example.com ACME_EMAIL=you@example.com install/grafana-domain.sh
+   sudo install/monitoring.sh
+   sudo install/logging.sh
+   sudo install/npm-cache.sh
+   sudo install/shared-cache.sh
+   sudo install/image-prewarm.sh
+   sudo DOMAIN=grafana.example.com ACME_EMAIL=you@example.com install/grafana-domain.sh
    ```
 
-   Run `install/selinux-enforcing.sh` only on servers that weren't built from the Rocky cloud-init, which already enables it.
+   Run `install/selinux-enforcing.sh` only on servers that weren't built from the Rocky cloud-init, which already enables it. Servers built from an older init move to the new users with `install/users.sh` and `install/lock-root.sh`; the steps are in [`gitlab-runner/README.md`](gitlab-runner/README.md#moving-an-existing-server-to-these-users).
 
 6. **Validate**:
 
    ```bash
-   health
+   sudo health
    ```
 
    Then run `ci/smoke.yml` in a project. Its log must show `on <your runner description>` and `aarch64`.
@@ -78,13 +80,13 @@ What a server built from this repo has:
 
 ```bash
 # 1. get the new repo state onto the server (scp copy, or a git clone there)
-scp -r server-init-config root@SERVER_IP:/root/
-ssh root@SERVER_IP
+scp -P 22022 -r server-init-config rocky@SERVER_IP:
+ssh -p 22022 rocky@SERVER_IP
 
 # 2. preview, then apply
-cd /root/server-init-config
-install/update.sh --dry-run
-install/update.sh
+cd ~/server-init-config
+sudo install/update.sh --dry-run
+sudo install/update.sh
 ```
 
 | Option | Effect |
@@ -104,15 +106,15 @@ What it does on every run:
 
 Rollback: `install/update.sh --rollback` restores the newest backup. Running `update.sh` again re-applies the repo state. Older backups are plain file trees (paths mirror `/`), so you can copy single files back by hand.
 
-Not updated by this script: `/etc/gitlab-runner/config.toml` (use `install/register-runner.sh`, `shared-cache.sh`, `npm-cache.sh`), the Caddy override created by `grafana-domain.sh`, and files written by cloud-init (SSH, dnf-automatic, kernel settings).
+Not updated by this script: `/etc/gitlab-runner/config.toml` (use `install/register-runner.sh`, `shared-cache.sh`, `npm-cache.sh`), the Caddy override created by `grafana-domain.sh`, users and SSH (use `install/users.sh`), and files written by cloud-init (dnf-automatic, kernel settings). It does move the monitoring and logging containers to the `monitoring` service user and hands their data volumes over, so `install/users.sh` must have run first.
 
 ## The `health` command
 
 ```bash
-health        # full report (~10-40 s)
-health -q     # skip runner verify, network and pending-update checks
-health -c     # only container health
-watch -n 5 'health -c --no-color'
+sudo health        # full report (~10-40 s); the admin alias `health` adds sudo
+sudo health -q     # skip runner verify, network and pending-update checks
+sudo health -c     # only container health
+sudo watch -n 5 'health -c --no-color'
 ```
 
 Exit codes: `0` OK, `1` warnings, `2` failures. The thresholds are variables at the top of `scripts/health`.
@@ -129,24 +131,27 @@ tools/render-paste-commands.py --check
 shellcheck scripts/* install/*.sh
 ```
 
-The cloud-init output stays under Hetzner's 32 KiB user-data limit. That's why `health` isn't embedded in it and is installed with `install/host-tools.sh` instead.
+The cloud-init output stays under Hetzner's 32 KiB user-data limit (the renderer fails above it). `install/users.sh` is embedded; `health` isn't, and is installed with `install/host-tools.sh` instead.
 
 ## Security notes
 
 - No tokens or passwords are stored in this repo. Runner tokens, deploy tokens and the Grafana password are entered or generated on the server.
-- `/etc/gitlab-runner/config.toml` and `/root/.docker/config.json` contain credentials and are kept at mode `600`.
+- Users: you log in as the admin (`rocky`/`debian`), by key, on port 22022, with sudo. `gitlab-runner` and `monitoring` are service accounts without login; the runner service and the monitoring and logging containers run as them. Nobody you log in as is in the `docker` group, which is root-equivalent. Details and the reasoning are in [`gitlab-runner/README.md`](gitlab-runner/README.md#users).
+- `/etc/gitlab-runner/config.toml` (owned by `gitlab-runner`) and `/root/.docker/config.json` contain credentials and are kept at mode `600`.
 - Job containers are not privileged. Enable `privileged = true` only for trusted projects that need Docker-in-Docker.
 - `/srv/ci-cache` and the npm cache are shared by every project on the runner. Don't attach untrusted projects or forks.
-- All monitoring and cache ports listen on `127.0.0.1` or the `docker0` bridge. Reach Grafana and Prometheus through an SSH tunnel: `ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 root@SERVER_IP`.
+- All monitoring and cache ports listen on `127.0.0.1` or the `docker0` bridge. Reach Grafana and Prometheus through an SSH tunnel: `ssh -p 22022 -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 rocky@SERVER_IP`.
 
 ## Rollback
 
 Every installer backs up what it changes as `*.bak.<timestamp>`:
 
 ```bash
-cp -a "$(ls -1t /etc/gitlab-runner/config.toml.bak.* | head -1)" /etc/gitlab-runner/config.toml && systemctl restart gitlab-runner
+sudo -i    # the commands below need root
+cp -a "$(ls -1t /etc/gitlab-runner/config.toml.bak.* | head -1)" /etc/gitlab-runner/config.toml && chown gitlab-runner:gitlab-runner /etc/gitlab-runner/config.toml && systemctl restart gitlab-runner
 cp -a "$(ls -1t /etc/docker/daemon.json.bak.* | head -1)" /etc/docker/daemon.json && systemctl restart docker
 cd /opt/<stack> && docker compose down
+install/users.sh --unlock-root    # reopen root SSH and port 22 (run from the repo copy)
 ```
 
 `docker compose down -v` also deletes the stack's data volumes, and that can't be undone.

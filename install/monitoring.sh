@@ -11,6 +11,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+mon_ids
 command -v docker >/dev/null || die "docker not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v jq >/dev/null || pkg_install jq
@@ -28,16 +29,19 @@ if [[ ! -f "$DIR/.env" ]]; then
   unset pw
 fi
 chmod 600 "$DIR/.env"
+stack_ids "$DIR"
+own_stack_dir "$DIR"
 restorecon_if -R "$DIR"
 
 prom_image=$(awk '/image: prom\/prometheus/ { print $2 }' "$DIR/docker-compose.yml")
 jq empty "$DIR/grafana/dashboards/gitlab-runner.json"
 docker compose -f "$DIR/docker-compose.yml" config -q
-docker run --rm --entrypoint promtool -v "$DIR/prometheus:/etc/prometheus:ro" "$prom_image" \
+docker run --rm --user "${MON_UID}:${MON_GID}" --entrypoint promtool -v "$DIR/prometheus:/etc/prometheus:ro" "$prom_image" \
   check config /etc/prometheus/prometheus.yml
 
 cd "$DIR"
 docker compose pull -q
+chown_volumes "$DIR"
 docker compose up -d
 
 for _ in $(seq 1 30); do

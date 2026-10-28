@@ -295,9 +295,12 @@ YAML
     CHANGED+=("monitoring/docker-compose.yml")
   fi
   if (( DRYRUN )); then
+    id "$MON_USER" >/dev/null 2>&1 || log "WARN: service user ${MON_USER} missing: run install/users.sh before applying"
     return 0
   fi
 
+  stack_ids "$dir"
+  own_stack_dir "$dir"
   if ! (cd "$dir" && docker compose config -q); then
     restore_files
     die "monitoring: compose config invalid, files restored"
@@ -305,6 +308,7 @@ YAML
   if (( comp )); then
     (cd "$dir" && docker compose pull -q)
   fi
+  chown_volumes "$dir"
   (cd "$dir" && docker compose up -d)
   if ! wait_url http://127.0.0.1:9090/-/ready 30; then
     (cd "$dir" && docker compose logs --tail 30 prometheus) || true
@@ -384,15 +388,22 @@ update_logging() {
     CHANGED+=("logging/grafana-datasource.yml")
   fi
   if (( DRYRUN )); then
+    id "$MON_USER" >/dev/null 2>&1 || log "WARN: service user ${MON_USER} missing: run install/users.sh before applying"
     return 0
   fi
 
+  stack_ids "$dir" logging
+  own_stack_dir "$dir"
+  if ! (cd "$dir" && docker compose config -q); then
+    restore_files
+    die "logging: compose config invalid, files restored"
+  fi
   if (( changed )); then
-    if ! (cd "$dir" && docker compose config -q); then
-      restore_files
-      die "logging: compose config invalid, files restored"
-    fi
-    (cd "$dir" && docker compose pull -q && docker compose up -d --force-recreate)
+    (cd "$dir" && docker compose pull -q)
+  fi
+  chown_volumes "$dir"
+  if (( changed )); then
+    (cd "$dir" && docker compose up -d --force-recreate)
   else
     (cd "$dir" && docker compose up -d)
   fi

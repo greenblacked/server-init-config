@@ -21,8 +21,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = ROOT / "cloud-init" / "templates"
-OUT_DIR = ROOT / "cloud-init"
-TARGETS = {"rocky.yaml.in": "rocky.yaml", "debian.yaml.in": "debian.yaml"}
+TARGETS = {
+    "rocky.yaml.in": "cloud-init/rocky.yaml",
+    "debian.yaml.in": "cloud-init/debian.yaml",
+    "runner-rocky.yaml.in": "gitlab-runner/cloud-init-rocky.yaml",
+}
 HETZNER_USER_DATA_LIMIT = 32 * 1024
 DIRECTIVE = re.compile(r"^@@(INCLUDE|FILE) (\S+)@@$")
 INDENT = " " * 6
@@ -71,7 +74,7 @@ def main() -> int:
     for template, target in TARGETS.items():
         text = render(TEMPLATES / template)
         validate(target, text)
-        dest = OUT_DIR / target
+        dest = ROOT / target
         if args.check:
             if not dest.is_file() or dest.read_text(encoding="utf-8") != text:
                 log.error("%s is out of date, run tools/render-cloud-init.py", dest.relative_to(ROOT))

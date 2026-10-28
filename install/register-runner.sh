@@ -45,6 +45,7 @@ if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
 chmod 600 "$CFG"
+runner_cfg_owner
 systemctl restart gitlab-runner
 sleep 3
 

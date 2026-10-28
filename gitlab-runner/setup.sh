@@ -8,13 +8,14 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 CFG=/etc/gitlab-runner/config.toml
 CURRENT=""
 
-COMPONENTS=(packages tools register registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux)
+COMPONENTS=(users packages tools register registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux lock-root)
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 describe() {
   case "$1" in
+    users)          echo "admin user (rocky/debian, sudo), service users gitlab-runner and monitoring, SSH on port 22022" ;;
     packages)       echo "admin tools: htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, aliases" ;;
     tools)          echo "health, weekly cleanup, disk guard and their timers" ;;
     register)       echo "register the runner (asks for the glrt- token)" ;;
@@ -26,11 +27,13 @@ describe() {
     prewarm)        echo "daily pre-pull of CI images (asks for a deploy token)" ;;
     grafana-domain) echo "Grafana on an HTTPS domain via Caddy (needs DOMAIN and ACME_EMAIL)" ;;
     selinux)        echo "switch SELinux to enforcing and verify Docker and the runner" ;;
+    lock-root)      echo "close root SSH and port 22; only after the admin login on port 22022 works" ;;
   esac
 }
 
 script_for() {
   case "$1" in
+    users)          echo "${ROOT}/install/users.sh" ;;
     packages)       echo "${ROOT}/install/admin-tools.sh" ;;
     tools)          echo "${ROOT}/install/host-tools.sh" ;;
     register)       echo "${HERE}/register.sh" ;;
@@ -42,6 +45,7 @@ script_for() {
     prewarm)        echo "${ROOT}/install/image-prewarm.sh" ;;
     grafana-domain) echo "${ROOT}/install/grafana-domain.sh" ;;
     selinux)        echo "${ROOT}/install/selinux-enforcing.sh" ;;
+    lock-root)      echo "${ROOT}/install/lock-root.sh" ;;
   esac
 }
 
@@ -57,6 +61,7 @@ is_component() {
 
 is_installed() {
   case "$1" in
+    users)          id monitoring >/dev/null 2>&1 && grep -qs "^AllowGroups" /etc/ssh/sshd_config.d/00-ci-hardening.conf ;;
     packages)       command -v htop >/dev/null 2>&1 && [[ -f /etc/profile.d/ci-runner.sh ]] ;;
     tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh ]] ;;
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;
@@ -67,6 +72,7 @@ is_installed() {
     shared-cache)   [[ -f "$CFG" ]] && grep -q '/srv/ci-cache:/ci-cache' "$CFG" ;;
     prewarm)        [[ -f /etc/ci-prewarm.conf ]] ;;
     grafana-domain) [[ -f /opt/monitoring/docker-compose.override.yml ]] ;;
+    lock-root)      grep -qsx "PermitRootLogin no" /etc/ssh/sshd_config.d/00-ci-hardening.conf ;;
     selinux)        command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == Enforcing ]] ;;
     *)              return 1 ;;
   esac
@@ -77,8 +83,9 @@ usage() {
   cat <<USAGE
 Usage: $0 [--base] [--all] [--list] [--COMPONENT ...]
 
-  --base   packages + tools + registry-cache + monitoring (no questions asked)
+  --base   users + packages + tools + registry-cache + monitoring (no questions asked)
   --all    --base + register + logging + npm-cache + shared-cache (asks for the runner token)
+           lock-root is never implied: run --lock-root after the admin login works
   --list   show what is installed and exit
 
 Components, installed in this order whatever the order of the flags:
@@ -123,6 +130,11 @@ preflight() {
     fi
   fi
   local c
+  for c in monitoring logging; do
+    if [[ -n "${WANT[$c]:-}" ]] && ! is_installed users && [[ -z "${WANT[users]:-}" ]]; then
+      die "--${c} runs as the monitoring service user: add --users"
+    fi
+  done
   for c in npm-cache shared-cache; do
     if [[ -n "${WANT[$c]:-}" ]] && ! is_installed register && [[ -z "${WANT[register]:-}" ]]; then
       die "--${c} needs a registered runner: add --register"
@@ -153,8 +165,8 @@ main() {
   local c
   while (( $# )); do
     case "$1" in
-      --base) for c in packages tools registry-cache monitoring; do WANT[$c]=1; done ;;
-      --all)  for c in packages tools register registry-cache monitoring logging npm-cache shared-cache; do WANT[$c]=1; done ;;
+      --base) for c in users packages tools registry-cache monitoring; do WANT[$c]=1; done ;;
+      --all)  for c in users packages tools register registry-cache monitoring logging npm-cache shared-cache; do WANT[$c]=1; done ;;
       --list) LIST=1 ;;
       -h|--help) usage; exit 0 ;;
       --*)
