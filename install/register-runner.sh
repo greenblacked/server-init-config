@@ -51,7 +51,7 @@ sleep 3
 
 gitlab-runner verify 2>&1 | grep -E 'is valid|is not valid' || true
 grep -nE '^concurrent|^listen_address|request_concurrency|executor' "$CFG"
-if journalctl -u gitlab-runner --since "-1min" --no-pager | grep -qi bottleneck; then
+if grep -qi bottleneck <<<"$(journalctl -u gitlab-runner --since "-1min" --no-pager)"; then
   log "WARN: runner still reports a request bottleneck"
 else
   log "OK: runner registered"
