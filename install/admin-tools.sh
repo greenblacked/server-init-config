@@ -44,7 +44,7 @@ if systemctl cat sysstat >/dev/null 2>&1; then
 fi
 
 cat > /etc/profile.d/ci-runner.sh <<'EOF'
-alias health='sudo health'
+alias health='sudo /usr/local/bin/health'
 alias runner-logs='sudo journalctl -u gitlab-runner -f'
 alias runner-errors='sudo journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
 alias runner-jobs='sudo docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
