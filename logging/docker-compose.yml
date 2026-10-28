@@ -14,6 +14,8 @@ services:
 
   # Runs as the monitoring service user. Docker socket and journal access come from group_add
   # (docker and systemd-journal); note that reading the Docker socket is root-equivalent on the host.
+  # The journal group is added by docker-compose.override.yml, which stack_ids (install/lib.sh) writes
+  # only when its gid differs from the docker gid: compose rejects a group_add list with equal items.
   alloy:
     image: grafana/alloy:v1.19.2
     restart: unless-stopped
@@ -22,7 +24,6 @@ services:
     user: "${MON_UID:?run install/users.sh first}:${MON_GID:?run install/users.sh first}"
     group_add:
       - "${DOCKER_GID:?run install/logging.sh}"
-      - "${JOURNAL_GID:?run install/logging.sh}"
     read_only: true
     cap_drop: [ALL]
     security_opt:

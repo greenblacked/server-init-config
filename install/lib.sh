@@ -116,17 +116,22 @@ env_set() {
 
 # stack_ids DIR [logging]: write the ids the compose file needs into DIR/.env.
 stack_ids() {
-  local dir="$1" gid
+  local dir="$1" docker_gid journal_gid
   mon_ids
   env_set "${dir}/.env" MON_UID "$MON_UID"
   env_set "${dir}/.env" MON_GID "$MON_GID"
   if [[ "${2:-}" == logging ]]; then
-    gid=$(getent group docker | cut -d: -f3)
-    [[ -n "$gid" ]] || die "docker group missing"
-    env_set "${dir}/.env" DOCKER_GID "$gid"
-    gid=$(getent group systemd-journal | cut -d: -f3)
-    [[ -n "$gid" ]] || die "systemd-journal group missing"
-    env_set "${dir}/.env" JOURNAL_GID "$gid"
+    docker_gid=$(getent group docker | cut -d: -f3)
+    [[ -n "$docker_gid" ]] || die "docker group missing"
+    env_set "${dir}/.env" DOCKER_GID "$docker_gid"
+    journal_gid=$(getent group systemd-journal | cut -d: -f3)
+    [[ -n "$journal_gid" ]] || die "systemd-journal group missing"
+    # compose rejects equal group_add items, so the journal group is only added when it differs from docker's.
+    if [[ "$journal_gid" != "$docker_gid" ]]; then
+      printf 'services:\n  alloy:\n    group_add:\n      - "%s"\n' "$journal_gid" > "${dir}/docker-compose.override.yml"
+    else
+      rm -f "${dir}/docker-compose.override.yml"
+    fi
   fi
 }
 
