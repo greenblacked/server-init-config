@@ -159,12 +159,18 @@ EOF
   if command -v restorecon >/dev/null 2>&1; then restorecon -R /etc/gitlab-runner "$(dirname "$RUNNER_DROPIN")" || true; fi
   if (( RELOAD )); then
     systemctl daemon-reload
-    jobs=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null || true; } | wc -l)
-    if (( changed )) && (( jobs > 0 )); then
-      log "WARN: ${jobs} CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
-    elif (( changed )) || [[ "$(ps -o user= -p "$(systemctl show -p MainPID --value gitlab-runner)" 2>/dev/null | tr -d ' ')" != "$RUNNER_USER" ]]; then
-      systemctl restart gitlab-runner
-      sleep 3
+    restart=0
+    if (( changed )) || [[ "$(ps -o user= -p "$(systemctl show -p MainPID --value gitlab-runner)" 2>/dev/null | tr -d ' ')" != "$RUNNER_USER" ]]; then
+      restart=1
+    fi
+    if (( restart )); then
+      jobs=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null || true; } | wc -l)
+      if (( jobs > 0 )); then
+        log "WARN: ${jobs} CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
+      else
+        systemctl restart gitlab-runner
+        sleep 3
+      fi
     fi
     pid=$(systemctl show -p MainPID --value gitlab-runner)
     if [[ "${pid:-0}" != 0 ]]; then
