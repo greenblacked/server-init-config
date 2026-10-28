@@ -95,7 +95,7 @@ BLOCKS = [
           "Container logs (not CI jobs) and the journal, 7 days. Run after monitoring so Grafana gets the Loki datasource.",
           LOGGING, run=["install/logging.sh"]),
     Block("npm-cache", "npm cache (Verdaccio)",
-          "Needs a registered runner. Points `npm` and `yarn` in jobs at the cache. Run it while no jobs are running.",
+          "Needs a registered runner. Points `npm` and `yarn` in jobs at the cache. Run it while no jobs are running. Verdaccio binds to the docker0 IP: if it changes (`bip` in daemon.json), rerun this block or `install/update.sh`.",
           NPM, run=["install/npm-cache.sh"]),
     Block("shared-cache", "Shared cache /srv/ci-cache",
           "Needs a registered runner. Mounts `/srv/ci-cache` into every job for npm and Sonar. Trusted projects only.",
