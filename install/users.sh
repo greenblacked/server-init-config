@@ -6,18 +6,18 @@
 #                  with access to Docker through the docker group (root-equivalent, needed by the executor)
 #   monitoring     service account: no shell, no password, no SSH; owns the monitoring and logging containers
 #
-# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22022), no agent or X11 forwarding,
+# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22), no agent or X11 forwarding,
 # local port forwarding kept for tunnels.
-# Until --lock-root, sshd listens on 22 and SSH_PORT and root keeps SSH by key. --lock-root closes port 22
-# and root SSH; it refuses to run while the admin has no key. A locked server stays locked on rerun
-# unless --unlock-root is given. Safe to rerun.
+# Root keeps SSH by key until --lock-root, which refuses to run while the admin has no key. With another
+# SSH_PORT, sshd listens on 22 and SSH_PORT until --lock-root, which then closes 22. A locked server stays
+# locked on rerun unless --unlock-root is given. Safe to rerun.
 set -Eeuo pipefail
 
 ADMIN_USER="${ADMIN_USER:-ops}"
 MON_USER="${MON_USER:-monitoring}"
 RUNNER_USER=gitlab-runner
 SSH_GROUP="${SSH_GROUP:-ssh-users}"
-SSH_PORT="${SSH_PORT:-22022}"
+SSH_PORT="${SSH_PORT:-22}"
 DROPIN=/etc/ssh/sshd_config.d/00-ci-hardening.conf
 RUNNER_DROPIN=/etc/systemd/system/gitlab-runner.service.d/10-service-user.conf
 RUNNER_CFG=/etc/gitlab-runner/config.toml
@@ -36,13 +36,12 @@ Creates the admin user (ADMIN_USER, default ops), the service
 accounts (${MON_USER}, ${RUNNER_USER} if installed), the ${SSH_GROUP} group and the SSH drop-in ${DROPIN}.
 The admin gets the keys from /root/.ssh/authorized_keys.
 
-  --lock-root    close root SSH and port 22, keep only SSH_PORT. Run it only after
-                 "ssh -p SSH_PORT ADMIN@server sudo -n true" works from your laptop and the
-                 Hetzner Firewall allows TCP SSH_PORT.
-  --unlock-root  undo --lock-root (root by key and port 22 again)
+  --lock-root    close root SSH (and port 22 when SSH_PORT is another port). Run it only after
+                 "ssh ADMIN@server sudo -n true" works from your laptop.
+  --unlock-root  undo --lock-root (root by key again)
   --no-reload    write the config but do not reload sshd or restart gitlab-runner
 
-Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users), SSH_PORT (default 22022)
+Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users), SSH_PORT (default 22)
 Rollback: delete ${DROPIN} and ${RUNNER_DROPIN}, then: systemctl reload sshd; systemctl daemon-reload; systemctl restart gitlab-runner
 USAGE
 }
@@ -262,10 +261,12 @@ fi
 effective=$("$sshd_bin" -T 2>/dev/null | grep -Ei '^(port|permitrootlogin|passwordauthentication|allowgroups|allowtcpforwarding) ' | tr '\n' ';' || true)
 log "sshd: ${effective}"
 
+port_opt=""
+if [[ "$SSH_PORT" != 22 ]]; then port_opt="-p ${SSH_PORT} "; fi
 if (( LOCK_ROOT )); then
-  log "OK: root SSH and port 22 closed. Log in as: ssh -p ${SSH_PORT} ${ADMIN_USER}@<server>"
+  log "OK: root SSH closed. Log in as: ssh ${port_opt}${ADMIN_USER}@<server>"
 else
-  log "OK: allow TCP ${SSH_PORT} in the Hetzner Firewall, then test from your laptop:"
-  log "    ssh -p ${SSH_PORT} ${ADMIN_USER}@<server> 'sudo -n true && echo sudo works'"
-  log "    then lock root and port 22:   sudo $0 --lock-root"
+  if [[ -n "$port_opt" ]]; then log "OK: allow TCP ${SSH_PORT} in the Hetzner Firewall first"; fi
+  log "OK: test from your laptop:  ssh ${port_opt}${ADMIN_USER}@<server> 'sudo -n true && echo sudo works'"
+  log "    then lock root:         sudo $0 --lock-root"
 fi
