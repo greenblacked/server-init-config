@@ -164,9 +164,16 @@ EOF
       restart=1
     fi
     if (( restart )); then
-      jobs=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null || true; } | wc -l)
-      if (( jobs > 0 )); then
-        log "WARN: ${jobs} CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
+      main_pid=$(systemctl show -p MainPID --value gitlab-runner)
+      if [[ "${main_pid:-0}" == 0 ]]; then
+        # Stopped service: nothing to interrupt, and the idle gate would only block the start.
+        systemctl start gitlab-runner
+        sleep 3
+      elif ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+        # A docker failure is not "0 jobs": restarting could kill running CI jobs.
+        log "WARN: cannot confirm that no CI job is running (docker does not answer), gitlab-runner not restarted; check with: docker ps --filter label=com.gitlab.gitlab-runner.managed=true, then: systemctl restart gitlab-runner"
+      elif [[ -n "$job_ids" ]]; then
+        log "WARN: $(wc -w <<<"$job_ids") CI job(s) running, gitlab-runner not restarted; run: systemctl restart gitlab-runner"
       else
         systemctl restart gitlab-runner
         sleep 3
