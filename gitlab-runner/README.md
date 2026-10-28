@@ -22,9 +22,9 @@ Do the steps top to bottom. Each step has a check; go on only when it passes. St
 | # | Step | A. Script | B. Copy-paste | Check | Notes |
 |---|---|---|---|---|---|
 | 0 | Before creating the server | | | Hetzner Firewall: inbound TCP 22022 from your IP. GitLab: runner created, `glrt-` token copied | the token is shown once |
-| 1 | Init (done by Hetzner) | | | `ssh -p 22022 rocky@SERVER_IP 'cloud-init status --wait; cat /var/log/ci-bootstrap-failed.log 2>/dev/null; systemctl is-active docker gitlab-runner'` shows `done` and two `active` | installs users, SSH on 22022, Docker, runner, admin tools; closes root SSH and port 22 at the end |
+| 1 | Init (done by Hetzner) | | | `ssh -p 22022 ops@SERVER_IP 'cloud-init status --wait; cat /var/log/ci-bootstrap-failed.log 2>/dev/null; systemctl is-active docker gitlab-runner'` shows `done` and two `active` | installs users, SSH on 22022, Docker, runner, admin tools; closes root SSH and port 22 at the end |
 | 2 | Verify the lock | | | `sudo sshd -T \| grep -E '^(port\|permitrootlogin) '` shows `port 22022` and `permitrootlogin no` | if it still shows `22` or `prohibit-password`, read `/var/log/ci-bootstrap-failed.log` |
-| 3 | Copy the repo (A only) | `scp -P 22022 -r server-init-config rocky@SERVER_IP:` | not needed | `ls ~/server-init-config` | repeat whenever the repo changes |
+| 3 | Copy the repo (A only) | `scp -P 22022 -r server-init-config ops@SERVER_IP:` | not needed | `ls ~/server-init-config` | repeat whenever the repo changes |
 | 4 | Health + cleanup | `sudo gitlab-runner/setup.sh --tools` | [Health + cleanup](COMMANDS.md#tools) | `sudo health -q`; `systemctl list-timers 'runner-*'` | from now on use `health` after every step |
 | 5 | Register the runner | `sudo gitlab-runner/setup.sh --register` | [Register](COMMANDS.md#register) | GitLab shows the runner **Online**; `sudo gitlab-runner verify` | asks for the token |
 | 6 | Smoke test | | | run `../ci/smoke.yml` in a project: the log shows `on <runner description>` and `aarch64` | check `tags:` in `.gitlab-ci.yml` if the job stays pending |
@@ -48,7 +48,7 @@ The order matters here, because of SSH access. Steps and rollback are in [Moving
 
 1. Hetzner Firewall: add TCP 22022 (keep 22).
 2. As root: `install/users.sh` or the [Users](COMMANDS.md#users) block.
-3. Test `ssh -p 22022 rocky@SERVER_IP 'sudo -n true && echo ok'` from a second terminal, with the root session still open.
+3. Test `ssh -p 22022 ops@SERVER_IP 'sudo -n true && echo ok'` from a second terminal, with the root session still open.
 4. `sudo gitlab-runner/update.sh`, which moves the runner and the stacks to the service users.
 5. `sudo install/lock-root.sh` or the [Lock root SSH](COMMANDS.md#lock-root) block.
 6. Hetzner Firewall: remove TCP 22.
@@ -58,21 +58,21 @@ The order matters here, because of SSH access. Steps and rollback are in [Moving
 
 | User | Kind | SSH | What it does |
 |---|---|---|---|
-| `rocky` (`debian` on Debian) | admin | yes, by key | your login; `sudo` without password; not in the `docker` group, so Docker needs `sudo` |
+| `ops` | admin | yes, by key | your login; `sudo` without password; not in the `docker` group, so Docker needs `sudo` |
 | `gitlab-runner` | service | no (`nologin`, no password) | the runner service runs as this user; Docker access through the `docker` group, which the executor needs |
 | `monitoring` | service | no (`nologin`, no password) | Prometheus, node_exporter, Grafana, Loki and Alloy run as this user; it reads their config (`root:monitoring`, `0640`) but cannot change it |
 | `root` | | closed by the init at the end of the first boot | |
 
 SSH listens on port **22022**, accepts keys only, and only from members of `ssh-users` (the admin). Local port forwarding (`ssh -L`, for the Grafana tunnel) works; remote forwarding, agent and X11 forwarding are off. All of this is set by `install/users.sh`, which is embedded in the init.
 
-The admin name follows the OS, like cloud images do. Set `ADMIN_USER=...` to use another name, or `SSH_PORT=...` for another port, with `install/users.sh`.
+The admin is `ops` on every OS. Set `ADMIN_USER=...` to use another name, or `SSH_PORT=...` for another port, with `install/users.sh`.
 
 To avoid typing the port, add this to `~/.ssh/config` on your laptop, then use `ssh runner`, `scp file runner:` and so on:
 
 ```text
 Host runner
   HostName SERVER_IP
-  User rocky
+  User ops
   Port 22022
 ```
 
@@ -82,15 +82,15 @@ Why this split: GitLab's [runner security docs](https://docs.gitlab.com/runner/s
 
 1. **GitLab**: Settings → CI/CD → Runners → New runner. Set tags and "run untagged jobs", then copy the `glrt-` token. It is shown once.
 2. **Hetzner Console**: Rocky Linux, your SSH key, paste `gitlab-runner/cloud-init-rocky.yaml` as Cloud config. Firewall: inbound **TCP 22022** from your IP only (not 22), outbound left empty (allow all).
-3. **Wait for cloud-init**, as `rocky` on port 22022 (the key you gave Hetzner is copied to it):
+3. **Wait for cloud-init**, as `ops` on port 22022 (the key you gave Hetzner is copied to it):
 
    ```bash
-   ssh -p 22022 rocky@SERVER_IP 'cloud-init status --wait; cat /var/log/ci-bootstrap-failed.log 2>/dev/null; systemctl is-active docker gitlab-runner'
+   ssh -p 22022 ops@SERVER_IP 'cloud-init status --wait; cat /var/log/ci-bootstrap-failed.log 2>/dev/null; systemctl is-active docker gitlab-runner'
    ```
 
    `done` and two `active` lines mean the base is ready. `ci-bootstrap-failed.log` lists optional tools that aren't in the repositories for this Rocky version, or a failed step. If it says `users-lock-root-failed-root-ssh-still-open`, log in as root once and run `sudo /usr/local/sbin/server-users` to see why.
 
-   During the first minute of the boot, `rocky` and port 22022 may not exist yet. Wait and retry.
+   During the first minute of the boot, `ops` and port 22022 may not exist yet. Wait and retry.
 
 What the init installs:
 
@@ -106,20 +106,36 @@ For a server created with an older init, where you still log in as root on port 
 
 1. **Hetzner Firewall**: add inbound TCP 22022 from your IP. Keep the TCP 22 rule for now.
 2. Copy the repo (`scp -r server-init-config root@SERVER_IP:`), then `sudo ~/server-init-config/install/users.sh` as root, or paste the [Users](COMMANDS.md#users) block. sshd now listens on 22 and 22022.
-3. **Keep that session open** and test from a second terminal on your laptop: `ssh -p 22022 rocky@SERVER_IP 'sudo -n true && echo ok'`. It must print `ok`.
+3. **Keep that session open** and test from a second terminal on your laptop: `ssh -p 22022 ops@SERVER_IP 'sudo -n true && echo ok'`. It must print `ok`.
 4. Apply the update, so the stacks and the runner move to their service users: `sudo gitlab-runner/update.sh` (or the [Update](COMMANDS.md#update) block). It stops if a step fails and restores what it changed.
-5. Lock root and port 22: `sudo install/lock-root.sh` (or the [Lock root SSH](COMMANDS.md#lock-root) block). From now on: `ssh -p 22022 rocky@SERVER_IP`.
+5. Lock root and port 22: `sudo install/lock-root.sh` (or the [Lock root SSH](COMMANDS.md#lock-root) block). From now on: `ssh -p 22022 ops@SERVER_IP`.
 6. Remove the TCP 22 rule from the Hetzner Firewall.
 
 Rollback if the admin login fails: in the still-open session, `sudo install/users.sh --unlock-root` reopens root and port 22; `rm /etc/ssh/sshd_config.d/00-ci-hardening.conf && systemctl reload sshd` goes back to the previous SSH rules entirely. The runner service goes back to root with `rm /etc/systemd/system/gitlab-runner.service.d/10-service-user.conf && systemctl daemon-reload && systemctl restart gitlab-runner`. Do that while no jobs are running.
+
+### Renaming the admin to `ops` (server created when the admin was `rocky`)
+
+Logged in as `rocky`:
+
+```bash
+sudo ADMIN_USER=ops /usr/local/sbin/server-users   # creates ops with root's keys and sudo; keeps the root lock and port 22022
+```
+
+From a second terminal on your laptop, with the `rocky` session still open: `ssh -p 22022 ops@SERVER_IP 'sudo -n true && echo ok'`. It must print `ok`. Then, logged in as `ops`, remove the old admin (this deletes `/home/rocky`):
+
+```bash
+sudo gpasswd -d rocky ssh-users
+sudo rm -f /etc/sudoers.d/90-rocky
+sudo userdel -r rocky
+```
 
 ## 2. Copy the repo to the server (variant A only)
 
 From your laptop, in the folder that contains `server-init-config`. Repeat this every time the repo changes:
 
 ```bash
-scp -P 22022 -r server-init-config rocky@SERVER_IP:
-ssh -p 22022 rocky@SERVER_IP
+scp -P 22022 -r server-init-config ops@SERVER_IP:
+ssh -p 22022 ops@SERVER_IP
 cd ~/server-init-config
 ```
 
@@ -234,7 +250,7 @@ To change the schedule, edit `systemd/runner-weekly-cleanup.timer` in the repo a
 All of them listen on `127.0.0.1` only. Reach them through an SSH tunnel from your laptop:
 
 ```bash
-ssh -p 22022 -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 rocky@SERVER_IP
+ssh -p 22022 -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ops@SERVER_IP
 # Grafana    http://localhost:3000   user admin, password: sudo grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env
 # Prometheus http://localhost:9090
 ```
@@ -292,8 +308,8 @@ If `/etc/dnf/automatic.conf` is missing, the DNF version uses a different config
 ## Troubleshooting
 
 - **`Connection timed out` on port 22022**: the Hetzner Firewall has no inbound rule for TCP 22022, or sshd didn't bind it. Add the rule in the Hetzner Console (it applies at once). On the server: `sudo ss -ltnp | grep sshd` and, on Rocky, `sudo semanage port -l | grep ssh_port_t` must list 22022.
-- **`Permission denied (publickey)` as `rocky`**: the key was not copied, or you use another key. In a root or console session: `sudo cat /home/rocky/.ssh/authorized_keys`, then `sudo install/users.sh` to copy root's keys again. `--lock-root` refuses to run while the admin has no key.
-- **`sudo: health: command not found`**: the sudoers drop-in sets `secure_path` with `/usr/local/bin`. Check `sudo cat /etc/sudoers.d/90-rocky`, or call `sudo /usr/local/bin/health`.
+- **`Permission denied (publickey)` as `ops`**: the key was not copied, or you use another key. In a root or console session: `sudo cat /home/ops/.ssh/authorized_keys`, then `sudo install/users.sh` to copy root's keys again. `--lock-root` refuses to run while the admin has no key.
+- **`sudo: health: command not found`**: the sudoers drop-in sets `secure_path` with `/usr/local/bin`. Check `sudo cat /etc/sudoers.d/90-ops`, or call `sudo /usr/local/bin/health`.
 - **`Request bottleneck: request_concurrency=1` in the log**: the runner asks GitLab for one job at a time, so pickup is slow. `sudo grep request_concurrency /etc/gitlab-runner/config.toml`; registration sets it to 2. Add it under `[[runners]]` and restart if it is missing.
 - **Jobs stay pending**: the job's `tags:` don't match the runner, untagged jobs are not allowed on it, or instance runners with another tag (for example `saas-linux-small-amd64`) pick them up. Compare the tags in the job log and in the runner settings, then fix `tags:` in `.gitlab-ci.yml` or disable instance runners for the project.
 - **`permission denied … /var/run/docker.sock` in the runner log**: the runner process doesn't have the `docker` group. Check with the `ps -o user=,supgrp=` command above, then `sudo systemctl restart gitlab-runner`.

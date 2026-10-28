@@ -15,7 +15,7 @@ What a server built from this repo has:
 - Optionally, Prometheus, node_exporter and Grafana, all bound to `127.0.0.1`, plus Grafana on an HTTPS domain via Caddy
 - Optionally, log collection: Loki + Grafana Alloy for container logs and the systemd journal, 7 days, queried in Grafana
 - A `health` command: one report covering the system, security, services, runner, containers, caches and 24h trends
-- An admin login named after the OS (`rocky`, `debian`) with sudo; `gitlab-runner` and `monitoring` as service accounts without login; root SSH closed
+- An admin login `ops` with sudo; `gitlab-runner` and `monitoring` as service accounts without login; root SSH closed
 - SSH on port 22022, keys only, automatic security updates, SELinux enforcing (on Rocky)
 
 ## Layout
@@ -37,12 +37,12 @@ What a server built from this repo has:
 
 1. **Hetzner Console**: create the server (CAX11, `nbg1`, Rocky Linux 10 or Debian 13), add your SSH key, and paste `cloud-init/rocky.yaml` or `cloud-init/debian.yaml` as Cloud config.
 2. **Firewall**: inbound TCP 22022 from your IP only, ICMP optional, outbound left empty (empty means allow all). Open 80/443 only if you publish Grafana.
-3. **Wait for cloud-init**, then copy the repo to the server. You log in as `rocky` (`debian` on Debian) on port 22022; root SSH and port 22 are closed at the end of the first boot. The repo is private, so either use `scp` from your laptop or a read-only deploy key:
+3. **Wait for cloud-init**, then copy the repo to the server. You log in as `ops` on port 22022; root SSH and port 22 are closed at the end of the first boot. The repo is private, so either use `scp` from your laptop or a read-only deploy key:
 
    ```bash
-   ssh -p 22022 rocky@SERVER_IP cloud-init status --wait
-   scp -P 22022 -r server-init-config rocky@SERVER_IP:
-   ssh -p 22022 rocky@SERVER_IP
+   ssh -p 22022 ops@SERVER_IP cloud-init status --wait
+   scp -P 22022 -r server-init-config ops@SERVER_IP:
+   ssh -p 22022 ops@SERVER_IP
    ```
 
 4. **Install the host tools and register the runner.** Create the runner in GitLab first (Settings → CI/CD → Runners → New runner) and copy its `glrt-` token:
@@ -80,8 +80,8 @@ What a server built from this repo has:
 
 ```bash
 # 1. get the new repo state onto the server (scp copy, or a git clone there)
-scp -P 22022 -r server-init-config rocky@SERVER_IP:
-ssh -p 22022 rocky@SERVER_IP
+scp -P 22022 -r server-init-config ops@SERVER_IP:
+ssh -p 22022 ops@SERVER_IP
 
 # 2. preview, then apply
 cd ~/server-init-config
@@ -136,11 +136,11 @@ The cloud-init output stays under Hetzner's 32 KiB user-data limit (the renderer
 ## Security notes
 
 - No tokens or passwords are stored in this repo. Runner tokens, deploy tokens and the Grafana password are entered or generated on the server.
-- Users: you log in as the admin (`rocky`/`debian`), by key, on port 22022, with sudo. `gitlab-runner` and `monitoring` are service accounts without login; the runner service and the monitoring and logging containers run as them. Nobody you log in as is in the `docker` group, which is root-equivalent. Details and the reasoning are in [`gitlab-runner/README.md`](gitlab-runner/README.md#users).
+- Users: you log in as the admin `ops`, by key, on port 22022, with sudo. `gitlab-runner` and `monitoring` are service accounts without login; the runner service and the monitoring and logging containers run as them. Nobody you log in as is in the `docker` group, which is root-equivalent. Details and the reasoning are in [`gitlab-runner/README.md`](gitlab-runner/README.md#users).
 - `/etc/gitlab-runner/config.toml` (owned by `gitlab-runner`) and `/root/.docker/config.json` contain credentials and are kept at mode `600`.
 - Job containers are not privileged. Enable `privileged = true` only for trusted projects that need Docker-in-Docker.
 - `/srv/ci-cache` and the npm cache are shared by every project on the runner. Don't attach untrusted projects or forks.
-- All monitoring and cache ports listen on `127.0.0.1` or the `docker0` bridge. Reach Grafana and Prometheus through an SSH tunnel: `ssh -p 22022 -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 rocky@SERVER_IP`.
+- All monitoring and cache ports listen on `127.0.0.1` or the `docker0` bridge. Reach Grafana and Prometheus through an SSH tunnel: `ssh -p 22022 -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ops@SERVER_IP`.
 
 ## Rollback
 
