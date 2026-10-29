@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local AI stack: Ollama + Open WebUI, CPU only, UI on 127.0.0.1:3000 (reach it via SSH tunnel).
+# Local AI stack: Ollama + Open WebUI, CPU only, UI on 127.0.0.1:${UI_PORT} (default 3000; reach it via SSH tunnel).
 # Meant for a separate small server, not the runner host: a model competes with CI jobs for RAM.
 # Idempotent: rerun after changing ai/docker-compose.yml to roll out new image tags.
 set -Eeuo pipefail
@@ -10,7 +10,14 @@ DIR=/opt/ai
 MODEL="${MODEL:-qwen2.5:1.5b}"
 SWAP_SIZE="${SWAP_SIZE:-2G}"
 SWAP_FILE=/swapfile
-UI_URL="http://127.0.0.1:3000"
+# UI_PORT: environment, else the value saved in .env by an earlier run, else 3000.
+UI_PORT="${UI_PORT:-}"
+if [[ -z "$UI_PORT" && -f "${DIR}/.env" ]]; then
+  UI_PORT=$(grep -m1 '^UI_PORT=' "${DIR}/.env" | cut -d= -f2 || true)
+fi
+UI_PORT="${UI_PORT:-3000}"
+[[ "$UI_PORT" =~ ^[0-9]+$ ]] && (( UI_PORT >= 1024 && UI_PORT <= 65535 )) || die "invalid UI_PORT: ${UI_PORT} (use 1024-65535)"
+UI_URL="http://127.0.0.1:${UI_PORT}"
 CURL=(curl -fsS --connect-timeout 3 --max-time 10)
 
 usage() {
@@ -25,10 +32,11 @@ Installs or updates Ollama + Open WebUI in ${DIR} and pulls one model.
   --close-signup   deprecated alias for --check-signup
 
 Environment:
+  UI_PORT    host port of the UI on 127.0.0.1 (default: ${UI_PORT}; saved in ${DIR}/.env, 3000 is Grafana's port on the runner stack)
   MODEL      model to pull (default: ${MODEL}); any tag from ollama.com/library
   SWAP_SIZE  swap file to create when the host has no swap (default: ${SWAP_SIZE}, 0 to skip)
 
-Access from your laptop:  ssh -N -L 3000:127.0.0.1:3000 <admin>@<server>  then open http://localhost:3000
+Access from your laptop:  ssh -N -L ${UI_PORT}:127.0.0.1:${UI_PORT} <admin>@<server>  then open http://localhost:${UI_PORT}
 USAGE
 }
 
@@ -55,6 +63,7 @@ ensure_env() {
   if ! grep -q '^WEBUI_SECRET_KEY=' "$f"; then
     env_set "$f" WEBUI_SECRET_KEY "$(openssl rand -hex 32)"
   fi
+  env_set "$f" UI_PORT "$UI_PORT"
 }
 
 wait_ui() {
@@ -67,10 +76,25 @@ wait_ui() {
   die "Open WebUI did not become healthy on ${UI_URL}"
 }
 
+# Does this stack's own open-webui container publish 127.0.0.1:UI_PORT? (true on a rerun)
+stack_owns_port() {
+  local published
+  published=$(docker compose -f "${DIR}/docker-compose.yml" port open-webui 8080 2>/dev/null || true)
+  [[ "$published" == "127.0.0.1:${UI_PORT}" ]]
+}
+
+check_port_free() {
+  local listeners
+  listeners=$(ss -ltn | awk -v p=":${UI_PORT}" 'substr($4, length($4) - length(p) + 1) == p { print $4 }')
+  [[ -z "$listeners" ]] && return 0
+  stack_owns_port && return 0
+  die "port ${UI_PORT} is already in use on this host (${listeners//$'\n'/ }); pick another with UI_PORT=<port> (3000 is Grafana's port on the monitoring stack)"
+}
+
 check_binding() {
   local exposed
-  exposed=$(ss -ltn | awk '$4 ~ /:3000$/ && $4 != "127.0.0.1:3000"' | wc -l)
-  [[ "$exposed" == "0" ]] || { ss -ltn | awk '$4 ~ /:3000$/'; die "port 3000 is not bound to 127.0.0.1 only"; }
+  exposed=$(ss -ltn | awk -v p=":${UI_PORT}" -v ok="127.0.0.1:${UI_PORT}" 'substr($4, length($4) - length(p) + 1) == p && $4 != ok' | wc -l)
+  [[ "$exposed" == "0" ]] || { ss -ltn | awk -v p=":${UI_PORT}" 'substr($4, length($4) - length(p) + 1) == p'; die "port ${UI_PORT} is not bound to 127.0.0.1 only"; }
 }
 
 # Read-only: sign-ups are controlled inside Open WebUI (Admin Panel > Settings > General), not by .env.
@@ -106,6 +130,7 @@ fi
 mem_mb=$(awk '/MemTotal/ { print int($2 / 1024) }' /proc/meminfo)
 (( mem_mb >= 3500 )) || log "WARN: ${mem_mb} MB RAM; the stack is sized for 4 GB"
 
+check_port_free
 ensure_swap
 install -d -m 0750 "$DIR"
 if [[ -f "${DIR}/docker-compose.yml" ]] && ! cmp -s "$REPO_ROOT/ai/docker-compose.yml" "${DIR}/docker-compose.yml"; then
@@ -132,5 +157,5 @@ fi
 
 docker compose ps
 docker compose exec -T ollama ollama list
-ss -ltn | awk 'NR == 1 || $4 ~ /:3000$/'
+ss -ltn | awk -v p=":${UI_PORT}" 'NR == 1 || substr($4, length($4) - length(p) + 1) == p'
 log "OK: Open WebUI on ${UI_URL} (server-local). Tunnel in, create the admin account, then verify with: $0 --check-signup"
