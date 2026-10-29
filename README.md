@@ -93,13 +93,13 @@ Then, from your laptop:
 ssh -N -L 3000:127.0.0.1:3000 ops@SERVER_IP
 ```
 
-Open `http://localhost:3000`, create the first account (it becomes the admin), and close sign-ups right away:
+Open `http://localhost:3000` and create the first account. It becomes the admin, and Open WebUI closes sign-ups automatically at that moment. Verify with:
 
 ```bash
-sudo install/ai.sh --close-signup
+sudo install/ai.sh --check-signup
 ```
 
-Also switch sign-ups off in Admin Panel → Settings → General, because Open WebUI keeps that setting in its own database.
+The check is read-only. Sign-ups live in Open WebUI's own database, not in `.env`; to open or close them later, use Admin Panel → Settings → General.
 
 Expect a few tokens per second on shared vCPUs: good for short questions, translation and summaries, not a replacement for a hosted model. To update, change the image tags in `ai/docker-compose.yml` and rerun `install/ai.sh`; `install/update.sh` does not manage this stack. `docker compose down` in `/opt/ai` stops it and keeps models and chats; `docker compose down -v` deletes both for good.
 

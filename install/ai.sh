@@ -15,11 +15,14 @@ CURL=(curl -fsS --connect-timeout 3 --max-time 10)
 
 usage() {
   cat <<USAGE
-Usage: $0 [--close-signup]
+Usage: $0 [--check-signup]
 
 Installs or updates Ollama + Open WebUI in ${DIR} and pulls one model.
   (no option)      install or update the stack, pull \$MODEL
-  --close-signup   after you created the admin account: disable new sign-ups and restart the UI
+  --check-signup   read-only: report whether Open WebUI still allows new sign-ups
+                   (the first account becomes admin and closes sign-ups automatically;
+                   re-open or close later in Admin Panel > Settings > General)
+  --close-signup   deprecated alias for --check-signup
 
 Environment:
   MODEL      model to pull (default: ${MODEL}); any tag from ollama.com/library
@@ -52,7 +55,6 @@ ensure_env() {
   if ! grep -q '^WEBUI_SECRET_KEY=' "$f"; then
     env_set "$f" WEBUI_SECRET_KEY "$(openssl rand -hex 32)"
   fi
-  grep -q '^ENABLE_SIGNUP=' "$f" || env_set "$f" ENABLE_SIGNUP true
 }
 
 wait_ui() {
@@ -71,25 +73,22 @@ check_binding() {
   [[ "$exposed" == "0" ]] || { ss -ltn | awk '$4 ~ /:3000$/'; die "port 3000 is not bound to 127.0.0.1 only"; }
 }
 
-close_signup() {
-  [[ -f "${DIR}/docker-compose.yml" ]] || die "stack not installed, run $0 first"
+# Read-only: sign-ups are controlled inside Open WebUI (Admin Panel > Settings > General), not by .env.
+check_signup() {
   command -v jq >/dev/null || pkg_install jq
-  env_set "${DIR}/.env" ENABLE_SIGNUP false
-  (cd "$DIR" && docker compose up -d open-webui)
-  wait_ui
-  # Open WebUI keeps settings in its database once saved, and a stored value wins over the environment.
   local signup
   signup=$("${CURL[@]}" "${UI_URL}/api/config" | jq -r '.features.enable_signup | if . == null then "unknown" else tostring end' || true)
   case "$signup" in
     false)   log "OK: sign-ups disabled" ;;
-    true)    die "sign-ups are still enabled by the setting stored in Open WebUI; switch them off in Admin Panel > Settings > General" ;;
-    *)       die "could not read features.enable_signup from ${UI_URL}/api/config; check Admin Panel > Settings > General by hand" ;;
+    true)    die "sign-ups are enabled; switch them off in Admin Panel > Settings > General" ;;
+    *)       die "could not read features.enable_signup from ${UI_URL}/api/config (is the UI running?); check Admin Panel > Settings > General by hand" ;;
   esac
 }
 
 case "${1:-}" in
   -h | --help) usage; exit 0 ;;
-  --close-signup) require_root; close_signup; exit 0 ;;
+  --check-signup) check_signup; exit 0 ;;
+  --close-signup) log "NOTE: --close-signup is deprecated and only checks now; Open WebUI closes sign-ups itself after the first account"; check_signup; exit 0 ;;
   "") ;;
   *) usage; die "unknown option: $1" ;;
 esac
@@ -133,4 +132,4 @@ fi
 docker compose ps
 docker compose exec -T ollama ollama list
 ss -ltn | awk 'NR == 1 || $4 ~ /:3000$/'
-log "OK: Open WebUI on ${UI_URL} (server-local). Tunnel in, create the admin account, then run: $0 --close-signup"
+log "OK: Open WebUI on ${UI_URL} (server-local). Tunnel in, create the admin account, then verify with: $0 --check-signup"
