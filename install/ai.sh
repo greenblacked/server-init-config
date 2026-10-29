@@ -97,6 +97,7 @@ require_root
 command -v docker >/dev/null || die "docker not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v openssl >/dev/null || pkg_install openssl
+[[ -f "$REPO_ROOT/ai/docker-compose.yml" ]] || die "missing $REPO_ROOT/ai/docker-compose.yml: run ai.sh from a full copy of the repo"
 [[ "$MODEL" =~ ^[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?$ ]] || die "invalid MODEL: ${MODEL}"
 
 if systemctl is-active --quiet gitlab-runner 2>/dev/null; then
