@@ -148,7 +148,10 @@ check_binding
 
 # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
 models=$(docker compose exec -T ollama ollama list | awk 'NR > 1 { print $1 }')
-if grep -qxF -- "$MODEL" <<<"$models"; then
+# ollama list always shows the tag, so an untagged MODEL means :latest.
+want="$MODEL"
+[[ "${want##*/}" == *:* ]] || want="${want}:latest"
+if grep -qxF -- "$want" <<<"$models"; then
   log "model ${MODEL} already present"
 else
   log "pulling model ${MODEL}"

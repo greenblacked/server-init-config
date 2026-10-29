@@ -79,18 +79,20 @@ What a server built from this repo has:
 
 `install/ai.sh` runs a lightweight local chat on a second, small server (2 vCPU / 4 GB): Ollama with one small model and Open WebUI in front of it, CPU only. It is not meant for the runner host, where a model would compete with CI jobs for memory; the installer warns if `gitlab-runner` is active.
 
-What it does: creates a 2 GB swap file if the host has none, copies `ai/docker-compose.yml` to `/opt/ai`, generates `WEBUI_SECRET_KEY` into a root-only `.env`, starts the stack and pulls the model. Open WebUI listens on `127.0.0.1:3000` only and Ollama publishes no port, so nothing new is reachable from the internet.
+What it does: creates a 2 GB swap file if the host has none, copies `ai/docker-compose.yml` to `/opt/ai`, generates `WEBUI_SECRET_KEY` into a root-only `.env`, starts the stack and pulls the model. Open WebUI listens on `127.0.0.1:3000` only (set `UI_PORT=<port>` if 3000 is taken, for example by Grafana; the choice is saved in `.env`) and Ollama publishes no port, so nothing new is reachable from the internet.
 
 ```bash
 cd ~/server-init-config
 sudo install/ai.sh                          # default model qwen2.5:1.5b
-sudo MODEL=llama3.2:3b install/ai.sh        # bigger and slower, uses most of the 2 GB limit
+sudo MODEL=llama3.2:1b install/ai.sh        # smaller and faster, fits the 2 GB Ollama limit
 ```
+
+Bigger models (for example `llama3.2:3b`) need a higher `mem_limit` for `ollama` in `ai/docker-compose.yml` first.
 
 Then, from your laptop:
 
 ```bash
-ssh -N -L 3000:127.0.0.1:3000 ops@SERVER_IP
+ssh -N -L 3000:127.0.0.1:3000 ops@SERVER_IP    # use your UI_PORT on both sides if you changed it
 ```
 
 Open `http://localhost:3000` and create the first account. It becomes the admin, and Open WebUI closes sign-ups automatically at that moment. Verify with:
