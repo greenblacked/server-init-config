@@ -39,6 +39,10 @@ class Block:
     interactive: list[str] = field(default_factory=list)
 
 
+# Never copied onto the runner host: the separate AI server installs it (its compose file is not embedded either).
+EXCLUDE = {"install/ai.sh"}
+
+
 def expand(paths: list[str]) -> list[str]:
     out: list[str] = []
     for rel in paths:
@@ -49,7 +53,7 @@ def expand(paths: list[str]) -> list[str]:
             out.append(rel)
         else:
             raise FileNotFoundError(rel)
-    seen: set[str] = set()
+    seen: set[str] = set(EXCLUDE)
     return [f for f in out if not (f in seen or seen.add(f))]
 
 
