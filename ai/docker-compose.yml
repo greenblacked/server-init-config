@@ -47,6 +47,7 @@ services:
     ports:
       - "127.0.0.1:${UI_PORT:-3000}:8080"  # never 0.0.0.0; set UI_PORT if 3000 is taken
     mem_limit: 1200m
+    cpus: 0.5                           # the UI is light; ollama 1.5 + this = the 2 vCPUs
     security_opt:
       - no-new-privileges:true
     networks: [ai]
