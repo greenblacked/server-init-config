@@ -45,7 +45,7 @@ services:
     volumes:
       - open-webui:/app/backend/data
     ports:
-      - "127.0.0.1:3000:8080"           # never 0.0.0.0
+      - "127.0.0.1:${UI_PORT:-3000}:8080"  # never 0.0.0.0; set UI_PORT if 3000 is taken
     mem_limit: 1200m
     security_opt:
       - no-new-privileges:true
