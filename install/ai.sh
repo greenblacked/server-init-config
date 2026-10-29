@@ -11,6 +11,7 @@ MODEL="${MODEL:-qwen2.5:1.5b}"
 SWAP_SIZE="${SWAP_SIZE:-2G}"
 SWAP_FILE=/swapfile
 UI_URL="http://127.0.0.1:3000"
+CURL=(curl -fsS --connect-timeout 3 --max-time 10)
 
 usage() {
   cat <<USAGE
@@ -57,7 +58,7 @@ ensure_env() {
 wait_ui() {
   local _
   for _ in $(seq 1 60); do
-    curl -fsS "${UI_URL}/health" >/dev/null 2>&1 && return 0
+    "${CURL[@]}" "${UI_URL}/health" >/dev/null 2>&1 && return 0
     sleep 3
   done
   (cd "$DIR" && docker compose logs --tail 40)
@@ -72,10 +73,18 @@ check_binding() {
 
 close_signup() {
   [[ -f "${DIR}/docker-compose.yml" ]] || die "stack not installed, run $0 first"
+  command -v jq >/dev/null || pkg_install jq
   env_set "${DIR}/.env" ENABLE_SIGNUP false
   (cd "$DIR" && docker compose up -d open-webui)
   wait_ui
-  log "OK: sign-ups disabled. Also check Admin Panel > Settings > General, Open WebUI keeps this setting in its database too."
+  # Open WebUI keeps settings in its database once saved, and a stored value wins over the environment.
+  local signup
+  signup=$("${CURL[@]}" "${UI_URL}/api/config" | jq -r '.features.enable_signup | if . == null then "unknown" else tostring end' || true)
+  case "$signup" in
+    false)   log "OK: sign-ups disabled" ;;
+    true)    die "sign-ups are still enabled by the setting stored in Open WebUI; switch them off in Admin Panel > Settings > General" ;;
+    *)       die "could not read features.enable_signup from ${UI_URL}/api/config; check Admin Panel > Settings > General by hand" ;;
+  esac
 }
 
 case "${1:-}" in
@@ -114,7 +123,7 @@ check_binding
 
 # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
 models=$(docker compose exec -T ollama ollama list | awk 'NR > 1 { print $1 }')
-if grep -qx "$MODEL" <<<"$models"; then
+if grep -qxF -- "$MODEL" <<<"$models"; then
   log "model ${MODEL} already present"
 else
   log "pulling model ${MODEL}"
