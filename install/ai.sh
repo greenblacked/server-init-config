@@ -16,7 +16,8 @@ if [[ -z "$UI_PORT" && -f "${DIR}/.env" ]]; then
   UI_PORT=$(grep -m1 '^UI_PORT=' "${DIR}/.env" | cut -d= -f2 || true)
 fi
 UI_PORT="${UI_PORT:-3080}"
-[[ "$UI_PORT" =~ ^[0-9]+$ ]] && (( UI_PORT >= 1024 && UI_PORT <= 65535 )) || die "invalid UI_PORT: ${UI_PORT} (use 1024-65535)"
+# Digits only, no leading zero (bash would read 03000 as octal inside (( ))).
+[[ "$UI_PORT" =~ ^[1-9][0-9]{3,4}$ ]] && (( UI_PORT >= 1024 && UI_PORT <= 65535 )) || die "invalid UI_PORT: ${UI_PORT} (use 1024-65535)"
 UI_URL="http://127.0.0.1:${UI_PORT}"
 CURL=(curl -fsS --connect-timeout 3 --max-time 10)
 
@@ -60,6 +61,8 @@ ensure_env() {
   touch "$f"
   chown root:root "$f"
   chmod 600 "$f"
+  # Earlier revisions of this script wrote ENABLE_SIGNUP; sign-ups are now managed inside Open WebUI.
+  sed -i '/^ENABLE_SIGNUP=/d' "$f"
   if ! grep -q '^WEBUI_SECRET_KEY=' "$f"; then
     env_set "$f" WEBUI_SECRET_KEY "$(openssl rand -hex 32)"
   fi
@@ -111,8 +114,8 @@ check_signup() {
 
 case "${1:-}" in
   -h | --help) usage; exit 0 ;;
-  --check-signup) check_signup; exit 0 ;;
-  --close-signup) log "NOTE: --close-signup is deprecated and only checks now; Open WebUI closes sign-ups itself after the first account"; check_signup; exit 0 ;;
+  --check-signup) require_root; check_signup; exit 0 ;;
+  --close-signup) log "NOTE: --close-signup is deprecated and only checks now; Open WebUI closes sign-ups itself after the first account"; require_root; check_signup; exit 0 ;;
   "") ;;
   *) usage; die "unknown option: $1" ;;
 esac
@@ -120,8 +123,8 @@ esac
 require_root
 command -v docker >/dev/null || die "docker not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
-command -v openssl >/dev/null || pkg_install openssl
 [[ -f "$REPO_ROOT/ai/docker-compose.yml" ]] || die "missing $REPO_ROOT/ai/docker-compose.yml: run ai.sh from a full copy of the repo"
+command -v openssl >/dev/null || pkg_install openssl
 [[ "$MODEL" =~ ^[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?$ ]] || die "invalid MODEL: ${MODEL}"
 
 if systemctl is-active --quiet gitlab-runner 2>/dev/null; then
