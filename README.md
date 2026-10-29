@@ -31,6 +31,7 @@ What a server built from this repo has:
 | `systemd/` | services and timers for the scripts |
 | `install/` | idempotent installers for optional components, run on the server from a clone; `update.sh` updates everything installed |
 | `monitoring/`, `logging/`, `registry-cache/`, `npm-cache/` | Docker Compose stacks and their configs |
+| `ai/` | Ollama + Open WebUI for a separate small server, installed by `install/ai.sh` (see [Local AI](#local-ai-separate-server)) |
 | `ci/` | `.gitlab-ci.yml` snippets: smoke test, defaults, arm64 check, multi-arch mirroring |
 
 ## Build a new server
@@ -73,6 +74,34 @@ What a server built from this repo has:
    ```
 
    Then run `ci/smoke.yml` in a project. Its log must show `on <your runner description>` and `aarch64`.
+
+## Local AI (separate server)
+
+`install/ai.sh` runs a lightweight local chat on a second, small server (2 vCPU / 4 GB): Ollama with one small model and Open WebUI in front of it, CPU only. It is not meant for the runner host, where a model would compete with CI jobs for memory; the installer warns if `gitlab-runner` is active.
+
+What it does: creates a 2 GB swap file if the host has none, copies `ai/docker-compose.yml` to `/opt/ai`, generates `WEBUI_SECRET_KEY` into a root-only `.env`, starts the stack and pulls the model. Open WebUI listens on `127.0.0.1:3000` only and Ollama publishes no port, so nothing new is reachable from the internet.
+
+```bash
+cd ~/server-init-config
+sudo install/ai.sh                          # default model qwen2.5:1.5b
+sudo MODEL=llama3.2:3b install/ai.sh        # bigger and slower, uses most of the 2 GB limit
+```
+
+Then, from your laptop:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 ops@SERVER_IP
+```
+
+Open `http://localhost:3000`, create the first account (it becomes the admin), and close sign-ups right away:
+
+```bash
+sudo install/ai.sh --close-signup
+```
+
+Also switch sign-ups off in Admin Panel → Settings → General, because Open WebUI keeps that setting in its own database.
+
+Expect a few tokens per second on shared vCPUs: good for short questions, translation and summaries, not a replacement for a hosted model. To update, change the image tags in `ai/docker-compose.yml` and rerun `install/ai.sh`; `install/update.sh` does not manage this stack. `docker compose down` in `/opt/ai` stops it and keeps models and chats; `docker compose down -v` deletes both for good.
 
 ## Update a server
 
