@@ -35,7 +35,9 @@ services:
     environment:
       OLLAMA_BASE_URL: "http://ollama:11434"
       WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY must be set in .env}"
-      ENABLE_SIGNUP: "${ENABLE_SIGNUP:-true}"   # install/ai.sh: set false after the admin exists
+      # Only seeds the first-start value; Open WebUI then keeps it in its database. The first account
+      # can always register and becomes admin; Open WebUI then closes sign-ups itself.
+      ENABLE_SIGNUP: "${ENABLE_SIGNUP:-false}"
       ENABLE_OPENAI_API: "false"                # local models only
       ANONYMIZED_TELEMETRY: "false"
       DO_NOT_TRACK: "true"
