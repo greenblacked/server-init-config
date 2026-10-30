@@ -289,7 +289,7 @@ write_files:
       }
 
       firewall() {
-        local running=0 zone p
+        local running=0 zone p ssh_ports=""
         systemctl is-active --quiet firewalld && running=1
         if (( running )); then zone=$(firewall-cmd --get-default-zone) || return 1; else zone=$(firewall-offline-cmd --get-default-zone) || return 1; fi
         if [[ "$zone" != public ]]; then
@@ -297,10 +297,21 @@ write_files:
           else firewall-offline-cmd --set-default-zone=public >/dev/null || return 1; fi
         fi
         fw_perm --zone=public --query-service=ssh >/dev/null 2>&1 || fw_perm --zone=public --add-service=ssh >/dev/null || return 1
+        # sshd may listen on another port than 22 (bootstrap --port): that port is allowed too.
+        for p in $(sshd -T 2>/dev/null | awk '$1 == "port" && $2 != 22 { print $2 }'); do
+          fw_perm --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || fw_perm --zone=public --add-port="${p}/tcp" >/dev/null || return 1
+          ssh_ports+=" $p"
+        done
         # Lockout guard: never start or reload the firewall unless SSH is in the saved rules.
         fw_perm --zone=public --query-service=ssh >/dev/null 2>&1 || { fail "ssh missing from saved public zone; firewall left as it was"; return 1; }
+        for p in $ssh_ports; do
+          fw_perm --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || { fail "ssh port ${p} missing from saved public zone; firewall left as it was"; return 1; }
+        done
         if (( running )); then firewall-cmd --reload >/dev/null || return 1; else systemctl enable --now firewalld || return 1; fi
         firewall-cmd --zone=public --query-service=ssh >/dev/null || { systemctl stop firewalld; fail "ssh not allowed after start; firewalld stopped"; return 1; }
+        for p in $ssh_ports; do
+          firewall-cmd --zone=public --query-port="${p}/tcp" >/dev/null || { systemctl stop firewalld; fail "ssh port ${p} not allowed after start; firewalld stopped"; return 1; }
+        done
 
         # Everything else is changed through the running daemon: firewall-offline-cmd rejects
         # --zone with --remove-service ("Can't use lokkit options with other options").

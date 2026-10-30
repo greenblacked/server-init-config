@@ -379,7 +379,7 @@ unknown_hetzner_app() {
 }
 
 firewall() {
-  local was_active=0 p
+  local was_active=0 p ssh_ports=""
   detect_app
   if [[ "$APP" == auto && -z "$APP_NAME" ]] && unknown_hetzner_app; then
     fail "unrecognised Hetzner Apps image: its ports are unknown, so ufw was not enabled (set APP=<name> or APP=none and EXTRA_PORTS in $CONF_FILE, then rerun)"
@@ -391,8 +391,18 @@ firewall() {
   fi
   ufw_is_active && was_active=1
   ufw_ssh_saved || ufw allow 22/tcp >/dev/null || return 1
+  # sshd may listen on another port than 22 (bootstrap --port): that port is allowed too.
+  for p in $(sshd -T 2>/dev/null | awk '$1 == "port" && $2 != 22 { print $2 }'); do
+    ufw allow "${p}/tcp" >/dev/null || return 1
+    ssh_ports+=" $p"
+  done
   # Lockout guard: never enable the firewall unless SSH is in the saved rules.
   ufw_ssh_saved || { fail "22/tcp missing from saved ufw rules; ufw left as it was"; return 1; }
+  local o
+  for p in $ssh_ports; do
+    o=$(ufw show added 2>/dev/null) || true
+    grep -qE "^ufw (allow|limit) (in )?${p}/tcp([[:space:]]|\$)" <<<"$o" || { fail "ssh port ${p} missing from saved ufw rules; ufw left as it was"; return 1; }
+  done
   # Defaults are set only when ufw is switched on for the first time; an active ufw keeps what it has.
   if (( ! was_active )); then
     ufw default deny incoming >/dev/null || return 1
@@ -411,7 +421,11 @@ firewall() {
     systemctl enable ufw >/dev/null 2>&1 || true
   fi
   # A rule added to an active ufw applies at once; here SSH must still be allowed.
-  if ! ufw_ssh_live; then
+  local live=1
+  ufw_ssh_live || live=0
+  o=$(ufw status 2>/dev/null) || true
+  for p in $ssh_ports; do grep -qE "^${p}/tcp([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|LIMIT)" <<<"$o" || live=0; done
+  if (( ! live )); then
     if (( was_active )); then fail "ssh not allowed in running ufw"; else ufw disable >/dev/null 2>&1 || true; fail "ssh not allowed after enabling ufw; ufw disabled again"; fi
     return 1
   fi
