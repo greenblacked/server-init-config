@@ -64,7 +64,7 @@ is_component() {
 is_installed() {
   case "$1" in
     users)          id monitoring >/dev/null 2>&1 && grep -qs "^AllowGroups" /etc/ssh/sshd_config.d/00-ci-hardening.conf ;;
-    packages)       command -v htop >/dev/null 2>&1 && [[ -f /etc/profile.d/ci-runner.sh ]] ;;
+    packages)       command -v htop >/dev/null 2>&1 && grep -qs "alias runner-jobs='sudo " /etc/profile.d/ci-runner.sh ;;
     tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh ]] ;;
     security)       command -v lynis >/dev/null 2>&1 && [[ -x /usr/local/bin/trivy ]] ;;
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;
@@ -122,8 +122,8 @@ list_components() {
 
 preflight() {
   [[ $EUID -eq 0 ]] || die "run as root"
-  [[ -d "${ROOT}/install" && -d "${ROOT}/scripts" && -d "${ROOT}/systemd" ]] \
-    || die "incomplete copy: the whole repository is needed, not only the gitlab-runner folder"
+  [[ -d "${HERE}/install" && -d "${HERE}/scripts" && -d "${HERE}/systemd" && -d "${ROOT}/common" ]] \
+    || die "incomplete copy: the whole repository is needed, not only the runner folder"
   command -v docker >/dev/null || die "docker is not installed yet; wait for 'cloud-init status --wait' and read /var/log/cloud-init-output.log"
   command -v gitlab-runner >/dev/null || die "gitlab-runner is not installed yet; see /var/log/cloud-init-output.log"
   systemctl is-active --quiet docker || die "docker is not running"
