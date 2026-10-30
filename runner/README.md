@@ -16,12 +16,17 @@ A Hetzner server that runs CI jobs for GitLab with the docker executor. Built fo
    runner/bootstrap.sh SERVER_IP
    ```
 
-   It waits for cloud-init (and shows `/var/log/ci-bootstrap-failed.log` if a step failed), streams `git archive HEAD` to `/root/server-init-config`, installs users, admin tools, health and cleanup, the runner registration (you type the token on the server), Docker Hub cache, monitoring, logging, npm cache and shared cache, and ends with `health`. It also turns on the host firewall and fail2ban. Options: `--no-register`, `--no-firewall`, `--with-prewarm`, `--user`, `--port`, `--allow-dirty`, `--dry-run`. `DOMAIN` and `ACME_EMAIL` in the environment add Grafana on an HTTPS domain. It never runs lock-root or selinux. Rerunning is safe: installed components are skipped.
+   It waits for cloud-init (and shows `/var/log/ci-bootstrap-failed.log` if a step failed), streams `git archive HEAD` to `/root/server-init-config`, installs users, admin tools, health and cleanup, the runner registration (you type the token on the server), Docker Hub cache, monitoring, logging, npm cache and shared cache, and ends with `health`. It also turns on the host firewall and fail2ban. Options: `--no-register`, `--no-firewall`, `--with-prewarm`, `--user`, `--port`, `--allow-dirty`, `--dry-run`. `DOMAIN` and `ACME_EMAIL` in the environment add Grafana on an HTTPS domain. It never runs lock-root or selinux; if SELinux is not enforcing on the server (`rocky-clean.yaml` leaves it as the image has it), it prints the command for it at the end. Rerunning is safe: installed components are skipped.
 4. **Smoke test**: run `ci/smoke.yml` in a project. The log must show `on <runner description>` and `aarch64` (`x86_64` on x86). If the job stays pending, check `tags:`.
 5. **Test the admin login** from a second terminal (laptop, any directory), then close root SSH if you want:
 
    ```bash
    ssh ops@SERVER_IP 'sudo -n true && echo ok'
+   ```
+6. **SELinux (Rocky with `rocky-clean.yaml`)**: the clean init leaves the mode as the image has it. While no CI job runs, make it enforcing (server, as `ops`, any directory; restarts Docker):
+
+   ```bash
+   sudo bash -c 'cd /root/server-init-config && runner/setup.sh --selinux'
    ```
 
 ### Which init file
