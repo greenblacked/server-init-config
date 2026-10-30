@@ -96,7 +96,8 @@ install -d "$(dirname /etc/profile.d/90-shell-history.sh)"
 cat > /etc/profile.d/90-shell-history.sh <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
-# Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+# Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
+# The same text is embedded in server/server-init-el10.sh
 # and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
 # tools/test-cloud-init.py checks that.
 [ -n "${BASH_VERSION-}" ] || return 0
@@ -122,6 +123,13 @@ __shell_history_prompt() {
   fi
 }
 # Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+# When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
+# the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
+# then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+  unset PROMPT_COMMAND
+  PROMPT_COMMAND=('' '__shell_history_prompt')
+fi
 case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
   "declare -a"*)
     [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
@@ -161,10 +169,10 @@ if command -v fzf >/dev/null 2>&1; then
     fi
   done
   # fzf 0.48+ can print its own bindings when the package ships no file.
-  if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
-    eval "$(fzf --bash)"
+  if [[ -z "${__fzf_done-}" ]] && __fzf_b=$(fzf --bash 2>/dev/null); then
+    eval "$__fzf_b"
   fi
-  unset __f __fzf_done
+  unset __f __fzf_done __fzf_b
 fi
 __SIC_EOF__
 chmod 644 /etc/profile.d/90-shell-history.sh
@@ -939,9 +947,15 @@ restorecon_if /etc/profile.d/ci-runner.sh
 # Shell history, Ctrl+R / Ctrl+T with fzf: one source file, also embedded in server/server-init-*.sh
 install -m 0644 "$REPO_ROOT/scripts/shell-history.sh" /etc/profile.d/90-shell-history.sh
 restorecon_if /etc/profile.d/90-shell-history.sh
+# Debian and Ubuntu ship HISTSIZE=1000/HISTFILESIZE=2000 in the skeleton ~/.bashrc; bash applies them before the
+# first prompt and truncates the history file, so the larger limits in profile.d never take effect. Comment out
+# exactly those default lines (other values are a deliberate choice and are kept).
+for rc in /etc/skel/.bashrc /root/.bashrc /home/*/.bashrc; do
+  [[ -f "$rc" ]] && sed -i -E 's/^(HISTSIZE=1000|HISTFILESIZE=2000)$/# &  (raised in \/etc\/profile.d\/90-shell-history.sh)/' "$rc"
+done
 # Debian and Ubuntu name the fd binary fdfind
 if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
-  ln -s "$(command -v fdfind)" /usr/local/bin/fd
+  ln -sfn "$(command -v fdfind)" /usr/local/bin/fd
 fi
 
 # root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none
@@ -980,7 +994,8 @@ install -d "$R/scripts"
 cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
-# Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+# Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
+# The same text is embedded in server/server-init-el10.sh
 # and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
 # tools/test-cloud-init.py checks that.
 [ -n "${BASH_VERSION-}" ] || return 0
@@ -1006,6 +1021,13 @@ __shell_history_prompt() {
   fi
 }
 # Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+# When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
+# the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
+# then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+  unset PROMPT_COMMAND
+  PROMPT_COMMAND=('' '__shell_history_prompt')
+fi
 case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
   "declare -a"*)
     [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
@@ -1045,10 +1067,10 @@ if command -v fzf >/dev/null 2>&1; then
     fi
   done
   # fzf 0.48+ can print its own bindings when the package ships no file.
-  if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
-    eval "$(fzf --bash)"
+  if [[ -z "${__fzf_done-}" ]] && __fzf_b=$(fzf --bash 2>/dev/null); then
+    eval "$__fzf_b"
   fi
-  unset __f __fzf_done
+  unset __f __fzf_done __fzf_b
 fi
 __SIC_EOF__
 chmod 755 "$R/scripts/shell-history.sh"
@@ -6482,9 +6504,15 @@ restorecon_if /etc/profile.d/ci-runner.sh
 # Shell history, Ctrl+R / Ctrl+T with fzf: one source file, also embedded in server/server-init-*.sh
 install -m 0644 "$REPO_ROOT/scripts/shell-history.sh" /etc/profile.d/90-shell-history.sh
 restorecon_if /etc/profile.d/90-shell-history.sh
+# Debian and Ubuntu ship HISTSIZE=1000/HISTFILESIZE=2000 in the skeleton ~/.bashrc; bash applies them before the
+# first prompt and truncates the history file, so the larger limits in profile.d never take effect. Comment out
+# exactly those default lines (other values are a deliberate choice and are kept).
+for rc in /etc/skel/.bashrc /root/.bashrc /home/*/.bashrc; do
+  [[ -f "$rc" ]] && sed -i -E 's/^(HISTSIZE=1000|HISTFILESIZE=2000)$/# &  (raised in \/etc\/profile.d\/90-shell-history.sh)/' "$rc"
+done
 # Debian and Ubuntu name the fd binary fdfind
 if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
-  ln -s "$(command -v fdfind)" /usr/local/bin/fd
+  ln -sfn "$(command -v fdfind)" /usr/local/bin/fd
 fi
 
 # root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none
@@ -9381,7 +9409,8 @@ install -d "$R/scripts"
 cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
-# Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+# Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
+# The same text is embedded in server/server-init-el10.sh
 # and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
 # tools/test-cloud-init.py checks that.
 [ -n "${BASH_VERSION-}" ] || return 0
@@ -9407,6 +9436,13 @@ __shell_history_prompt() {
   fi
 }
 # Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+# When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
+# the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
+# then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+  unset PROMPT_COMMAND
+  PROMPT_COMMAND=('' '__shell_history_prompt')
+fi
 case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
   "declare -a"*)
     [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
@@ -9446,10 +9482,10 @@ if command -v fzf >/dev/null 2>&1; then
     fi
   done
   # fzf 0.48+ can print its own bindings when the package ships no file.
-  if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
-    eval "$(fzf --bash)"
+  if [[ -z "${__fzf_done-}" ]] && __fzf_b=$(fzf --bash 2>/dev/null); then
+    eval "$__fzf_b"
   fi
-  unset __f __fzf_done
+  unset __f __fzf_done __fzf_b
 fi
 __SIC_EOF__
 chmod 755 "$R/scripts/shell-history.sh"
@@ -10386,9 +10422,15 @@ restorecon_if /etc/profile.d/ci-runner.sh
 # Shell history, Ctrl+R / Ctrl+T with fzf: one source file, also embedded in server/server-init-*.sh
 install -m 0644 "$REPO_ROOT/scripts/shell-history.sh" /etc/profile.d/90-shell-history.sh
 restorecon_if /etc/profile.d/90-shell-history.sh
+# Debian and Ubuntu ship HISTSIZE=1000/HISTFILESIZE=2000 in the skeleton ~/.bashrc; bash applies them before the
+# first prompt and truncates the history file, so the larger limits in profile.d never take effect. Comment out
+# exactly those default lines (other values are a deliberate choice and are kept).
+for rc in /etc/skel/.bashrc /root/.bashrc /home/*/.bashrc; do
+  [[ -f "$rc" ]] && sed -i -E 's/^(HISTSIZE=1000|HISTFILESIZE=2000)$/# &  (raised in \/etc\/profile.d\/90-shell-history.sh)/' "$rc"
+done
 # Debian and Ubuntu name the fd binary fdfind
 if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
-  ln -s "$(command -v fdfind)" /usr/local/bin/fd
+  ln -sfn "$(command -v fdfind)" /usr/local/bin/fd
 fi
 
 # root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none
@@ -13285,7 +13327,8 @@ install -d "$R/scripts"
 cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
-# Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+# Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
+# The same text is embedded in server/server-init-el10.sh
 # and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
 # tools/test-cloud-init.py checks that.
 [ -n "${BASH_VERSION-}" ] || return 0
@@ -13311,6 +13354,13 @@ __shell_history_prompt() {
   fi
 }
 # Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+# When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
+# the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
+# then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+  unset PROMPT_COMMAND
+  PROMPT_COMMAND=('' '__shell_history_prompt')
+fi
 case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
   "declare -a"*)
     [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
@@ -13350,10 +13400,10 @@ if command -v fzf >/dev/null 2>&1; then
     fi
   done
   # fzf 0.48+ can print its own bindings when the package ships no file.
-  if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
-    eval "$(fzf --bash)"
+  if [[ -z "${__fzf_done-}" ]] && __fzf_b=$(fzf --bash 2>/dev/null); then
+    eval "$__fzf_b"
   fi
-  unset __f __fzf_done
+  unset __f __fzf_done __fzf_b
 fi
 __SIC_EOF__
 chmod 755 "$R/scripts/shell-history.sh"
