@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = ROOT / "cloud-init" / "templates"
 TARGETS = {
     "rocky.yaml.in": "cloud-init/rocky.yaml",
+    "rocky-x86.yaml.in": "cloud-init/rocky-x86.yaml",
     "debian.yaml.in": "cloud-init/debian.yaml",
     "debian-x86.yaml.in": "cloud-init/debian-x86.yaml",
     "runner-rocky.yaml.in": "gitlab-runner/cloud-init-rocky.yaml",
