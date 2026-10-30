@@ -234,6 +234,13 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: 
   ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
   log "ufw: port ${SSH_PORT}/tcp allowed"
 fi
+# Add this port to the fail2ban sshd jail written by host-firewall.sh.
+JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"
+if [[ -f "$JAIL_FILE" ]] && grep -q '^port ' "$JAIL_FILE" && ! grep -E '^port ' "$JAIL_FILE" | tr -c '0-9\n' ' ' | tr ' ' '\n' | grep -qx "$SSH_PORT"; then
+  sed -i -E "s/^(port[[:space:]]*=[[:space:]]*.*)\$/\1,${SSH_PORT}/" "$JAIL_FILE"
+  systemctl reload fail2ban >/dev/null 2>&1 || systemctl restart fail2ban >/dev/null 2>&1 || true
+  log "fail2ban: sshd jail now also watches port ${SSH_PORT}"
+fi
 # Never write a config that leaves SSH only on a port the running host firewall drops.
 if [[ "$SSH_PORT" != 22 ]]; then
   if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then

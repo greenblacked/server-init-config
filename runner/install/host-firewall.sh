@@ -2,8 +2,8 @@
 # Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
 # Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
 #
-# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T); runner/install/grafana-domain.sh
-# adds 80/443 when it publishes Grafana, and a rerun of this script keeps them. Services of the host
+# Nothing is opened except SSH (22 and every port sshd listens on) and, when Grafana is published on a domain
+# (override file exists), 80/443. Services of the host
 # (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
 # server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
@@ -15,6 +15,7 @@
 set -Eeuo pipefail
 
 JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"   # overridable for tests
+GRAFANA_OVERRIDE="${GRAFANA_OVERRIDE:-/opt/monitoring/docker-compose.override.yml}"   # exists once grafana-domain.sh ran
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -24,6 +25,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 [[ $EUID -eq 0 ]] || die "run as root"
+
+web_published() { [[ -f "$GRAFANA_OVERRIDE" ]]; }
 
 ssh_ports() {
   { echo 22; sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'; } | sort -un
@@ -45,14 +48,16 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p zone
+  local running=0 p zone set_zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
   # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
   if (( running )); then zone=$(firewall-cmd --get-default-zone) || die "cannot read the default zone"; else zone=$(firewall-offline-cmd --get-default-zone) || die "cannot read the default zone"; fi
+  # Running: the default zone is switched after the reload, so SSH is never refused in between.
+  set_zone=0
   if [[ "$zone" != public ]]; then
     log "firewalld: default zone was ${zone}, set to public"
-    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
+    if (( running )); then set_zone=1; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
   fi
   # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
   fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
@@ -61,6 +66,12 @@ firewalld_setup() {
     [[ "$p" == 22 ]] && continue
     fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || fw --zone=public --add-port="${p}/tcp" >/dev/null || die "cannot add port ${p}"
   done
+  if web_published; then
+    for p in http https; do
+      fw --zone=public --query-service="$p" >/dev/null 2>&1 || fw --zone=public --add-service="$p" >/dev/null || die "cannot add ${p} to the public zone"
+    done
+    log "firewalld: http and https kept open (Grafana is published on a domain)"
+  fi
   # Lockout guard: the saved rules must allow SSH before the firewall runs.
   fw --zone=public --query-service=ssh >/dev/null 2>&1 || die "ssh missing from the saved public zone; firewall left as it was"
   for p in $(ssh_ports); do
@@ -69,6 +80,7 @@ firewalld_setup() {
   done
   if (( running )); then firewall-cmd --reload >/dev/null || die "firewalld reload failed"; else systemctl enable --now firewalld || die "firewalld did not start"; fi
   systemctl enable firewalld >/dev/null 2>&1 || true
+  if (( set_zone )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
   if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then
     systemctl stop firewalld
     die "ssh not allowed after start; firewalld stopped"
@@ -108,6 +120,10 @@ ufw_setup() {
   o=$(ufw status 2>/dev/null) || true
   if grep -q '^Status: active' <<<"$o"; then was_active=1; fi
   for p in $(ssh_ports); do ufw allow "${p}/tcp" >/dev/null || die "cannot allow ${p}/tcp"; done
+  if web_published; then
+    ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null || die "cannot allow 80/443 in ufw"
+    log "ufw: 80/tcp and 443/tcp kept open (Grafana is published on a domain)"
+  fi
   # Lockout guard: every SSH port must be in the saved rules before ufw is enabled.
   o=$(ufw show added 2>/dev/null) || true
   for p in $(ssh_ports); do

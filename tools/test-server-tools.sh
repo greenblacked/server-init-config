@@ -341,6 +341,11 @@ out=$(FIREWALL_BACKEND=ufw JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin"
 check "ufw enabled, 22 and the sshd port allowed" '[[ $rc -eq 0 ]] && grep -qx "22/tcp" "$T/ufw.rules" && grep -qx "2222/tcp" "$T/ufw.rules" && [[ -f "$T/ufw.active" ]]'
 check "fail2ban sshd jail written for nftables" 'grep -q "^banaction = nftables" "$T/jail.local" && grep -q "^\[sshd\]" "$T/jail.local"'
 check "fail2ban sshd jail watches every sshd port" 'grep -qx "port     = 22,2222" "$T/jail.local"'
+check "no Grafana override: 80/443 not allowed in ufw" '! grep -qx "80/tcp" "$T/ufw.rules"'
+: > "$T/ufw.rules"; rm -f "$T/ufw.active"; touch "$T/ov.yml"
+out=$(GRAFANA_OVERRIDE="$T/ov.yml" FIREWALL_BACKEND=ufw JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin" bash "$ROOT/runner/install/host-firewall.sh" 2>&1); rc=$?
+check "Grafana override present: ufw allows 80/tcp and 443/tcp before it is enabled" '[[ $rc -eq 0 ]] && grep -qx "80/tcp" "$T/ufw.rules" && grep -qx "443/tcp" "$T/ufw.rules"'
+rm -f "$T/ov.yml"
 rm -f "$T/bin/ufw" "$T/bin/sshd" "$T/bin/apt-get" "$T/bin/fail2ban-client"; reset_calls
 
 section "runner host firewall (firewalld branch, Docker already running)"
@@ -350,6 +355,7 @@ stub firewall-cmd 'case "$*" in
   *"--permanent --get-zones"*) echo "public block"; [ -f "'"$T"'/zonedocker" ] && echo docker ;;
   *--new-zone=docker*) touch "'"$T"'/zonedocker" ;;
   *"--zone=docker --change-interface=docker0"*) echo docker > "'"$T"'/d0zone" ;;
+  *--query-service=http*) exit 1 ;;
   *--query-*) exit 0 ;;
   *--list-*) echo ssh ;;
 esac
@@ -361,7 +367,14 @@ stub docker 'exit 0'
 stub ip 'exit 0'
 out=$(FIREWALL_BACKEND=firewalld JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin" bash "$ROOT/runner/install/host-firewall.sh" 2>&1); rc=$?
 check "docker0 is moved into the docker zone, no Docker restart" '[[ $rc -eq 0 ]] && grep -qx docker "$T/d0zone" && grep -q "^--permanent --zone=docker --add-interface=docker0" <<<"$(calls firewall-cmd)" && ! grep -q "restart docker" <<<"$(calls systemctl)"'
-check "the default zone is forced to public before the lockout guard" 'grep -q "^--set-default-zone=public" <<<"$(calls firewall-cmd)"'
+check "a running firewalld gets the default zone only after the reload (SSH rules first)" 'c=$(calls firewall-cmd); rl=$(grep -n "^--reload" <<<"$c" | head -1 | cut -d: -f1); sz=$(grep -n "^--set-default-zone=public" <<<"$c" | head -1 | cut -d: -f1); [[ -n "$rl" && -n "$sz" && $sz -gt $rl ]]'
+rm -f "$T/ov.yml"; reset_calls
+out=$(GRAFANA_OVERRIDE="$T/ov.yml" FIREWALL_BACKEND=firewalld JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin" bash "$ROOT/runner/install/host-firewall.sh" 2>&1)
+check "no Grafana override: http/https not added" '! grep -q "add-service=http" <<<"$(calls firewall-cmd)"'
+touch "$T/ov.yml"; reset_calls
+out=$(GRAFANA_OVERRIDE="$T/ov.yml" FIREWALL_BACKEND=firewalld JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin" bash "$ROOT/runner/install/host-firewall.sh" 2>&1)
+check "Grafana override present: firewalld permanent http and https added" 'grep -q "^--permanent --zone=public --add-service=http$" <<<"$(calls firewall-cmd)" && grep -q "^--permanent --zone=public --add-service=https$" <<<"$(calls firewall-cmd)"'
+rm -f "$T/ov.yml"
 rm -f "$T/bin/firewall-cmd" "$T/bin/systemctl" "$T/bin/sshd" "$T/bin/dnf" "$T/bin/docker" "$T/bin/ip" "$T/d0zone" "$T/zonedocker"; reset_calls
 
 section "ci-job-isolation rules (own network namespace)"
@@ -465,7 +478,7 @@ check "stop times out: SKIP, runner start queued, no SIGKILL timeout, docker not
 # a package scriptlet starts the runner and it takes a job: Docker is not restarted under it
 rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
 stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 2 ]] && echo jobabc; exit 0'
-stub dnf 'if [[ "$1 $2" == "-q check-update" ]]; then exit 100; fi; [[ "$1" == "-y" ]] && touch "'"$T"'/scriptlet-started"; exit 0'
+stub dnf 'if [[ "$1 $2" == "-q check-update" ]]; then exit 100; fi; [[ "$1" == "-y" && "$*" != *gitlab-runner* ]] && touch "'"$T"'/scriptlet-started"; exit 0'
 stub systemctl 'case "$1" in
   stop) touch "'"$T"'/runner-stopped" ;;
   start) rm -f "'"$T"'/runner-stopped" ;;
@@ -475,8 +488,25 @@ esac
 exit 0'
 rm -f "$T/scriptlet-started" "$T/scriptlet-n"
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
-check "runner back up after the upgrade with a job: docker is not restarted" '[[ $rc -eq 0 ]] && grep -q "SKIP packages upgraded, but a CI job runs" <<<"$out" && ! grep -q "^restart docker" <<<"$(calls systemctl)"'
+check "runner back up after the upgrade with a job: docker is not restarted" '[[ $rc -eq 0 ]] && grep -q "SKIP Docker packages upgraded, but a CI job runs" <<<"$out" && ! grep -q "^restart docker" <<<"$(calls systemctl)" && ! grep -q "upgrade gitlab-runner" <<<"$(calls dnf)"'
 rm -f "$T/scriptlet-started" "$T/scriptlet-n"
+# order: the Docker packages are upgraded (and Docker restarted) before gitlab-runner, in separate dnf transactions
+rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
+stub docker 'exit 0'
+stub dnf 'if [[ "$1 $2" == "-q check-update" ]]; then exit 100; fi; [[ "$1" == "-y" ]] && echo "$*" >> "'"$T"'/order"; exit 0'
+stub systemctl 'case "$1" in
+  stop) touch "'"$T"'/runner-stopped" ;;
+  start) rm -f "'"$T"'/runner-stopped" ;;
+  restart) [[ "$2" == docker ]] && echo "restart-docker" >> "'"$T"'/order" ;;
+  show) if [[ -e "'"$T"'/runner-stopped" ]]; then echo inactive; else echo active; fi ;;
+  cat) exit 1 ;;
+esac
+exit 0'
+rm -f "$T/order"
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+ord=$(sed -E 's/-y -q upgrade /upgrade: /' "$T/order" | tr '\n' ';')
+check "docker packages upgrade, then docker restart, then gitlab-runner alone" '[[ $rc -eq 0 && "$ord" == "upgrade: docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin;restart-docker;upgrade: gitlab-runner;" ]]' || echo "    order: $ord"
+rm -f "$T/order"
 rm -f "$T/bin/docker" "$T/bin/logger" "$T/bin/sleep" "$T/bin/dnf" "$T/bin/rpm" "$T/bin/systemctl" "$T/runner-stopped" "$T/docker-calls"; unset ENGINE_UPDATE_LOG ENGINE_UPDATE_DROPIN; reset_calls
 
 section "server lock-root"
