@@ -307,13 +307,15 @@ main() {
     if (( rc >= 2 )); then warn "health reports failures (exit ${rc}); read the report above"; fi
   fi
 
+  local DAILY="health -q"
+  case "$OS_KIND" in fedora|el10) DAILY="srv status  and  health -q" ;; esac
   cat <<NEXT
 
 [done] Next steps
   1. Test the admin login from a second terminal (ADMIN_USER is ops unless you changed it):
        ssh${PORT_OPT} ops@${SERVER} 'sudo -n true && echo ok'
   2. Root SSH by key is still open; nothing here closes it.
-  3. Daily use on the server:  srv status  and  health -q
+  3. Daily use on the server:  ${DAILY}
   4. Later updates: rerun this script (it replaces the copy in ${REMOTE_DIR} and reruns the steps).
 NEXT
 }
