@@ -189,9 +189,10 @@ update_os() {
 script_path() { if [[ "$1" == health ]]; then echo common/health; else echo "runner/scripts/$1"; fi; }
 
 update_host_tools() {
-  local f u existed units_changed=0 cleanup_changed=0
-  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh)
-  local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer)
+  local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
+  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -209,6 +210,9 @@ update_host_tools() {
       CHANGED+=("scripts/${f}")
       if [[ "$f" == runner-weekly-cleanup.sh ]]; then
         cleanup_changed=1
+      fi
+      if [[ "$f" == ci-job-isolation.sh ]]; then
+        isolation_changed=1
       fi
     fi
   done
@@ -241,6 +245,15 @@ update_host_tools() {
         run systemctl restart "$u"
       fi
     done
+  fi
+
+  # The isolation rules live in iptables: apply them when the script is new or changed and Docker is up.
+  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/dev/null; then
+    if ! systemctl is-enabled --quiet ci-job-isolation.service 2>/dev/null; then
+      run systemctl enable --now ci-job-isolation.service
+    elif (( isolation_changed )); then
+      run systemctl restart ci-job-isolation.service
+    fi
   fi
 
   if (( cleanup_changed && ! DRYRUN )); then

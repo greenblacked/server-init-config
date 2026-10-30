@@ -320,6 +320,48 @@ out=$(bash -c 'source "$1"; firewall' _ "$T/fw-funcs.sh" 2>&1); rc=$?
 check "ufw is enabled with both 22 and the sshd port allowed" '[[ $rc -eq 0 ]] && grep -qx "22/tcp" "$T/ufw.rules" && grep -qx "2222/tcp" "$T/ufw.rules" && [[ -f "$T/ufw.active" ]]'
 rm -f "$T/bin/ufw" "$T/bin/sshd"
 
+section "runner host firewall (ufw branch)"
+: > "$T/ufw.rules"; rm -f "$T/ufw.active"
+stub ufw 'R="'"$T"'/ufw.rules"; A="'"$T"'/ufw.active"
+case "$1 ${2:-}" in
+  "show added") echo "Added user rules:"; while read -r l; do echo "ufw allow $l"; done < "$R" ;;
+  "status ") if [ -f "$A" ]; then echo "Status: active"; while read -r l; do echo "$l ALLOW Anywhere"; done < "$R"; else echo "Status: inactive"; fi ;;
+  "--force enable") touch "$A" ;;
+  allow*) echo "$2" >> "$R" ;;
+esac'
+stub systemctl 'exit 0'
+stub sshd 'echo "port 2222"'
+stub apt-get 'exit 0'
+stub fail2ban-client 'echo "Status"'
+out=$(JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin" bash "$ROOT/runner/install/host-firewall.sh" 2>&1); rc=$?
+check "ufw enabled, 22 and the sshd port allowed" '[[ $rc -eq 0 ]] && grep -qx "22/tcp" "$T/ufw.rules" && grep -qx "2222/tcp" "$T/ufw.rules" && [[ -f "$T/ufw.active" ]]'
+check "fail2ban sshd jail written for nftables" 'grep -q "^banaction = nftables" "$T/jail.local" && grep -q "^\[sshd\]" "$T/jail.local"'
+rm -f "$T/bin/ufw" "$T/bin/sshd" "$T/bin/apt-get" "$T/bin/fail2ban-client"
+
+section "ci-job-isolation rules (own network namespace)"
+if command -v iptables >/dev/null 2>&1 && unshare -n true 2>/dev/null; then
+  stub logger 'exit 0'
+  out=$(BRIDGE_IP=172.17.0.1 PATH="$T/bin:$PATH" unshare -n bash -c '
+    iptables -N DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -A FORWARD -j DOCKER-USER
+    bash "$1"; bash "$1" >/dev/null; iptables -S' _ "$ROOT/runner/scripts/ci-job-isolation.sh" 2>&1)
+  check "metadata address dropped in DOCKER-USER, once after two runs" '[[ $(grep -c -- "-A DOCKER-USER -d 169.254.169.254/32.* -j DROP" <<<"$out") -eq 1 ]]'
+  check "job bridges go through CI-JOBS-IN, npm cache port accepted, rest dropped" 'grep -q -- "-A INPUT -i docker0 .*-j CI-JOBS-IN" <<<"$out" && grep -q -- "-A CI-JOBS-IN -d 172.17.0.1/32 -i docker0 -p tcp -m tcp --dport 4873 -j ACCEPT" <<<"$out" && grep -q -- "-A CI-JOBS-IN -j DROP" <<<"$out"'
+  rm -f "$T/bin/logger"
+else
+  echo "  SKIP  no iptables or network namespaces here"
+fi
+
+section "runner-engine-update"
+stub logger 'exit 0'
+export ENGINE_UPDATE_LOG="$T/engine.log"
+stub docker 'echo abc123'
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+check "a running CI job: skipped, exit 0" '[[ $rc -eq 0 ]] && grep -q "SKIP 1 CI job" <<<"$out"'
+stub docker 'exit 1'
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+check "docker not answering is not 'no jobs'" '[[ $rc -eq 0 ]] && grep -q "SKIP docker does not answer" <<<"$out"'
+rm -f "$T/bin/docker" "$T/bin/logger"; unset ENGINE_UPDATE_LOG
+
 # ---------------------------------------------------------------- destructive (container) tests
 if [[ $DESTRUCTIVE != 1 ]]; then
   echo
