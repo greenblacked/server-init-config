@@ -28,6 +28,7 @@ TARGETS = {
     "debian-x86.yaml.in": "cloud-init/debian-x86.yaml",
     "server-fedora.yaml.in": "cloud-init/server-fedora.yaml",
     "server-el10.yaml.in": "cloud-init/server-el10.yaml",
+    "server-debian.yaml.in": "cloud-init/server-debian.yaml",
     "runner-rocky.yaml.in": "gitlab-runner/cloud-init-rocky.yaml",
 }
 HETZNER_USER_DATA_LIMIT = 32 * 1024
