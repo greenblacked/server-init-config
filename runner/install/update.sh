@@ -25,7 +25,7 @@ usage() {
 Usage: $0 [--dry-run] [--pull] [--os] [--rollback]
 
 Updates what is installed on this server to the state of this repo checkout:
-  host tools     health, cleanup, disk guard (+ prewarm if configured) and their systemd units
+  host tools     health, cleanup, disk guard (+ prewarm if configured), their systemd units, kernel hardening and core dump settings
   monitoring     /opt/monitoring (Prometheus, Grafana, node_exporter, Caddy override if present)
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
@@ -234,6 +234,19 @@ update_host_tools() {
       fi
     fi
   done
+
+  # Kernel hardening and no core dumps (also written by the cloud-init files and by host-tools.sh).
+  local ktmp kernel_changed=0
+  ktmp=$(mktemp -d)
+  printf '* hard core 0\n' > "${ktmp}/50-nocore.conf"
+  printf '[Coredump]\nStorage=none\nProcessSizeMax=0\n' > "${ktmp}/50-off.conf"
+  if sync_file "${REPO_ROOT}/common/sysctl-hardening.conf" /etc/sysctl.d/90-ci-hardening.conf 0644; then
+    CHANGED+=("sysctl/90-ci-hardening.conf"); kernel_changed=1
+  fi
+  if sync_file "${ktmp}/50-nocore.conf" /etc/security/limits.d/50-nocore.conf 0644; then CHANGED+=("limits.d/50-nocore.conf"); fi
+  if sync_file "${ktmp}/50-off.conf" /etc/systemd/coredump.conf.d/50-off.conf 0644; then CHANGED+=("coredump.conf.d/50-off.conf"); fi
+  rm -rf "$ktmp"
+  if (( kernel_changed )); then run sysctl --system >/dev/null; fi
 
   if (( units_changed )); then
     run systemctl daemon-reload

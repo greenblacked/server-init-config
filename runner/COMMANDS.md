@@ -1197,7 +1197,7 @@ INSTALL
 <a id="tools"></a>
 ## Health, cleanup, job isolation, engine updates
 
-Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency cleanup every 30 minutes when the disk is 85% full. Also the job isolation (CI jobs cannot reach the cloud metadata address or services on the host) and the Sunday 04:30 upgrade of Docker CE and GitLab Runner, which runs only while no job runs. Ends with a dry run of the cleanup.
+Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency cleanup every 30 minutes when the disk is 85% full. Also the job isolation (CI jobs cannot reach the cloud metadata address or services on the host) and the Sunday 04:30 upgrade of Docker CE and GitLab Runner, which runs only while no job runs. Also the kernel hardening (sysctl) and no core dumps. Ends with a dry run of the cleanup.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -1394,7 +1394,8 @@ install -d "$R/runner/install"
 cat > "$R/runner/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers,
-# the job isolation rules (CI jobs cannot reach the metadata service or host services) and the weekly Docker/GitLab Runner update.
+# the job isolation rules (CI jobs cannot reach the metadata service or host services), the weekly Docker/GitLab Runner update,
+# and the kernel hardening (sysctl) and core dump settings that the cloud-init files also write.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
@@ -1418,6 +1419,19 @@ for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-g
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
+
+# Kernel hardening and no core dumps: the same files and contents as the cloud-init files (keys the kernel lacks are ignored).
+install -D -m 0644 "$REPO_ROOT/common/sysctl-hardening.conf" /etc/sysctl.d/90-ci-hardening.conf
+install -D -m 0644 /dev/stdin /etc/security/limits.d/50-nocore.conf <<'LIMITS'
+* hard core 0
+LIMITS
+install -D -m 0644 /dev/stdin /etc/systemd/coredump.conf.d/50-off.conf <<'COREDUMP'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+COREDUMP
+restorecon_if /etc/sysctl.d/90-ci-hardening.conf
+sysctl --system >/dev/null || log "WARN: sysctl --system reported an error"
 
 systemctl daemon-reload
 systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
@@ -3201,7 +3215,19 @@ WantedBy=multi-user.target
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/ci-job-isolation.service"
 
-echo "files written to $R: 14"
+install -d "$R/common"
+cat > "$R/common/sysctl-hardening.conf" <<'__SIC_EOF__'
+# Kernel hardening for runner hosts. A leading "-" ignores a key the running kernel does not have.
+-kernel.kptr_restrict = 2
+-kernel.dmesg_restrict = 1
+-kernel.yama.ptrace_scope = 1
+-fs.protected_fifos = 2
+-fs.protected_regular = 2
+net.ipv4.conf.all.log_martians = 1
+__SIC_EOF__
+chmod 644 "$R/common/sysctl-hardening.conf"
+
+echo "files written to $R: 15"
 bash "$R/runner/install/host-tools.sh" </dev/null
 INSTALL
 ````
@@ -9137,7 +9163,8 @@ install -d "$R/runner/install"
 cat > "$R/runner/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers,
-# the job isolation rules (CI jobs cannot reach the metadata service or host services) and the weekly Docker/GitLab Runner update.
+# the job isolation rules (CI jobs cannot reach the metadata service or host services), the weekly Docker/GitLab Runner update,
+# and the kernel hardening (sysctl) and core dump settings that the cloud-init files also write.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
@@ -9161,6 +9188,19 @@ for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-g
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
+
+# Kernel hardening and no core dumps: the same files and contents as the cloud-init files (keys the kernel lacks are ignored).
+install -D -m 0644 "$REPO_ROOT/common/sysctl-hardening.conf" /etc/sysctl.d/90-ci-hardening.conf
+install -D -m 0644 /dev/stdin /etc/security/limits.d/50-nocore.conf <<'LIMITS'
+* hard core 0
+LIMITS
+install -D -m 0644 /dev/stdin /etc/systemd/coredump.conf.d/50-off.conf <<'COREDUMP'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+COREDUMP
+restorecon_if /etc/sysctl.d/90-ci-hardening.conf
+sysctl --system >/dev/null || log "WARN: sysctl --system reported an error"
 
 systemctl daemon-reload
 systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
@@ -9880,7 +9920,7 @@ usage() {
 Usage: $0 [--dry-run] [--pull] [--os] [--rollback]
 
 Updates what is installed on this server to the state of this repo checkout:
-  host tools     health, cleanup, disk guard (+ prewarm if configured) and their systemd units
+  host tools     health, cleanup, disk guard (+ prewarm if configured), their systemd units, kernel hardening and core dump settings
   monitoring     /opt/monitoring (Prometheus, Grafana, node_exporter, Caddy override if present)
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
@@ -10089,6 +10129,19 @@ update_host_tools() {
       fi
     fi
   done
+
+  # Kernel hardening and no core dumps (also written by the cloud-init files and by host-tools.sh).
+  local ktmp kernel_changed=0
+  ktmp=$(mktemp -d)
+  printf '* hard core 0\n' > "${ktmp}/50-nocore.conf"
+  printf '[Coredump]\nStorage=none\nProcessSizeMax=0\n' > "${ktmp}/50-off.conf"
+  if sync_file "${REPO_ROOT}/common/sysctl-hardening.conf" /etc/sysctl.d/90-ci-hardening.conf 0644; then
+    CHANGED+=("sysctl/90-ci-hardening.conf"); kernel_changed=1
+  fi
+  if sync_file "${ktmp}/50-nocore.conf" /etc/security/limits.d/50-nocore.conf 0644; then CHANGED+=("limits.d/50-nocore.conf"); fi
+  if sync_file "${ktmp}/50-off.conf" /etc/systemd/coredump.conf.d/50-off.conf 0644; then CHANGED+=("coredump.conf.d/50-off.conf"); fi
+  rm -rf "$ktmp"
+  if (( kernel_changed )); then run sysctl --system >/dev/null; fi
 
   if (( units_changed )); then
     run systemctl daemon-reload
@@ -13882,7 +13935,8 @@ install -d "$R/runner/install"
 cat > "$R/runner/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers,
-# the job isolation rules (CI jobs cannot reach the metadata service or host services) and the weekly Docker/GitLab Runner update.
+# the job isolation rules (CI jobs cannot reach the metadata service or host services), the weekly Docker/GitLab Runner update,
+# and the kernel hardening (sysctl) and core dump settings that the cloud-init files also write.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
@@ -13906,6 +13960,19 @@ for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-g
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
+
+# Kernel hardening and no core dumps: the same files and contents as the cloud-init files (keys the kernel lacks are ignored).
+install -D -m 0644 "$REPO_ROOT/common/sysctl-hardening.conf" /etc/sysctl.d/90-ci-hardening.conf
+install -D -m 0644 /dev/stdin /etc/security/limits.d/50-nocore.conf <<'LIMITS'
+* hard core 0
+LIMITS
+install -D -m 0644 /dev/stdin /etc/systemd/coredump.conf.d/50-off.conf <<'COREDUMP'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+COREDUMP
+restorecon_if /etc/sysctl.d/90-ci-hardening.conf
+sysctl --system >/dev/null || log "WARN: sysctl --system reported an error"
 
 systemctl daemon-reload
 systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
@@ -14625,7 +14692,7 @@ usage() {
 Usage: $0 [--dry-run] [--pull] [--os] [--rollback]
 
 Updates what is installed on this server to the state of this repo checkout:
-  host tools     health, cleanup, disk guard (+ prewarm if configured) and their systemd units
+  host tools     health, cleanup, disk guard (+ prewarm if configured), their systemd units, kernel hardening and core dump settings
   monitoring     /opt/monitoring (Prometheus, Grafana, node_exporter, Caddy override if present)
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
@@ -14834,6 +14901,19 @@ update_host_tools() {
       fi
     fi
   done
+
+  # Kernel hardening and no core dumps (also written by the cloud-init files and by host-tools.sh).
+  local ktmp kernel_changed=0
+  ktmp=$(mktemp -d)
+  printf '* hard core 0\n' > "${ktmp}/50-nocore.conf"
+  printf '[Coredump]\nStorage=none\nProcessSizeMax=0\n' > "${ktmp}/50-off.conf"
+  if sync_file "${REPO_ROOT}/common/sysctl-hardening.conf" /etc/sysctl.d/90-ci-hardening.conf 0644; then
+    CHANGED+=("sysctl/90-ci-hardening.conf"); kernel_changed=1
+  fi
+  if sync_file "${ktmp}/50-nocore.conf" /etc/security/limits.d/50-nocore.conf 0644; then CHANGED+=("limits.d/50-nocore.conf"); fi
+  if sync_file "${ktmp}/50-off.conf" /etc/systemd/coredump.conf.d/50-off.conf 0644; then CHANGED+=("coredump.conf.d/50-off.conf"); fi
+  rm -rf "$ktmp"
+  if (( kernel_changed )); then run sysctl --system >/dev/null; fi
 
   if (( units_changed )); then
     run systemctl daemon-reload

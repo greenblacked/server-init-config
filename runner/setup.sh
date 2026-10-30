@@ -17,7 +17,7 @@ describe() {
   case "$1" in
     users)          echo "admin user ops (sudo), service users gitlab-runner and monitoring, SSH hardening" ;;
     packages)       echo "admin tools: htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, aliases" ;;
-    tools)          echo "health, weekly cleanup, disk guard, job isolation (metadata and host services blocked), weekly Docker and runner update" ;;
+    tools)          echo "health, weekly cleanup, disk guard, job isolation (metadata and host services blocked), weekly Docker and runner update, kernel hardening and no core dumps" ;;
     firewall)       echo "host firewall (firewalld or ufw) with SSH allowed, plus the fail2ban sshd jail" ;;
     security)       echo "security tools: lynis, oscap, auditd, ssh-audit, nmap, trivy, gitleaks, ... (not in --base/--all)" ;;
     register)       echo "register the runner (asks for the glrt- token)" ;;
@@ -69,7 +69,7 @@ is_installed() {
   case "$1" in
     users)          id monitoring >/dev/null 2>&1 && grep -qs "^AllowGroups" /etc/ssh/sshd_config.d/00-ci-hardening.conf ;;
     packages)       command -v htop >/dev/null 2>&1 && grep -qs "^alias health='sudo /usr/local/bin/health'" /etc/profile.d/ci-runner.sh ;;
-    tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh && -x /usr/local/bin/ci-job-isolation.sh && -x /usr/local/bin/runner-engine-update.sh ]] ;;
+    tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh && -x /usr/local/bin/ci-job-isolation.sh && -x /usr/local/bin/runner-engine-update.sh && -f /etc/sysctl.d/90-ci-hardening.conf ]] ;;
     firewall)       systemctl is-active --quiet firewalld 2>/dev/null || ufw status 2>/dev/null | grep -q '^Status: active' ;;
     security)       command -v lynis >/dev/null 2>&1 && [[ -x /usr/local/bin/trivy ]] ;;
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;

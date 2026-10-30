@@ -48,7 +48,7 @@ You can run every step yourself with `setup.sh`, on the server, as root, in `/ro
 |---|---|---|---|
 | 1 | Users: admin `ops`, service accounts, SSH hardening (root stays open) | `--users` | `ssh ops@SERVER_IP 'sudo -n true && echo ok'` |
 | 2 | Admin tools and aliases | `--packages` | `htop --version` |
-| 3 | `health`, weekly cleanup, disk guard, job isolation, weekly Docker and runner update | `--tools` | `health -q`, `systemctl list-timers 'runner-*'`, `systemctl is-active ci-job-isolation` |
+| 3 | `health`, weekly cleanup, disk guard, job isolation, weekly Docker and runner update, kernel hardening (sysctl), no core dumps | `--tools` | `health -q`, `systemctl list-timers 'runner-*'`, `systemctl is-active ci-job-isolation` |
 | 3b | Host firewall (SSH only) and fail2ban | `--firewall` | `sudo firewall-cmd --list-all` or `sudo ufw status`, `sudo fail2ban-client status sshd` |
 | 4 | Register the runner (asks for the token; also sets the per-job limits) | `--register`, `--job-limits` | GitLab shows it Online; `sudo gitlab-runner verify` |
 | 5 | Docker Hub cache | `--registry-cache` | `curl -s 127.0.0.1:5000/v2/_catalog` |

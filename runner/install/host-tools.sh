@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers,
-# the job isolation rules (CI jobs cannot reach the metadata service or host services) and the weekly Docker/GitLab Runner update.
+# the job isolation rules (CI jobs cannot reach the metadata service or host services), the weekly Docker/GitLab Runner update,
+# and the kernel hardening (sysctl) and core dump settings that the cloud-init files also write.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
@@ -24,6 +25,19 @@ for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-g
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
+
+# Kernel hardening and no core dumps: the same files and contents as the cloud-init files (keys the kernel lacks are ignored).
+install -D -m 0644 "$REPO_ROOT/common/sysctl-hardening.conf" /etc/sysctl.d/90-ci-hardening.conf
+install -D -m 0644 /dev/stdin /etc/security/limits.d/50-nocore.conf <<'LIMITS'
+* hard core 0
+LIMITS
+install -D -m 0644 /dev/stdin /etc/systemd/coredump.conf.d/50-off.conf <<'COREDUMP'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+COREDUMP
+restorecon_if /etc/sysctl.d/90-ci-hardening.conf
+sysctl --system >/dev/null || log "WARN: sysctl --system reported an error"
 
 systemctl daemon-reload
 systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
