@@ -333,7 +333,7 @@ write_files:
       # When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
       # the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
       # then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
-      if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+      if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
         unset PROMPT_COMMAND
         PROMPT_COMMAND=('' '__shell_history_prompt')
       fi

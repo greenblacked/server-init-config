@@ -126,7 +126,7 @@ __shell_history_prompt() {
 # When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
 # the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
 # then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
-if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
 fi
@@ -1024,7 +1024,7 @@ __shell_history_prompt() {
 # When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
 # the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
 # then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
-if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
 fi
@@ -1360,7 +1360,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -q|--quick) QUICK=1 ;;
     -c|--containers) ONLY_CONTAINERS=1 ;;
-    --profile) shift; PROFILE="${1:-}" ;;
+    --profile) [[ $# -ge 2 ]] || { echo "--profile needs a value: runner or server" >&2; exit 2; }; shift; PROFILE="$1" ;;
     --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
     -h|--help) usage; exit 0 ;;
@@ -1412,7 +1412,9 @@ detect_profile() {
     PROFILE=runner
   else
     PROFILE=server
-    if have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
+    # Without root the 0600 config.toml can't be read, so "not registered" would be a guess.
+    if [[ -e "$CFG" && ! -r "$CFG" ]]; then RUNNER_UNREGISTERED=2
+    elif have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
   fi
 }
 http_code()   { curl -s -o /dev/null -m "${2:-5}" -w '%{http_code}' "$1" 2>/dev/null || true; }
@@ -1734,7 +1736,7 @@ check_firewall() {
     ufw:active)
       ufw_out=$(ufw status 2>/dev/null || true)
       for p in $ports; do
-        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?[[:space:]]+ALLOW" <<<"$ufw_out"; then ssh_ok=1; fi
+        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?( on [^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)" <<<"$ufw_out"; then ssh_ok=1; fi
       done
       if (( ssh_ok )); then
         ok "ufw active, SSH allowed"
@@ -1862,11 +1864,11 @@ check_serverinit() {
   [[ -r "$conf" || -r "$failed" ]] || return 0
   [[ -f "$conf" || -s "$failed" ]] || return 0
   section "Server setup"
-  if [[ -f "$conf" ]]; then
+  if [[ -f "$conf" && -r "$conf" ]]; then
     local vals admin
     vals=$(grep -E '^(ADMIN_USER|EXTRA_PORTS|INSTALL_DOCKER)=' "$conf" | tr '\n' ' ' || true)
     info "${conf}: ${vals:-no known settings}"
-    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1)
+    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1 || true)
     if [[ -n "$admin" ]]; then
       if id "$admin" >/dev/null 2>&1; then ok "admin user ${admin} exists"
       else warn "admin user ${admin} from ${conf} does not exist"; fi
@@ -1875,10 +1877,12 @@ check_serverinit() {
       info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
     fi
   fi
-  if [[ -s "$failed" ]]; then
+  if [[ -s "$failed" && ! -r "$failed" ]]; then
+    skip "${failed}: not readable without root"
+  elif [[ -s "$failed" ]]; then
     local n last
     n=$(grep -c . "$failed" || true)
-    last=$(tail -1 "$failed" | cut -c1-110)
+    last=$(tail -1 "$failed" | cut -c1-110 || true)
     warn "${n} failed setup step(s) in ${failed}; last: ${last}"
   elif [[ -f "$failed" ]]; then
     ok "no failed setup steps (${failed} is empty)"
@@ -2429,7 +2433,8 @@ fi
 
 printf '%shealth report%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
 if (( LIMITED )); then info "limited mode: not root and sudo needs a password; root-only checks skipped"; fi
-if (( RUNNER_UNREGISTERED )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
+if (( RUNNER_UNREGISTERED == 1 )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
+if (( RUNNER_UNREGISTERED == 2 )); then info "runner config not readable without root: checked as a plain server (run as root or use --profile runner)"; fi
 check_system
 check_security
 check_firewall
@@ -8184,7 +8189,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -q|--quick) QUICK=1 ;;
     -c|--containers) ONLY_CONTAINERS=1 ;;
-    --profile) shift; PROFILE="${1:-}" ;;
+    --profile) [[ $# -ge 2 ]] || { echo "--profile needs a value: runner or server" >&2; exit 2; }; shift; PROFILE="$1" ;;
     --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
     -h|--help) usage; exit 0 ;;
@@ -8236,7 +8241,9 @@ detect_profile() {
     PROFILE=runner
   else
     PROFILE=server
-    if have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
+    # Without root the 0600 config.toml can't be read, so "not registered" would be a guess.
+    if [[ -e "$CFG" && ! -r "$CFG" ]]; then RUNNER_UNREGISTERED=2
+    elif have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
   fi
 }
 http_code()   { curl -s -o /dev/null -m "${2:-5}" -w '%{http_code}' "$1" 2>/dev/null || true; }
@@ -8558,7 +8565,7 @@ check_firewall() {
     ufw:active)
       ufw_out=$(ufw status 2>/dev/null || true)
       for p in $ports; do
-        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?[[:space:]]+ALLOW" <<<"$ufw_out"; then ssh_ok=1; fi
+        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?( on [^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)" <<<"$ufw_out"; then ssh_ok=1; fi
       done
       if (( ssh_ok )); then
         ok "ufw active, SSH allowed"
@@ -8686,11 +8693,11 @@ check_serverinit() {
   [[ -r "$conf" || -r "$failed" ]] || return 0
   [[ -f "$conf" || -s "$failed" ]] || return 0
   section "Server setup"
-  if [[ -f "$conf" ]]; then
+  if [[ -f "$conf" && -r "$conf" ]]; then
     local vals admin
     vals=$(grep -E '^(ADMIN_USER|EXTRA_PORTS|INSTALL_DOCKER)=' "$conf" | tr '\n' ' ' || true)
     info "${conf}: ${vals:-no known settings}"
-    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1)
+    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1 || true)
     if [[ -n "$admin" ]]; then
       if id "$admin" >/dev/null 2>&1; then ok "admin user ${admin} exists"
       else warn "admin user ${admin} from ${conf} does not exist"; fi
@@ -8699,10 +8706,12 @@ check_serverinit() {
       info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
     fi
   fi
-  if [[ -s "$failed" ]]; then
+  if [[ -s "$failed" && ! -r "$failed" ]]; then
+    skip "${failed}: not readable without root"
+  elif [[ -s "$failed" ]]; then
     local n last
     n=$(grep -c . "$failed" || true)
-    last=$(tail -1 "$failed" | cut -c1-110)
+    last=$(tail -1 "$failed" | cut -c1-110 || true)
     warn "${n} failed setup step(s) in ${failed}; last: ${last}"
   elif [[ -f "$failed" ]]; then
     ok "no failed setup steps (${failed} is empty)"
@@ -9253,7 +9262,8 @@ fi
 
 printf '%shealth report%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
 if (( LIMITED )); then info "limited mode: not root and sudo needs a password; root-only checks skipped"; fi
-if (( RUNNER_UNREGISTERED )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
+if (( RUNNER_UNREGISTERED == 1 )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
+if (( RUNNER_UNREGISTERED == 2 )); then info "runner config not readable without root: checked as a plain server (run as root or use --profile runner)"; fi
 check_system
 check_security
 check_firewall
@@ -9439,7 +9449,7 @@ __shell_history_prompt() {
 # When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
 # the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
 # then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
-if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
 fi
@@ -12102,7 +12112,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -q|--quick) QUICK=1 ;;
     -c|--containers) ONLY_CONTAINERS=1 ;;
-    --profile) shift; PROFILE="${1:-}" ;;
+    --profile) [[ $# -ge 2 ]] || { echo "--profile needs a value: runner or server" >&2; exit 2; }; shift; PROFILE="$1" ;;
     --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
     -h|--help) usage; exit 0 ;;
@@ -12154,7 +12164,9 @@ detect_profile() {
     PROFILE=runner
   else
     PROFILE=server
-    if have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
+    # Without root the 0600 config.toml can't be read, so "not registered" would be a guess.
+    if [[ -e "$CFG" && ! -r "$CFG" ]]; then RUNNER_UNREGISTERED=2
+    elif have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
   fi
 }
 http_code()   { curl -s -o /dev/null -m "${2:-5}" -w '%{http_code}' "$1" 2>/dev/null || true; }
@@ -12476,7 +12488,7 @@ check_firewall() {
     ufw:active)
       ufw_out=$(ufw status 2>/dev/null || true)
       for p in $ports; do
-        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?[[:space:]]+ALLOW" <<<"$ufw_out"; then ssh_ok=1; fi
+        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?( on [^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)" <<<"$ufw_out"; then ssh_ok=1; fi
       done
       if (( ssh_ok )); then
         ok "ufw active, SSH allowed"
@@ -12604,11 +12616,11 @@ check_serverinit() {
   [[ -r "$conf" || -r "$failed" ]] || return 0
   [[ -f "$conf" || -s "$failed" ]] || return 0
   section "Server setup"
-  if [[ -f "$conf" ]]; then
+  if [[ -f "$conf" && -r "$conf" ]]; then
     local vals admin
     vals=$(grep -E '^(ADMIN_USER|EXTRA_PORTS|INSTALL_DOCKER)=' "$conf" | tr '\n' ' ' || true)
     info "${conf}: ${vals:-no known settings}"
-    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1)
+    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1 || true)
     if [[ -n "$admin" ]]; then
       if id "$admin" >/dev/null 2>&1; then ok "admin user ${admin} exists"
       else warn "admin user ${admin} from ${conf} does not exist"; fi
@@ -12617,10 +12629,12 @@ check_serverinit() {
       info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
     fi
   fi
-  if [[ -s "$failed" ]]; then
+  if [[ -s "$failed" && ! -r "$failed" ]]; then
+    skip "${failed}: not readable without root"
+  elif [[ -s "$failed" ]]; then
     local n last
     n=$(grep -c . "$failed" || true)
-    last=$(tail -1 "$failed" | cut -c1-110)
+    last=$(tail -1 "$failed" | cut -c1-110 || true)
     warn "${n} failed setup step(s) in ${failed}; last: ${last}"
   elif [[ -f "$failed" ]]; then
     ok "no failed setup steps (${failed} is empty)"
@@ -13171,7 +13185,8 @@ fi
 
 printf '%shealth report%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
 if (( LIMITED )); then info "limited mode: not root and sudo needs a password; root-only checks skipped"; fi
-if (( RUNNER_UNREGISTERED )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
+if (( RUNNER_UNREGISTERED == 1 )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
+if (( RUNNER_UNREGISTERED == 2 )); then info "runner config not readable without root: checked as a plain server (run as root or use --profile runner)"; fi
 check_system
 check_security
 check_firewall
@@ -13357,7 +13372,7 @@ __shell_history_prompt() {
 # When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
 # the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
 # then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
-if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
 fi
