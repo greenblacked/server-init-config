@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# Base setup for a general (non-runner) Fedora 44 server, x86_64 or ARM64:
+# SSH keys only, admin user with sudo, firewalld, fail2ban for SSH, automatic security updates,
+# Docker Engine + Compose, swap + sysctl, journald limit, chrony, admin tools.
+# Root keeps login by SSH key on port 22, so nothing here can lock you out.
+#
+# Self-contained and idempotent: it writes its own config files, so it runs the same from a paste
+# (server/README.md) or from a copy of the repo. Rerun as root any time: /usr/local/sbin/server-init.sh
+# Settings live in /etc/server-init.conf (created on first run from the environment or defaults).
+# Every step after SSH hardening is non-fatal: a failed step is logged and the next one still runs.
+set -Eeuo pipefail
+
+FAILED_LOG=/var/log/server-init-failed.log
+CONF_FILE=/etc/server-init.conf
+(( EUID == 0 )) || { echo "run as root" >&2; exit 1; }
+
+# First run: save the settings given in the environment (or defaults) so reruns use the same values.
+if [[ ! -f "$CONF_FILE" ]]; then
+  install -m 0644 /dev/null "$CONF_FILE"
+  cat > "$CONF_FILE" <<CONF
+# Read by /usr/local/sbin/server-init.sh. Edit, then rerun the script as root.
+ADMIN_USER=${ADMIN_USER:-ops}
+# Extra open ports, space separated, e.g. "80/tcp 443/tcp". SSH (22/tcp) is always open.
+EXTRA_PORTS="${EXTRA_PORTS:-}"
+# Set to 0 to skip a component.
+INSTALL_DOCKER=${INSTALL_DOCKER:-1}
+INSTALL_SWAP=${INSTALL_SWAP:-1}
+TIMEZONE=${TIMEZONE:-Europe/Kyiv}
+CONF
+fi
+# shellcheck source=/dev/null
+. "$CONF_FILE"
+ADMIN_USER="${ADMIN_USER:-ops}"
+EXTRA_PORTS="${EXTRA_PORTS:-}"
+INSTALL_DOCKER="${INSTALL_DOCKER:-1}"
+INSTALL_SWAP="${INSTALL_SWAP:-1}"
+TIMEZONE="${TIMEZONE:-Europe/Kyiv}"
+FAILED_STEPS=()
+
+log()  { echo "[$(date +%H:%M:%S)] $*"; }
+fail() { log "WARN: $*"; echo "$(date -Is) $*" >> "$FAILED_LOG"; }
+step() {
+  local name="$1"; shift
+  log "step: ${name}"
+  if "$@"; then log "ok: ${name}"; else fail "step failed: ${name}"; FAILED_STEPS+=("$name"); fi
+}
+
+packages() {
+  dnf -y -q install firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
+  local p
+  for p in git jq tmux htop btop ncdu iotop mtr bind-utils tcpdump vim-enhanced nano rsync wget unzip tar bash-completion; do
+    rpm -q --whatprovides "$p" >/dev/null 2>&1 || dnf -y -q install "$p" || fail "optional package not installed: $p"
+  done
+}
+
+# Write a file only when its content changes; prints nothing.
+put() {
+  local path="$1" mode="$2" tmp
+  tmp=$(mktemp)
+  cat > "$tmp"
+  if [[ -f "$path" ]] && cmp -s "$tmp" "$path"; then rm -f "$tmp"; return 0; fi
+  install -D -m "$mode" "$tmp" "$path"
+  rm -f "$tmp"
+}
+
+write_configs() {
+  put /etc/ssh/sshd_config.d/00-hardening.conf 0600 <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+X11Forwarding no
+MaxAuthTries 4
+LoginGraceTime 30
+EOF
+  put /etc/systemd/journald.conf.d/50-size.conf 0644 <<'EOF'
+[Journal]
+SystemMaxUse=500M
+MaxRetentionSec=1month
+EOF
+  put /etc/sysctl.d/90-server.conf 0644 <<'EOF'
+vm.swappiness = 10
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 512
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 60
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.all.rp_filter = 2
+EOF
+  put /etc/fail2ban/jail.d/50-sshd.local 0644 <<'EOF'
+[sshd]
+enabled  = true
+backend  = systemd
+maxretry = 5
+findtime = 10m
+bantime  = 1h
+EOF
+  # Docker settings are only seeded; an existing daemon.json is never overwritten.
+  [[ -f /etc/docker/daemon.json ]] || put /etc/docker/daemon.json 0644 <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" },
+  "live-restore": true
+}
+EOF
+}
+
+ssh_hardening() {
+  if sshd -t; then
+    systemctl reload sshd
+  else
+    rm -f /etc/ssh/sshd_config.d/00-hardening.conf
+    fail "sshd rejected 00-hardening.conf; removed it, defaults kept"
+  fi
+}
+
+admin_user() {
+  [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { fail "invalid ADMIN_USER: $ADMIN_USER"; return 1; }
+  id "$ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash -G wheel "$ADMIN_USER" || return 1
+  usermod -aG wheel "$ADMIN_USER" || return 1
+  if [[ -s /root/.ssh/authorized_keys ]]; then
+    install -d -m 0700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/${ADMIN_USER}/.ssh" || return 1
+    install -m 0600 -o "$ADMIN_USER" -g "$ADMIN_USER" /root/.ssh/authorized_keys "/home/${ADMIN_USER}/.ssh/authorized_keys" || return 1
+    restorecon -R "/home/${ADMIN_USER}/.ssh" 2>/dev/null || true
+  else
+    fail "root has no authorized_keys; ${ADMIN_USER} created without SSH keys"
+  fi
+  local sudoers="/etc/sudoers.d/90-${ADMIN_USER}"
+  printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$ADMIN_USER" > "${sudoers}.tmp" || return 1
+  chmod 0440 "${sudoers}.tmp"
+  if visudo -cf "${sudoers}.tmp" >/dev/null; then mv -f "${sudoers}.tmp" "$sudoers"; else rm -f "${sudoers}.tmp"; return 1; fi
+}
+
+system_tuning() {
+  timedatectl set-timezone "$TIMEZONE" || fail "unknown TIMEZONE: $TIMEZONE"
+  systemctl restart systemd-journald || return 1
+  sysctl --system >/dev/null || return 1
+  systemctl enable --now chronyd
+}
+
+# Permanent firewalld change: live (firewall-cmd --permanent) when firewalld runs, offline otherwise.
+fw_perm() {
+  if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi
+}
+
+firewall() {
+  local running=0 zone p
+  systemctl is-active --quiet firewalld && running=1
+  if (( running )); then zone=$(firewall-cmd --get-default-zone) || return 1; else zone=$(firewall-offline-cmd --get-default-zone) || return 1; fi
+  if [[ "$zone" != public ]]; then
+    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || return 1
+    else firewall-offline-cmd --set-default-zone=public >/dev/null || return 1; fi
+  fi
+  fw_perm --zone=public --query-service=ssh >/dev/null 2>&1 || fw_perm --zone=public --add-service=ssh >/dev/null || return 1
+  # Lockout guard: never start or reload the firewall unless SSH is in the saved rules.
+  fw_perm --zone=public --query-service=ssh >/dev/null 2>&1 || { fail "ssh missing from saved public zone; firewall left as it was"; return 1; }
+  if (( running )); then firewall-cmd --reload >/dev/null || return 1; else systemctl enable --now firewalld || return 1; fi
+  firewall-cmd --zone=public --query-service=ssh >/dev/null || { systemctl stop firewalld; fail "ssh not allowed after start; firewalld stopped"; return 1; }
+
+  # Everything else is changed through the running daemon: firewall-offline-cmd rejects
+  # --zone with --remove-service ("Can't use lokkit options with other options").
+  local changed=0
+  # The default public zone opens cockpit (and mdns on some images); a cloud server needs neither.
+  for p in cockpit mdns; do
+    if firewall-cmd --permanent --zone=public --query-service="$p" >/dev/null 2>&1; then
+      if firewall-cmd --permanent --zone=public --remove-service="$p" >/dev/null; then changed=1; else fail "could not remove $p from public zone"; fi
+    fi
+  done
+  for p in $EXTRA_PORTS; do
+    if [[ "$p" =~ ^[0-9]{1,5}(-[0-9]{1,5})?/(tcp|udp)$ ]]; then
+      if ! firewall-cmd --permanent --zone=public --query-port="$p" >/dev/null 2>&1; then
+        if firewall-cmd --permanent --zone=public --add-port="$p" >/dev/null; then changed=1; else fail "could not open $p"; fi
+      fi
+    else
+      fail "ignored invalid EXTRA_PORTS entry: $p"
+    fi
+  done
+  if (( changed )); then firewall-cmd --reload >/dev/null || return 1; fi
+  firewall-cmd --zone=public --query-service=ssh >/dev/null || { fail "ssh not allowed after reload"; return 1; }
+}
+
+fail2ban() {
+  systemctl enable --now fail2ban || return 1
+  systemctl restart fail2ban || return 1
+}
+
+auto_updates() {
+  # Fedora 41+ ships dnf5; the automatic plugin is dnf5-plugin-automatic.
+  rpm -q dnf5-plugin-automatic >/dev/null 2>&1 || dnf -y -q install dnf5-plugin-automatic || dnf -y -q install dnf-automatic || return 1
+  install -d /etc/dnf
+  cat > /etc/dnf/automatic.conf <<'CONF'
+[commands]
+upgrade_type = security
+download_updates = yes
+apply_updates = yes
+reboot = never
+[emitters]
+emit_via = stdio
+CONF
+  systemctl enable --now dnf5-automatic.timer 2>/dev/null || systemctl enable --now dnf-automatic.timer 2>/dev/null
+}
+
+docker_engine() {
+  (( INSTALL_DOCKER == 1 )) || { log "Docker disabled in /etc/server-init.conf"; return 0; }
+  if ! command -v docker >/dev/null; then
+    rpm -q dnf-plugins-core >/dev/null 2>&1 || dnf -y -q install dnf-plugins-core || true
+    if ! dnf repolist --enabled 2>/dev/null | grep -q '^docker-ce-stable'; then
+      dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo || return 1
+    fi
+    dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
+  fi
+  systemctl enable --now docker || return 1
+  docker info >/dev/null
+}
+
+swap() {
+  (( INSTALL_SWAP == 1 )) || { log "swap disabled in /etc/server-init.conf"; return 0; }
+  # Fedora enables zram swap by default; add a disk swap file only when there is no swap at all.
+  if [[ -n "$(swapon --noheadings --show=NAME)" ]]; then log "swap already present: $(swapon --noheadings --show=NAME | tr '\n' ' ')"; return 0; fi
+  local mem_mb size_mb
+  mem_mb=$(awk '/MemTotal/ { print int($2 / 1024) }' /proc/meminfo)
+  size_mb=$(( mem_mb < 1024 ? 1024 : (mem_mb > 4096 ? 4096 : mem_mb) ))
+  if [[ ! -f /swapfile ]]; then
+    if [[ "$(findmnt -no FSTYPE /)" == btrfs ]]; then
+      btrfs filesystem mkswapfile --size "${size_mb}m" /swapfile || return 1
+    else
+      { fallocate -l "${size_mb}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none; } || return 1
+      chmod 600 /swapfile
+      mkswap /swapfile >/dev/null || return 1
+    fi
+  fi
+  restorecon /swapfile 2>/dev/null || true
+  swapon /swapfile || return 1
+  grep -qE '^/swapfile[[:space:]]' /etc/fstab || echo '/swapfile none swap defaults 0 0' >> /etc/fstab
+}
+
+log "start"
+step packages packages
+step configs write_configs
+step ssh-hardening ssh_hardening
+step admin-user admin_user
+step system-tuning system_tuning
+step firewall firewall
+step fail2ban fail2ban
+step auto-updates auto_updates
+step docker docker_engine
+step swap swap
+log "open in firewall: $(firewall-cmd --zone=public --list-services 2>/dev/null) $(firewall-cmd --zone=public --list-ports 2>/dev/null)"
+if (( ${#FAILED_STEPS[@]} )); then
+  log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"
+  exit 1
+fi
+log "done, all steps ok"
