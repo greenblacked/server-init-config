@@ -101,7 +101,13 @@ sudo server-cleanup
 
 The first prints the plan, the second runs now. Next run and last output: `systemctl list-timers server-cleanup.timer` and `journalctl -u server-cleanup.service -n 30`. It cleans journald (vacuum by time and size), package caches (`dnf`, `zypper`, `apt-get`), old stopped containers, build cache and dangling images (never volumes, never `docker system prune -a`), `/tmp` and `/var/tmp` by the system's age rules, old rotated logs and core dumps. It never touches `/home`, `/root`, `/srv`, `/opt`, Docker volumes or databases. Disable with `INSTALL_CLEANUP=0` in `/etc/server-init.conf` and a rerun of the bootstrap.
 
-The Ubuntu and Debian init has no cleanup step: with it the Cloud config would pass Hetzner's 32 KiB limit. There, copy `server/server-cleanup.sh` to the server and run it as root when needed.
+The Ubuntu and Debian init has no cleanup step: with it the Cloud config would pass Hetzner's 32 KiB limit. There the bootstrap has already copied the script to `/root/server-init-config/server/`; run it when needed. Server, as `ops`, any directory:
+
+```bash
+sudo bash /root/server-init-config/server/server-cleanup.sh --dry-run
+```
+
+Drop `--dry-run` to clean for real.
 
 | Setting (`/etc/server-init.conf`) | Default | Meaning |
 |---|---|---|
