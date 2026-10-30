@@ -293,7 +293,9 @@ render_lampac() {
   # Lampac accsdb on; users from users.json (one token per person). The embedded TorrServer, WebLog, DLNA and
   # other modules are skipped (we run a separate TorrServer). Modules whose endpoints are anonymous by design
   # (relays to cub.red / TMDB, media proxies, device binding, Telegram login, Kit, WatchTogether, ForkPlayer,
-  # MSX) are skipped too: this host is open to the internet without a login portal in front of it.
+  # MSX) are skipped too. LampaWeb.initPlugins is switched off for the same modules, otherwise Lampa is told to
+  # use /cub, /tmdb, /jacred ... on this host (404) instead of cub.red / TMDB / its own parser.
+  # This host is open to the internet without a login portal in front of it.
   # scheme is "https" because Caddy always terminates TLS and Lampac sees plain HTTP from it; it builds every
   # link it hands out (lampainit.js, online/lite, plugin URLs carrying the token) from this value.
   cat > "$f" <<CONF
@@ -309,7 +311,10 @@ render_lampac() {
     "authMesage": "Personal access only. Ask the owner for your link.",
     "denyMesage": "Access denied."
   },
-  "LampaWeb": { "autoupdate": $(env_get LAMPA_AUTOUPDATE), "tree": "$(env_get LAMPA_TREE)" },
+  "LampaWeb": {
+    "autoupdate": $(env_get LAMPA_AUTOUPDATE), "tree": "$(env_get LAMPA_TREE)",
+    "initPlugins": { "cubProxy": false, "tmdbProxy": false, "jacred": false, "timecode": false, "torrserver": false }
+  },
   "chromium": { "enable": true, "executablePath": "/usr/bin/chromium" },
   "openstat": { "enable": false },
   "online": { "name": "Lampac", "version": true }
@@ -423,10 +428,14 @@ wait_healthy() {
 ts_basic() { printf 'Basic %s' "$(printf 'lampa:%s' "$(cat "$DIR/secrets/ts_password")" | base64 -w0)"; }
 
 # TorrServer settings: POST /settings {"action":"get"} -> change keys -> {"action":"set","sets":{...}}.
-# Keys are the Go field names of BTSets (server/settings/btsets.go has no json tags). The credential goes to
-# the container on stdin, not on a command line.
+# Keys are the Go field names of BTSets (server/settings/btsets.go has no json tags). The request runs as curl
+# inside the qBittorrent container (same internal network) with the whole request (credential, body) given as a
+# curl config on stdin, so neither the credential nor the body is ever on a command line / in /proc.
 ts_post() { # json body -> stdout
-  ts_basic | dc exec -T torrserver sh -c 'H=$(cat); wget -qO- --header "Authorization: $H" --header "Content-Type: application/json" --post-data "$1" http://127.0.0.1:8090/settings' sh "$1"
+  local body="${1//\\/\\\\}"; body="${body//\"/\\\"}"
+  { printf 'header = "Authorization: %s"\nheader = "Content-Type: application/json"\n' "$(ts_basic)"
+    printf 'data = "%s"\nurl = "http://torrserver:8090/settings"\n' "$body"
+  } | dc exec -T qbittorrent curl -sS --fail --max-time 20 -K -
 }
 
 apply_torrserver() {

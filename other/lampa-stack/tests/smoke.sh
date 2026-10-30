@@ -54,6 +54,10 @@ if [[ "${SMOKE_SKIP_LAMPAC:-0}" != 1 ]]; then
   expect "Lampa page is served (LampaWeb downloaded it)" "$(req "$D" /)" '^200'
   body=$(curl -ksS --max-time 10 --resolve "${D}:${PORT}:127.0.0.1" "https://${D}:${PORT}/lampainit.js" || true)
   if grep -Eq "http://[^'\" ]*${D//./\\.}" <<<"$body"; then bad "lampainit.js builds http:// links to this host"; else ok "lampainit.js has no http:// links to this host"; fi
+  body=$(curl -ksS --max-time 10 --resolve "${D}:${PORT}:127.0.0.1" "https://${D}:${PORT}/lampainit.js" || true)
+  if grep -Eq "jackett_url[^;]*${D//./\\.}" <<<"$body"; then bad "lampainit.js points jackett_url at this host (JacRed is skipped)"; else ok "lampainit.js leaves jackett_url alone"; fi
+  appjs=$(curl -ksS --max-time 20 --resolve "${D}:${PORT}:127.0.0.1" "https://${D}:${PORT}/app.min.js" || true)
+  if grep -Eq "${D//./\\.}(:[0-9]+)?/(cub|tmdb)" <<<"$appjs"; then bad "app.min.js routes CUB/TMDB through this host (those modules are skipped)"; else ok "app.min.js does not route CUB/TMDB through this host"; fi
   anon=$(curl -ksS --max-time 10 --resolve "${D}:${PORT}:127.0.0.1" "https://${D}:${PORT}/lite/events" || true)
   if grep -q '"accsdb":true' <<<"$anon"; then ok "Lampac refuses an anonymous API call (accsdb)"; else bad "Lampac answered an anonymous API call: ${anon:0:80}"; fi
   if [[ -r "$DIR/secrets/users.tsv" ]]; then
