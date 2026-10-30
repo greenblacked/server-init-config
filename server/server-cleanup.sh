@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # server-cleanup: safe cleanup for a general server (journal, package cache, Docker leftovers, rotated logs,
 # temp files, core dumps). Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
-# Same text is embedded in server/server-init-el10.sh and server-init-fedora.sh (they must stay
+# Same text is embedded in the server/server-init-*.sh scripts that install it (they must stay
 # self-contained): keep all copies identical, tools/test-cloud-init.py checks that.
 # Settings come from /etc/server-init.conf (CLEAN_JOURNAL_TIME, CLEAN_JOURNAL_SIZE, CLEAN_AUTOREMOVE,
 # CLEAN_DOCKER_UNUSED_IMAGES); missing keys use the defaults below.
@@ -16,7 +16,8 @@ Usage: server-cleanup [--dry-run] [--help]
 
 Safe cleanup, each part skipped when its tool is missing:
   journald     journalctl --vacuum-time/--vacuum-size (CLEAN_JOURNAL_TIME, CLEAN_JOURNAL_SIZE)
-  packages     dnf clean packages; installonly_limit=3 if unset; dnf autoremove only with CLEAN_AUTOREMOVE=1
+  packages     dnf clean packages (installonly_limit=3 if unset), apt-get clean or zypper clean;
+               dnf/apt-get autoremove only with CLEAN_AUTOREMOVE=1
   docker       dangling images, build cache and stopped containers older than 7d; never volumes;
                CLEAN_DOCKER_UNUSED_IMAGES=1 also prunes unused images older than 30d
   temp         systemd-tmpfiles --clean for /tmp and /var/tmp (the system's own age rules)
@@ -99,7 +100,12 @@ if have dnf; then
     else log warn "no [main] section in /etc/dnf/dnf.conf, installonly_limit left unset"; fi
   fi
   if [[ ${CLEAN_AUTOREMOVE:-0} == 1 ]]; then run dnf -y autoremove; else skip autoremove "CLEAN_AUTOREMOVE is not 1"; fi
-else skip packages "dnf not found"; fi
+elif have apt-get; then
+  run apt-get clean
+  if [[ ${CLEAN_AUTOREMOVE:-0} == 1 ]]; then run apt-get -y autoremove; else skip autoremove "CLEAN_AUTOREMOVE is not 1"; fi
+elif have zypper; then
+  run zypper --non-interactive clean
+else skip packages "dnf, apt-get and zypper not found"; fi
 
 if have docker && systemctl is-active --quiet docker 2>/dev/null; then
   run docker container prune -f --filter until=168h

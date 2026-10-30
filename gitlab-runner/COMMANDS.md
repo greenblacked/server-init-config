@@ -98,9 +98,8 @@ cat > /etc/profile.d/90-shell-history.sh <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-# The same text is embedded in server/server-init-el10.sh
-# and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
-# tools/test-cloud-init.py checks that.
+# The same text is embedded in the server/server-init-*.sh scripts (they must stay self-contained):
+# keep all copies identical, tools/test-cloud-init.py checks that.
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
 
@@ -996,9 +995,8 @@ cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-# The same text is embedded in server/server-init-el10.sh
-# and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
-# tools/test-cloud-init.py checks that.
+# The same text is embedded in the server/server-init-*.sh scripts (they must stay self-contained):
+# keep all copies identical, tools/test-cloud-init.py checks that.
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
 
@@ -10830,9 +10828,8 @@ cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-# The same text is embedded in server/server-init-el10.sh
-# and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
-# tools/test-cloud-init.py checks that.
+# The same text is embedded in the server/server-init-*.sh scripts (they must stay self-contained):
+# keep all copies identical, tools/test-cloud-init.py checks that.
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
 
@@ -14940,9 +14937,8 @@ cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-# The same text is embedded in server/server-init-el10.sh
-# and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
-# tools/test-cloud-init.py checks that.
+# The same text is embedded in the server/server-init-*.sh scripts (they must stay self-contained):
+# keep all copies identical, tools/test-cloud-init.py checks that.
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
 
