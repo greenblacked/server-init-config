@@ -1,0 +1,20 @@
+[Unit]
+Description=TorrServer cleanup (drop torrents, delete old downloads)
+Documentation=file:@DIR@/README.md
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=TS_DIR=@DIR@
+ExecStart=@DIR@/cleanup.sh
+# Output goes to the journal: journalctl -u torrserver-cleanup
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=@DIR@/data/downloads
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

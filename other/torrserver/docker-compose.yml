@@ -1,0 +1,89 @@
+# TorrServer in Docker, hardened. Managed by install.sh; settings come from .env next to this file.
+# Image/env reference: https://github.com/YouROK/TorrServer (Dockerfile, docker-entrypoint.sh at tag MatriX.147.2).
+name: torrserver
+
+services:
+  torrserver:
+    # Pinned release tag plus digest, set in .env (TS_IMAGE). Never :latest.
+    image: ${TS_IMAGE:?TS_IMAGE is not set, run install.sh}
+    container_name: torrserver
+    restart: unless-stopped
+    # The image runs as root by default but needs no root: it only writes under /opt/ts (bind mount).
+    user: "${TS_UID:-10001}:${TS_GID:-10001}"
+    # Localhost only by default (reach it with an SSH tunnel). TS_BIND is 0.0.0.0 only if you set it yourself.
+    ports:
+      - "${TS_BIND:-127.0.0.1}:${TS_HOST_PORT:-8090}:8090"
+    environment:
+      TS_PORT: "8090"
+      TS_HTTPAUTH: "1"          # --httpauth: users from /opt/ts/config/accs.db
+      TS_DONTKILL: "1"          # --dontkill: ignore SIGTERM/SIGINT; stop_grace_period below ends it
+      TS_CONF_PATH: /opt/ts/config
+      TS_LOG_PATH: /opt/ts/log
+      TS_TORR_DIR: /opt/ts/torrents
+      HOME: /tmp
+    volumes:
+      # :z = shared SELinux label container_file_t (needed on EL/Fedora/openSUSE, ignored elsewhere)
+      - ./data:/opt/ts:z
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 512
+    # Limits that plain `docker compose` applies (deploy.resources is for swarm). Checked with docker inspect.
+    mem_limit: ${TS_MEM_LIMIT:-3g}
+    memswap_limit: ${TS_MEM_LIMIT:-3g}
+    mem_reservation: ${TS_MEM_RESERVATION:-512m}
+    cpus: ${TS_CPUS:-2.0}
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # /echo answers without a login and returns the version (web/server.go in the source).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/echo"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Only with --public (COMPOSE_PROFILES=public in .env): HTTPS reverse proxy with automatic certificates.
+  caddy:
+    profiles: [public]
+    image: ${CADDY_IMAGE:-caddy:2.10.0@sha256:133b5eb7ef9d42e34756ba206b06d84f4e3eb308044e268e182c2747083f09de}
+    container_name: torrserver-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - caddy-data:/data
+      - caddy-config:/config
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      - torrserver
+
+volumes:
+  caddy-data:
+  caddy-config:
