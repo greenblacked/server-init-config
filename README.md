@@ -51,11 +51,11 @@ Rerunning either bootstrap is safe. Options: `--help`.
 |---|---|---|
 | SSH | keys only, root by key on port 22 | keys only, only the `ssh-users` group, root by key until you lock it |
 | Users | admin `ops` with sudo | `ops` (sudo), service accounts `gitlab-runner` and `monitoring` without login |
-| Firewall | firewalld (RHEL family, openSUSE, Fedora) or ufw (Ubuntu, Debian): only SSH and your `EXTRA_PORTS`; SSH is saved before the firewall starts | none set by this repo (`rocky.yaml` turns firewalld off): use the Hetzner Cloud Firewall |
-| Brute force | fail2ban for SSH (5 failures in 10 minutes, 1 hour ban) | none |
-| Updates | daily security updates, no automatic reboot | same (dnf-automatic or unattended-upgrades) |
+| Firewall | firewalld (RHEL family, openSUSE, Fedora) or ufw (Ubuntu, Debian): only SSH and your `EXTRA_PORTS`; SSH is saved before the firewall starts | firewalld (Rocky) or ufw (Debian) with only SSH open, set by `setup.sh --firewall` (the bootstrap runs it; `--no-firewall` skips it); also use the Hetzner Cloud Firewall |
+| Brute force | fail2ban for SSH (5 failures in 10 minutes, 1 hour ban) | the same, installed with the firewall step |
+| Updates | daily security updates, no automatic reboot | same (dnf-automatic or unattended-upgrades), plus a weekly upgrade of Docker CE and GitLab Runner that runs only while no job runs |
 | Docker | Docker Engine and Compose (distro packages on openSUSE) | Docker Engine, GitLab Runner (docker executor), `concurrent = 2` |
-| Extras | swap if none, sysctl tuning, journald limit, time sync, weekly cleanup (not on Ubuntu or Debian), admin tools, shell history with fzf | Docker Hub cache, monitoring, logging, npm and shared caches, weekly cleanup, disk guard at 85% |
+| Extras | swap if none, sysctl tuning and kernel hardening, core dumps off, journald limit, time sync, weekly cleanup (not on Ubuntu or Debian), admin tools, shell history with fzf, optional `server/lock-root.sh` | Docker Hub cache, monitoring, logging, npm and shared caches, weekly cleanup, disk guard at 85%, kernel hardening, core dumps off, per-job CPU, memory and process limits, CI jobs blocked from the cloud metadata address and from host services |
 | SELinux | as the image has it | enforcing on Rocky (`rocky.yaml` sets it at boot, `rocky-clean.yaml` leaves it to `setup.sh --selinux`) |
 
 ## Daily use
@@ -109,6 +109,8 @@ Restore the runner configuration from its newest backup (server, as root via `su
 cp -a "$(ls -1t /etc/gitlab-runner/config.toml.bak.* | head -1)" /etc/gitlab-runner/config.toml && chown gitlab-runner:gitlab-runner /etc/gitlab-runner/config.toml && systemctl restart gitlab-runner
 cp -a "$(ls -1t /etc/docker/daemon.json.bak.* | head -1)" /etc/docker/daemon.json && systemctl restart docker
 ```
+
+Plain servers: `sudo bash /root/server-init-config/server/lock-root.sh --unlock-root` (server, as `ops`, any directory).
 
 Reopen root SSH after you locked it on a runner host (server, as `ops` or root, any directory):
 
