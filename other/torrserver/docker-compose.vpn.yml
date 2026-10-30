@@ -1,0 +1,7 @@
+# Added by install.sh in --vpn mode (COMPOSE_FILE in .env): TorrServer also answers on the WireGuard address.
+# The localhost port from docker-compose.yml stays; compose appends this to its port list.
+# The address exists only while wg-quick@wg0 is up (a systemd drop-in starts it before Docker).
+services:
+  torrserver:
+    ports:
+      - "${TS_VPN_ADDR:-127.0.0.1}:${TS_HOST_PORT:-8090}:8090"
