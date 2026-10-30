@@ -31,7 +31,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FILES = ["gitlab-runner/cloud-init-rocky.yaml", "cloud-init/rocky.yaml", "cloud-init/rocky-x86.yaml", "cloud-init/debian.yaml",
-                 "cloud-init/debian-x86.yaml", "cloud-init/server-fedora.yaml", "cloud-init/server-el10.yaml"]
+                 "cloud-init/debian-x86.yaml", "cloud-init/server-fedora.yaml", "cloud-init/server-el10.yaml",
+                 "cloud-init/server-debian.yaml"]
 SHELL_HISTORY = ROOT / "scripts" / "shell-history.sh"
 SERVER_CLEANUP = ROOT / "server" / "server-cleanup.sh"
 SERVER_SCRIPTS = ["server/server-init-el10.sh", "server/server-init-fedora.sh"]
