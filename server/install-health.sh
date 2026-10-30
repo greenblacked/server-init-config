@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Install the `health` report on a general server. Run from a repo checkout: sudo server/install-health.sh
-# Installs scripts/health to /usr/local/bin/health and a sudoers drop-in so `sudo health` finds it
+# Installs common/health to /usr/local/bin/health and a sudoers drop-in so `sudo health` finds it
 # (RHEL-family sudo resets PATH to a secure_path without /usr/local/bin). Safe to rerun.
 set -Eeuo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: sudo $0   installs scripts/health to /usr/local/bin/health and the sudo secure_path drop-in"
+  echo "Usage: sudo $0   installs common/health to /usr/local/bin/health and the sudo secure_path drop-in"
   exit 0
 fi
 [[ $EUID -eq 0 ]] || { echo "ERROR: run as root: sudo $0" >&2; exit 1; }
 
-src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/health"
+src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/common/health"
 [[ -f "$src" ]] || { echo "ERROR: $src not found; run this from a checkout of the repo" >&2; exit 1; }
 bash -n "$src" || { echo "ERROR: $src has a syntax error" >&2; exit 1; }
 

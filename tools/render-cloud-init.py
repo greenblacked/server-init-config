@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render cloud-init/*.yaml from cloud-init/templates/*.yaml.in.
+"""Render the cloud-init files of runner/cloud-init and server/cloud-init from their templates/*.yaml.in.
 
 Directives (each on its own line):
   @@INCLUDE path@@  insert another template verbatim
@@ -20,17 +20,16 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-TEMPLATES = ROOT / "cloud-init" / "templates"
 TARGETS = {
-    "rocky.yaml.in": "cloud-init/rocky.yaml",
-    "rocky-x86.yaml.in": "cloud-init/rocky-x86.yaml",
-    "debian.yaml.in": "cloud-init/debian.yaml",
-    "debian-x86.yaml.in": "cloud-init/debian-x86.yaml",
-    "server-fedora.yaml.in": "cloud-init/server-fedora.yaml",
-    "server-el10.yaml.in": "cloud-init/server-el10.yaml",
-    "server-debian.yaml.in": "cloud-init/server-debian.yaml",
-    "server-opensuse.yaml.in": "cloud-init/server-opensuse.yaml",
-    "runner-rocky.yaml.in": "gitlab-runner/cloud-init-rocky.yaml",
+    "runner/cloud-init/templates/rocky.yaml.in": "runner/cloud-init/rocky.yaml",
+    "runner/cloud-init/templates/rocky-x86.yaml.in": "runner/cloud-init/rocky-x86.yaml",
+    "runner/cloud-init/templates/debian.yaml.in": "runner/cloud-init/debian.yaml",
+    "runner/cloud-init/templates/debian-x86.yaml.in": "runner/cloud-init/debian-x86.yaml",
+    "runner/cloud-init/templates/rocky-clean.yaml.in": "runner/cloud-init/rocky-clean.yaml",
+    "server/cloud-init/templates/server-fedora.yaml.in": "server/cloud-init/server-fedora.yaml",
+    "server/cloud-init/templates/server-el10.yaml.in": "server/cloud-init/server-el10.yaml",
+    "server/cloud-init/templates/server-debian.yaml.in": "server/cloud-init/server-debian.yaml",
+    "server/cloud-init/templates/server-opensuse.yaml.in": "server/cloud-init/server-opensuse.yaml",
 }
 HETZNER_USER_DATA_LIMIT = 32 * 1024
 DIRECTIVE = re.compile(r"^@@(INCLUDE|FILE) (\S+)@@$")
@@ -78,7 +77,7 @@ def main() -> int:
 
     stale = False
     for template, target in TARGETS.items():
-        text = render(TEMPLATES / template)
+        text = render(ROOT / template)
         validate(target, text)
         dest = ROOT / target
         if args.check:

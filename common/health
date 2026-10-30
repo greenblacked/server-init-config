@@ -1,0 +1,1322 @@
+#!/usr/bin/env bash
+# health: one-command health and status report for this host (GitLab Runner host or general server)
+set -Eeuo pipefail
+
+DISK_WARN=70
+DISK_FAIL=85
+INODE_WARN=80
+MEM_WARN=15
+MEM_FAIL=5
+LOAD_WARN=1.5
+LOAD_FAIL=3
+CLAM_SIG_WARN_DAYS=7
+QUICK=0
+BRIEF=0
+WRITE=0
+ONLY_CONTAINERS=0
+COLOR=1
+PROFILE=auto
+RUNNER_UNREGISTERED=0
+CFG=/etc/gitlab-runner/config.toml
+PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
+FORECAST_MIN_HISTORY_H="${FORECAST_MIN_HISTORY_H:-6}"
+
+usage() {
+  cat <<'USAGE'
+Usage: health [options]
+
+One-command health and status report for this host. Works on a GitLab Runner
+host and on a general server.
+
+Run it as a normal user: it re-runs itself through sudo when that needs no password.
+Without root and without passwordless sudo it still runs, but skips the root-only
+checks (firewall rules, fail2ban, sshd settings, journal, docker, runner).
+
+Options:
+  -q, --quick       skip slow checks (runner verify, network, pending updates, needs-restarting)
+  -c, --containers  only show health of running containers
+  --profile P       server|runner (default: auto = server; runner only when a runner is registered)
+  --brief           compact summary (7 lines) of the state the server timers cached, plus live disk, memory,
+                    firewall and fail2ban; this is what the admin sees on login
+  --write           with --brief, as root: save it to /var/lib/server-health/brief.txt (done by server-health-brief.timer;
+                    also runs a full report at most every 6 hours and notifies when it has failures)
+  --no-color        plain output without colors
+  -h, --help        show this help
+
+Exit codes: 0 all OK, 1 warnings only, 2 at least one failure
+USAGE
+}
+
+ORIG_ARGS=("$@")
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -q|--quick) QUICK=1 ;;
+    -c|--containers) ONLY_CONTAINERS=1 ;;
+    --profile) [[ $# -ge 2 ]] || { echo "--profile needs a value: runner or server" >&2; exit 2; }; shift; PROFILE="$1" ;;
+    --profile=*) PROFILE="${1#--profile=}" ;;
+    --no-color) COLOR=0 ;;
+    --brief) BRIEF=1 ;;
+    --write) WRITE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if (( WRITE == 1 && BRIEF == 0 )); then echo "--write needs --brief" >&2; exit 2; fi
+case "$PROFILE" in
+  auto|runner|server) ;;
+  *) echo "invalid --profile '${PROFILE}': use runner or server" >&2; exit 2 ;;
+esac
+
+LIMITED=0
+# Not root: re-run through sudo when that works without a password (HEALTH_REEXEC stops loops);
+# otherwise run in limited mode and skip the checks that need root.
+if [[ $EUID -ne 0 ]]; then
+  if [[ -z "${HEALTH_REEXEC:-}" ]] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    exec sudo -n -- env HEALTH_REEXEC=1 "$(readlink -f "$0")" "${ORIG_ARGS[@]}"
+  fi
+  LIMITED=1
+fi
+
+if [[ -t 1 && "$COLOR" == "1" && -z "${NO_COLOR:-}" ]]; then
+  C_OK=$'\e[32m'; C_WARN=$'\e[33m'; C_FAIL=$'\e[31m'; C_B=$'\e[1m'; C_D=$'\e[2m'; C_N=$'\e[0m'
+else
+  C_OK=""; C_WARN=""; C_FAIL=""; C_B=""; C_D=""; C_N=""
+fi
+
+N_OK=0; N_WARN=0; N_FAIL=0
+FW_STATE=unknown
+ok()      { N_OK=$((N_OK + 1));     printf '  %s%-5s%s %s\n' "$C_OK" "OK" "$C_N" "$*"; }
+warn()    { N_WARN=$((N_WARN + 1)); printf '  %s%-5s%s %s\n' "$C_WARN" "WARN" "$C_N" "$*"; }
+fail()    { N_FAIL=$((N_FAIL + 1)); printf '  %s%-5s%s %s\n' "$C_FAIL" "FAIL" "$C_N" "$*"; }
+skip()    { printf '  %s%-5s %s%s\n' "$C_D" "--" "$*" "$C_N"; }
+info()    { printf '  %s%-5s %s%s\n' "$C_D" "" "$*" "$C_N"; }
+section() { printf '\n%s%s%s\n' "$C_B" "$*" "$C_N"; }
+have()    { command -v "$1" >/dev/null 2>&1; }
+gt()      { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+isnum()   { [[ "${1:-}" =~ ^-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; }
+num()     { awk -v x="$1" -v d="${2:-1}" 'BEGIN { printf "%.*f", d, x }'; }
+unit_exists() { systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q .; }
+is_runner()   { [[ "$PROFILE" == "runner" ]]; }
+detect_profile() {
+  [[ "$PROFILE" == "auto" ]] || return 0
+  # Default is a plain server. Only a host with a registered runner gets the runner checks;
+  # gitlab-runner installed but never registered is still a plain server.
+  if [[ -r "$CFG" ]] && grep -q '^[[:space:]]*\[\[runners\]\]' "$CFG" 2>/dev/null; then
+    PROFILE=runner
+  else
+    PROFILE=server
+    # Without root the 0600 config.toml can't be read, so "not registered" would be a guess.
+    if [[ -e "$CFG" && ! -r "$CFG" ]]; then RUNNER_UNREGISTERED=2
+    elif have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
+  fi
+}
+http_code()   { curl -s -o /dev/null -m "${2:-5}" -w '%{http_code}' "$1" 2>/dev/null || true; }
+
+human_age() {
+  local s="$1"
+  if (( s < 3600 )); then echo "$(( s / 60 ))m"
+  elif (( s < 86400 )); then echo "$(( s / 3600 ))h$(( s % 3600 / 60 ))m"
+  else echo "$(( s / 86400 ))d$(( s % 86400 / 3600 ))h"; fi
+}
+
+prom_q() {
+  curl -fsS -m 10 -G "${PROM_URL}/api/v1/query" --data-urlencode "query=$1" 2>/dev/null \
+    | jq -r '.data.result[0].value[1] // empty' 2>/dev/null || true
+}
+
+prom_qv() {
+  curl -fsS -m 10 -G "${PROM_URL}/api/v1/query" --data-urlencode "query=$1" 2>/dev/null \
+    | jq -r '.data.result[] | ((.metric | to_entries | map(.value) | join(",")) as $k | "\($k)=\(.value[1])")' 2>/dev/null || true
+}
+
+print_summary_and_exit() {
+  section "Summary"
+  printf '  %s%d OK%s  %s%d WARN%s  %s%d FAIL%s\n' \
+    "$C_OK" "$N_OK" "$C_N" "$C_WARN" "$N_WARN" "$C_N" "$C_FAIL" "$N_FAIL" "$C_N"
+  if (( N_FAIL > 0 )); then exit 2; fi
+  if (( N_WARN > 0 )); then exit 1; fi
+  exit 0
+}
+
+check_system() {
+  section "System"
+  local pretty="unknown"
+  if [[ -r /etc/os-release ]]; then
+    pretty=$(awk -F= '/^PRETTY_NAME=/ { gsub(/"/, "", $2); print $2 }' /etc/os-release)
+  fi
+  info "$(uname -n) | ${pretty} | $(uname -m) | kernel $(uname -r)"
+  info "uptime $(uptime -p 2>/dev/null | sed 's/^up //') | $(nproc) vCPU"
+
+  local cores load5 per_core
+  cores=$(nproc)
+  read -r _ load5 _ _ _ < /proc/loadavg
+  per_core=$(awk -v l="$load5" -v c="$cores" 'BEGIN { printf "%.2f", l / c }')
+  if gt "$per_core" "$LOAD_FAIL"; then
+    fail "load ${load5} (5 min), ${per_core} per core"
+  elif gt "$per_core" "$LOAD_WARN"; then
+    warn "load ${load5} (5 min), ${per_core} per core"
+  else
+    ok "load ${load5} (5 min), ${per_core} per core"
+  fi
+
+  local mem_total mem_avail mem_pct msg
+  mem_total=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+  mem_avail=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  mem_pct=$(( mem_avail * 100 / mem_total ))
+  msg="memory $(( (mem_total - mem_avail) / 1024 ))/$(( mem_total / 1024 )) MB used, ${mem_pct}% available"
+  if (( mem_pct < MEM_FAIL )); then fail "$msg"
+  elif (( mem_pct < MEM_WARN )); then warn "$msg"
+  else ok "$msg"; fi
+
+  local swap_total swap_free
+  swap_total=$(awk '/^SwapTotal:/ { print $2 }' /proc/meminfo)
+  swap_free=$(awk '/^SwapFree:/ { print $2 }' /proc/meminfo)
+  if (( swap_total > 0 )); then
+    local swap_pct=$(( (swap_total - swap_free) * 100 / swap_total ))
+    msg="swap $(( (swap_total - swap_free) / 1024 ))/$(( swap_total / 1024 )) MB used (${swap_pct}%)"
+    if is_runner; then info "$msg"
+    elif (( swap_pct >= 80 )); then warn "$msg, memory pressure"
+    else ok "$msg"; fi
+  else
+    info "swap: none"
+  fi
+
+  local kills ooms victims
+  # Count kills, not every related kernel line. One kill emits several matches.
+  if (( LIMITED )); then
+    kills=""
+    skip "OOM kills: needs root (kernel log)"
+  else
+    kills=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep 'Out of memory: Killed process' || true)
+  fi
+  if [[ -n "$kills" ]]; then
+    ooms=$(grep -c . <<<"$kills")
+    victims=$(sed -nE 's/.*Killed process [0-9]+ \(([^)]+)\).*/\1/p' <<<"$kills" | sort | uniq -c | awk '{printf "%s x%s, ", $2, $1}' | sed 's/, $//')
+    warn "${ooms} OOM kill(s) since boot${victims:+ (${victims})} (journalctl -k -b | grep 'Killed process')"
+  elif (( ! LIMITED )); then
+    ok "no OOM kills since boot"
+  fi
+
+  local disk_pct disk_info inode_pct
+  disk_pct=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+  disk_info=$(df -h --output=used,size / | tail -1 | awk '{ print $1 "/" $2 }')
+  msg="disk / ${disk_pct}% used (${disk_info})"
+  if (( disk_pct >= DISK_FAIL )); then fail "$msg"
+  elif (( disk_pct >= DISK_WARN )); then warn "$msg"
+  else ok "$msg"; fi
+
+  inode_pct=$(df --output=ipcent / 2>/dev/null | tail -1 | tr -dc '0-9' || true)
+  if (( ${inode_pct:-0} >= INODE_WARN )); then
+    warn "inodes / ${inode_pct}% used"
+  fi
+
+  local failed
+  failed=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{ print $1 }' | tr '\n' ' ' || true)
+  if [[ -n "${failed// /}" ]]; then
+    fail "failed units: ${failed}"
+  else
+    ok "no failed systemd units"
+  fi
+
+  if have timedatectl; then
+    local sync
+    sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+    if [[ "$sync" == "yes" ]]; then ok "clock synchronized (NTP)"
+    else warn "clock not synchronized (timedatectl)"; fi
+  fi
+
+  if have cloud-init; then
+    local ci
+    ci=$(cloud-init status 2>/dev/null | awk -F': ' '/^status:/ { print $2 }' || true)
+    case "$ci" in
+      done) ok "cloud-init done" ;;
+      running) warn "cloud-init still running" ;;
+      "") skip "cloud-init status unknown" ;;
+      *) warn "cloud-init status: ${ci}" ;;
+    esac
+  fi
+  return 0
+}
+
+check_security() {
+  section "Security"
+  if have getenforce; then
+    local mode denials raw rc=0
+    mode=$(getenforce 2>/dev/null || true)
+    case "$mode" in
+      Enforcing) ok "SELinux enforcing" ;;
+      Permissive) warn "SELinux permissive (logs only, does not block)" ;;
+      *) warn "SELinux ${mode:-unknown}" ;;
+    esac
+    # ausearch treats a pipe on stdin as the audit log and blocks until it closes.
+    # health is often started over ssh, so force the on-disk logs and bound the query.
+    if (( LIMITED )); then
+      skip "SELinux denials: needs root"
+    elif ! have ausearch; then
+      skip "ausearch not installed"
+    else
+      raw=$(timeout 10 ausearch --input-logs -m avc -ts today </dev/null 2>/dev/null) || rc=$?
+      if (( rc == 124 )); then
+        skip "SELinux denial query timed out"
+      elif (( rc != 0 && rc != 1 )); then
+        skip "could not query SELinux denials (ausearch exit ${rc})"
+      else
+        denials=$(grep -c 'avc:' <<<"$raw" || true)
+        if (( ${denials:-0} > 0 )); then
+          warn "${denials} SELinux denials today (ausearch --input-logs -m avc -ts today)"
+        else
+          ok "no SELinux denials today"
+        fi
+      fi
+    fi
+  fi
+
+  if (( LIMITED )); then
+    skip "sshd settings, listening ports, pending updates: need root (run as root for the full report)"
+  elif have sshd; then
+    local sshd_t root_login
+    sshd_t=$(sshd -T 2>/dev/null || true)
+    if grep -qx 'passwordauthentication no' <<<"$sshd_t"; then
+      ok "SSH password login disabled"
+    elif is_runner; then
+      fail "SSH password login enabled"
+    else
+      warn "SSH password login enabled (set PasswordAuthentication no)"
+    fi
+    root_login=$(awk '/^permitrootlogin / { print $2 }' <<<"$sshd_t")
+    if is_runner; then
+      case "$root_login" in
+        no)  ok "SSH root login disabled" ;;
+        yes) fail "SSH root login with password allowed" ;;
+        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo runner/install/users.sh --lock-root" ;;
+      esac
+      if grep -q '^allowgroups ' <<<"$sshd_t"; then
+        ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
+      else
+        warn "SSH not limited by AllowGroups (runner/install/users.sh sets it)"
+      fi
+    else
+      case "$root_login" in
+        yes) warn "SSH root login with password allowed (PermitRootLogin yes)" ;;
+        *)   info "SSH root login: ${root_login:-unknown}" ;;
+      esac
+    fi
+  fi
+
+  local members u shell pid ru
+  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vx 'gitlab-runner' | grep . | tr '\n' ' ' || true)
+  if [[ -n "${members// /}" ]]; then
+    warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
+  else
+    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
+  fi
+  for u in gitlab-runner monitoring; do
+    id "$u" >/dev/null 2>&1 || continue
+    shell=$(getent passwd "$u" | cut -d: -f7)
+    case "$shell" in
+      */nologin|*/false) ok "service user ${u}: no login shell" ;;
+      *) warn "service user ${u} has login shell ${shell}" ;;
+    esac
+  done
+  if have systemctl && systemctl is-active --quiet gitlab-runner 2>/dev/null; then
+    pid=$(systemctl show -p MainPID --value gitlab-runner 2>/dev/null || true)
+    ru=$(ps -o user= -p "${pid:-0}" 2>/dev/null | tr -d ' ' || true)
+    if [[ "$ru" == root ]]; then
+      warn "gitlab-runner service runs as root (runner/install/users.sh switches it to gitlab-runner)"
+    elif [[ -n "$ru" ]]; then
+      ok "gitlab-runner service runs as ${ru}"
+    fi
+  fi
+
+  local exposed ssh_ports allowed
+  if (( LIMITED == 0 )); then
+    ssh_ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+    ssh_ports="${ssh_ports:-22 }"
+    allowed="$(tr ' ' '|' <<<"${ssh_ports% }")|80|443"
+    if ! is_runner; then
+      info "SSH port: ${ssh_ports% }"
+    elif [[ " ${ssh_ports}" == *" 22 "* ]]; then
+      info "SSH listens on: ${ssh_ports}(port 22 closes with runner/install/users.sh --lock-root)"
+    else
+      ok "SSH port: ${ssh_ports% }"
+    fi
+    exposed=$(ss -ltnH 2>/dev/null | awk '{ print $4 }' \
+      | grep -vE '^(127\.|\[::1\]|172\.17\.)' \
+      | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE "$allowed" | tr '\n' ' ' || true)
+    if [[ -n "${exposed// /}" ]]; then
+      if is_runner; then
+        warn "ports listening on public interfaces: ${exposed}(make sure the Hetzner firewall blocks them)"
+      elif [[ "$FW_STATE" == "active" ]]; then
+        info "ports listening on public interfaces: ${exposed}(the host firewall decides what is reachable)"
+      else
+        warn "ports listening on public interfaces: ${exposed}(no active host firewall)"
+      fi
+    else
+      ok "only SSH/HTTP/HTTPS listen on public interfaces"
+    fi
+
+  fi
+
+  if (( QUICK == 0 && LIMITED == 0 )); then
+    local out n
+    if have dnf; then
+      if out=$(timeout 90 dnf -q updateinfo list --security 2>/dev/null); then
+        n=$(grep -c . <<<"$out" || true)
+        if (( ${n:-0} > 0 )); then
+          warn "${n} pending security updates (dnf updateinfo list --security)"
+        else
+          ok "no pending security updates"
+        fi
+      else
+        skip "could not query security updates"
+      fi
+    elif have apt-get; then
+      n=$(apt-get -s upgrade 2>/dev/null | grep -c '^Inst.*security' || true)
+      if (( ${n:-0} > 0 )); then
+        warn "${n} pending security updates"
+      else
+        ok "no pending security updates"
+      fi
+    fi
+  fi
+  return 0
+}
+
+# Sets FW_KIND (firewalld|ufw|none) and FW_STATE (active|inactive|none) without printing.
+detect_firewall() {
+  FW_KIND=none; FW_STATE=none
+  (( LIMITED == 0 )) || return 0
+  if have firewall-cmd || unit_exists firewalld.service; then
+    FW_KIND=firewalld; FW_STATE=inactive
+    if have firewall-cmd && [[ "$(firewall-cmd --state 2>/dev/null || true)" == "running" ]]; then FW_STATE=active; fi
+  elif have ufw; then
+    FW_KIND=ufw; FW_STATE=inactive
+    if ufw status 2>/dev/null | grep -qi '^Status: active'; then FW_STATE=active; fi
+  fi
+  return 0
+}
+
+check_firewall() {
+  section "Firewall and brute-force protection"
+  if (( LIMITED )); then
+    skip "firewall and fail2ban: need root (run as root for the full report)"
+    return 0
+  fi
+  local ports p ssh_ok=0 zone svc open ufw_out
+  ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+  ports="${ports:-22}"
+
+  case "$FW_KIND:$FW_STATE" in
+    firewalld:active)
+      zone=$(firewall-cmd --get-default-zone 2>/dev/null || true)
+      svc=$(firewall-cmd --zone="$zone" --list-services 2>/dev/null || true)
+      open=$(firewall-cmd --zone="$zone" --list-ports 2>/dev/null || true)
+      for p in $ports; do
+        if [[ " ${open} " == *" ${p}/tcp "* ]]; then ssh_ok=1; fi
+        if [[ "$p" == "22" && " ${svc} " == *" ssh "* ]]; then ssh_ok=1; fi
+      done
+      if (( ssh_ok )); then
+        ok "firewalld active, default zone ${zone:-?}, SSH allowed"
+      else
+        fail "firewalld active but SSH (${ports% }) is not allowed in zone ${zone:-?}; the next reload can lock you out"
+      fi
+      info "open in ${zone:-?}: services ${svc:-none} | ports ${open:-none}"
+      ;;
+    firewalld:*)
+      if is_runner; then info "firewalld installed but not running (cloud firewall assumed)"
+      else warn "firewalld installed but not running (systemctl enable --now firewalld)"; fi
+      ;;
+    ufw:active)
+      ufw_out=$(ufw status 2>/dev/null || true)
+      for p in $ports; do
+        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?( on [^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)" <<<"$ufw_out"; then ssh_ok=1; fi
+      done
+      if (( ssh_ok )); then
+        ok "ufw active, SSH allowed"
+      else
+        fail "ufw active but SSH (${ports% }) is not allowed"
+      fi
+      open=$(awk '/ALLOW/ && !/\(v6\)/ { print $1 }' <<<"$ufw_out" | sort -u | tr '\n' ' ')
+      info "allowed in ufw: ${open:-none}"
+      ;;
+    ufw:*)
+      if is_runner; then info "ufw installed but inactive (cloud firewall assumed)"
+      else warn "ufw installed but inactive (ufw enable)"; fi
+      ;;
+    *)
+      if is_runner; then info "no host firewall (cloud firewall assumed)"
+      else warn "no host firewall found (firewalld or ufw)"; fi
+      ;;
+  esac
+
+  if ! have fail2ban-client && ! unit_exists fail2ban.service; then
+    if is_runner; then skip "fail2ban not installed"; else warn "fail2ban not installed (SSH brute-force protection)"; fi
+    return 0
+  fi
+  if ! systemctl is-active --quiet fail2ban 2>/dev/null && ! { have fail2ban-client && fail2ban-client ping >/dev/null 2>&1; }; then
+    warn "fail2ban not active"
+    return 0
+  fi
+  local st banned total
+  if st=$(fail2ban-client status sshd 2>/dev/null); then
+    banned=$(sed -nE 's/.*Currently banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -1)
+    total=$(sed -nE 's/.*Total banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -1)
+    ok "fail2ban active, sshd jail: ${banned:-0} banned now (${total:-0} total)"
+  else
+    warn "fail2ban active but no sshd jail (fail2ban-client status)"
+  fi
+  return 0
+}
+
+check_updates() {
+  section "Updates and reboot"
+  local t found="" n pending="" applies=0 conf
+  for t in server-update.timer dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
+    unit_exists "$t" || continue
+    systemctl is-enabled --quiet "$t" 2>/dev/null || systemctl is-active --quiet "$t" 2>/dev/null || continue
+    found="$t"; break
+  done
+  if [[ -z "$found" ]]; then
+    # openSUSE and others: any enabled timer that looks like an update job
+    found=$(systemctl list-unit-files '*.timer' --state=enabled --no-legend --plain 2>/dev/null \
+      | awk '{ print $1 }' | grep -E 'zypper|yum-cron|unattended|transactional-update|packagekit-offline' | head -1 || true)
+  fi
+
+  if [[ -z "$found" ]]; then
+    warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
+  elif [[ "$found" == server-update.timer ]]; then
+    local dup=""
+    for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer; do
+      if unit_exists "$t" && systemctl is-enabled --quiet "$t" 2>/dev/null; then dup="$t"; fi
+    done
+    if [[ -n "$dup" ]]; then warn "server-update.timer and ${dup} are both enabled: two updaters race on the dnf lock (rerun server/install-tools.sh)"
+    else ok "automatic updates: server-update.timer ($(systemctl show "$found" -p NextElapseUSecRealtime --value 2>/dev/null || true))"; fi
+  elif [[ "$found" == apt-daily-upgrade.timer ]]; then
+    if grep -qsE '^[^/]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/20auto-upgrades; then
+      ok "unattended-upgrades enabled (${found})"
+    else
+      warn "${found} enabled but APT::Periodic::Unattended-Upgrade is not 1 (/etc/apt/apt.conf.d/20auto-upgrades)"
+    fi
+  elif [[ "$found" == dnf*automatic* ]]; then
+    [[ "$found" == *install* ]] && applies=1
+    for conf in /etc/dnf/automatic.conf /etc/dnf/dnf5-plugins/automatic.conf; do
+      [[ -f "$conf" ]] || continue
+      if grep -qE '^[[:space:]]*apply_updates[[:space:]]*=[[:space:]]*(yes|true|1)' "$conf"; then applies=1; fi
+    done
+    if (( applies )); then
+      ok "automatic updates: ${found} (installs updates)"
+    else
+      warn "${found} enabled but apply_updates is not yes (updates are only downloaded or reported)"
+    fi
+  else
+    ok "automatic updates: ${found}"
+  fi
+
+  local reboot=0 latest running
+  running=$(uname -r)
+  if [[ -f /var/run/reboot-required ]]; then
+    reboot=1
+    pending=$(tr '\n' ' ' < /var/run/reboot-required.pkgs 2>/dev/null || true)
+    warn "reboot required after package updates${pending:+ (${pending% })}"
+  fi
+  if (( QUICK == 0 && LIMITED == 0 && reboot == 0 )); then
+    local out rc=0 cmd=""
+    if have needs-restarting; then cmd="needs-restarting"
+    elif have dnf; then cmd="dnf needs-restarting"; fi
+    if [[ -n "$cmd" ]]; then
+      # shellcheck disable=SC2086
+      out=$(timeout 60 $cmd -r 2>&1 </dev/null) || rc=$?
+      if (( rc == 0 )); then
+        ok "no reboot required (${cmd} -r)"
+      elif (( rc == 1 )) && grep -qi 'reboot is required' <<<"$out"; then
+        reboot=1
+        warn "reboot required (${cmd} -r): core libraries or the kernel were updated since boot"
+      else
+        skip "${cmd} -r not usable (exit ${rc}), reboot state unknown"
+      fi
+    fi
+  fi
+  if have rpm; then
+    latest=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | grep -v 'not installed' | sort -V | tail -1 || true)
+    if [[ -z "$latest" ]]; then
+      info "kernel ${running} (kernel-core not found in rpm)"
+    elif [[ "$latest" != "$running" ]]; then
+      if (( reboot == 0 )); then warn "newer kernel installed (${latest}), running ${running}; reboot to apply"
+      else info "kernel running ${running}, newest installed ${latest}"; fi
+    else
+      info "kernel ${running} is the newest installed"
+    fi
+  elif have dpkg-query && ls /boot/vmlinuz-* >/dev/null 2>&1; then
+    latest=$(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f\n' | sed 's/^vmlinuz-//' | sort -V | tail -1)
+    if [[ "$latest" != "$running" ]]; then info "kernel running ${running}, newest installed ${latest}"
+    else info "kernel ${running} is the newest installed"; fi
+  fi
+  if (( LIMITED == 1 && reboot == 0 )); then
+    info "needs-restarting skipped (needs root)"
+  elif (( QUICK == 1 && reboot == 0 )); then
+    info "needs-restarting skipped (quick mode)"
+  fi
+  return 0
+}
+
+check_serverinit() {
+  local conf=/etc/server-init.conf failed=/var/log/server-init-failed.log
+  [[ -r "$conf" || -r "$failed" ]] || return 0
+  [[ -f "$conf" || -s "$failed" ]] || return 0
+  section "Server setup"
+  if [[ -f "$conf" && -r "$conf" ]]; then
+    local vals admin
+    vals=$(grep -E '^(ADMIN_USER|EXTRA_PORTS|INSTALL_DOCKER)=' "$conf" | tr '\n' ' ' || true)
+    info "${conf}: ${vals:-no known settings}"
+    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1 || true)
+    if [[ -n "$admin" ]]; then
+      if id "$admin" >/dev/null 2>&1; then ok "admin user ${admin} exists"
+      else warn "admin user ${admin} from ${conf} does not exist"; fi
+    fi
+    if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
+      info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
+    fi
+  fi
+  local ct=server-cleanup.timer res last
+  if unit_exists "$ct"; then
+    if systemctl is-active --quiet "$ct" 2>/dev/null; then
+      last=$(systemctl show server-cleanup.service -p ExecMainExitTimestamp --value 2>/dev/null || true)
+      res=$(systemctl show server-cleanup.service -p Result --value 2>/dev/null || true)
+      if [[ -n "$res" && "$res" != success ]]; then warn "${ct} active, last run ${last:-unknown}: ${res} (journalctl -u server-cleanup.service)"
+      else ok "${ct} active, last run ${last:-not yet}"; fi
+    else
+      warn "${ct} installed but not active"
+    fi
+  fi
+  if [[ -s "$failed" && ! -r "$failed" ]]; then
+    skip "${failed}: not readable without root"
+  elif [[ -s "$failed" ]]; then
+    local n last
+    n=$(grep -c . "$failed" || true)
+    last=$(tail -1 "$failed" | cut -c1-110 || true)
+    warn "${n} failed setup step(s) in ${failed}; last: ${last}"
+  elif [[ -f "$failed" ]]; then
+    ok "no failed setup steps (${failed} is empty)"
+  fi
+  return 0
+}
+
+# Optional section: only for security tools that are installed (common/security-tools.sh). Reads existing reports and
+# files only, runs no scan, so it is cheap and -q does not change it. Prints nothing when none is installed.
+check_securitytools() {
+  local shown=0 f idx n age newest sig
+  hdr() { if (( shown == 0 )); then section "Security tools"; shown=1; fi; }
+
+  if have lynis && [[ -r /var/log/lynis-report.dat ]]; then
+    idx=$(sed -n 's/^hardening_index=//p' /var/log/lynis-report.dat 2>/dev/null | tail -1 || true)
+    if isnum "$idx"; then
+      hdr
+      f=$(stat -c %Y /var/log/lynis-report.dat 2>/dev/null || echo 0)
+      info "lynis hardening index ${idx} (last audit $(human_age $(( $(date +%s) - f ))) ago)"
+    fi
+  fi
+
+  if have rkhunter; then
+    f=$(ls -1t /var/log/security-audit/rkhunter-*.log 2>/dev/null | head -1 || true)
+    if [[ -n "$f" && -r "$f" ]]; then
+      hdr
+      n=$(grep -c '^Warning' "$f" 2>/dev/null || true)
+      age=$(human_age $(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) )))
+      if [[ "${n:-0}" -gt 0 ]]; then warn "rkhunter: ${n} warning(s) in the last run (${age} ago), see ${f}"
+      else ok "rkhunter: no warnings in the last run (${age} ago)"; fi
+    fi
+  fi
+
+  if have aide; then
+    f=/var/lib/security-tools/aide/aide.db.gz
+    if [[ -e "$f" ]]; then
+      hdr
+      info "aide database from $(date -d "@$(stat -c %Y "$f" 2>/dev/null || echo 0)" +%F)"
+    elif [[ -f /etc/security-tools/aide.conf ]]; then
+      hdr
+      warn "aide installed but its database is missing (aide --config /etc/security-tools/aide.conf --init)"
+    fi
+  fi
+
+  if have freshclam || have clamscan; then
+    newest=0
+    for f in /var/lib/clamav/*.cvd /var/lib/clamav/*.cld; do
+      [[ -e "$f" ]] || continue
+      sig=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+      if (( sig > newest )); then newest=$sig; fi
+    done
+    hdr
+    if (( newest == 0 )); then
+      warn "clamav: no signature database (run freshclam)"
+    else
+      age=$(( ( $(date +%s) - newest ) / 86400 ))
+      if (( age > CLAM_SIG_WARN_DAYS )); then warn "clamav signatures are ${age} days old (freshclam)"
+      else ok "clamav signatures ${age} day(s) old"; fi
+    fi
+  fi
+
+  if have auditctl && (( ! LIMITED )); then
+    hdr
+    if auditctl -s 2>/dev/null | grep -q '^enabled [12]'; then ok "auditd: audit enabled"
+    else warn "auditd installed but audit is not enabled"; fi
+  fi
+  return 0
+}
+
+check_services() {
+  section "Services"
+  local u
+  for u in sshd.service docker.service gitlab-runner.service; do
+    if [[ "$u" == "gitlab-runner.service" ]] && ! is_runner; then continue; fi
+    if ! unit_exists "$u"; then
+      if [[ "$u" == "sshd.service" ]] && unit_exists ssh.service; then
+        u=ssh.service
+      elif is_runner; then
+        skip "${u} not installed"
+        continue
+      else
+        continue
+      fi
+    fi
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+      ok "${u} active"
+    else
+      fail "${u} $(systemctl is-active "$u" 2>/dev/null || true)"
+    fi
+  done
+
+  local t next
+  for t in runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+    is_runner || break
+    unit_exists "$t" || continue
+    if systemctl is-active --quiet "$t" 2>/dev/null; then
+      next=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2>/dev/null || true)
+      if [[ -n "$next" && "$next" != "n/a" ]]; then
+        ok "${t} active, next run ${next}"
+      else
+        ok "${t} active"
+      fi
+    else
+      warn "${t} not active"
+    fi
+  done
+
+  local s started result
+  for s in runner-weekly-cleanup.service runner-disk-guard.service ci-image-prewarm.service; do
+    is_runner || break
+    unit_exists "$s" || continue
+    started=$(systemctl show "$s" -p ExecMainStartTimestamp --value 2>/dev/null || true)
+    result=$(systemctl show "$s" -p Result --value 2>/dev/null || true)
+    if [[ -z "$started" || "$started" == "n/a" ]]; then
+      info "${s%.service}: not run since boot"
+    elif [[ "$result" == "success" ]]; then
+      ok "${s%.service}: last run ${started}"
+    else
+      warn "${s%.service}: last run ${started}, result ${result} (journalctl -u ${s})"
+    fi
+  done
+
+  if is_runner && unit_exists ci-image-prewarm.service; then
+    local summary noarm failed_n
+    summary=$(journalctl -t ci-image-prewarm --since -2d --no-pager -o cat 2>/dev/null | grep 'summary:' | tail -1 || true)
+    if [[ -n "$summary" ]]; then
+      noarm=$(sed -nE 's/.*no_arm=([0-9]+).*/\1/p' <<<"$summary")
+      failed_n=$(sed -nE 's/.*failed=([0-9]+).*/\1/p' <<<"$summary")
+      if (( ${failed_n:-0} > 0 )); then
+        warn "image prewarm: ${failed_n} failed pulls (journalctl -t ci-image-prewarm | grep FAIL)"
+      elif (( ${noarm:-0} > 0 )); then
+        warn "image prewarm: ${noarm} tags without arm64 (journalctl -t ci-image-prewarm | grep 'NO ARM')"
+      else
+        ok "image prewarm: ${summary#*summary: }"
+      fi
+    fi
+  fi
+  return 0
+}
+
+check_runner() {
+  if ! is_runner; then
+    skip "runner: not a runner host (skipped)"
+    return 0
+  fi
+  if (( LIMITED )); then
+    skip "runner: needs root (skipped)"
+    return 0
+  fi
+  section "GitLab Runner"
+  if ! have gitlab-runner; then
+    skip "gitlab-runner not installed"
+    return 0
+  fi
+  info "$(gitlab-runner --version 2>/dev/null | awk '/^Version:/ { print "version " $2 }')"
+
+  if [[ ! -f "$CFG" ]]; then
+    fail "${CFG} missing"
+    return 0
+  fi
+
+  local n_runners conc rc perms
+  n_runners=$(grep -c '^\[\[runners\]\]' "$CFG" || true)
+  conc=$(awk -F' = ' '/^concurrent/ { print $2 }' "$CFG")
+  info "${n_runners:-0} runner(s) in config, concurrent = ${conc:-?}"
+  if (( ${n_runners:-0} == 0 )); then
+    fail "no runners registered"
+  fi
+  rc=$(grep -c 'request_concurrency' "$CFG" || true)
+  if (( ${n_runners:-0} > 0 && ${rc:-0} < n_runners )); then
+    warn "request_concurrency missing for some runners (slow job pickup)"
+  elif (( ${n_runners:-0} > 0 )); then
+    ok "request_concurrency set"
+  fi
+  perms=$(stat -c '%a' "$CFG")
+  if [[ "$perms" == "600" ]]; then
+    ok "config.toml permissions 600"
+  else
+    warn "config.toml permissions ${perms}, expected 600 (contains tokens)"
+  fi
+
+  if (( QUICK == 0 )); then
+    local v valid invalid
+    v=$(timeout 30 gitlab-runner verify 2>&1 || true)
+    valid=$(grep -c 'is valid' <<<"$v" || true)
+    invalid=$(grep -cE 'is not valid|is removed' <<<"$v" || true)
+    if (( ${invalid:-0} > 0 )); then
+      fail "${invalid} runner(s) rejected by GitLab (token removed or invalid)"
+    elif (( ${valid:-0} > 0 )); then
+      ok "${valid} runner(s) verified with GitLab"
+    else
+      warn "could not verify runners with GitLab"
+    fi
+  fi
+
+  local jobs
+  jobs=$(docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true 2>/dev/null | wc -l || true)
+  info "running job containers: ${jobs:-0}"
+
+  if grep -q '^listen_address' "$CFG"; then
+    if [[ "$(http_code http://127.0.0.1:9252/metrics 3)" == "200" ]]; then
+      ok "metrics endpoint 127.0.0.1:9252"
+    else
+      fail "metrics endpoint 127.0.0.1:9252 not responding"
+    fi
+  fi
+
+  local errs
+  errs=$(journalctl -u gitlab-runner --since -1h --no-pager -o cat 2>/dev/null | grep -cE 'ERROR|level=error' || true)
+  if (( ${errs:-0} > 0 )); then
+    warn "${errs} error lines in runner log in the last hour (journalctl -u gitlab-runner --since -1h | grep ERROR)"
+  else
+    ok "no runner errors in the last hour"
+  fi
+  return 0
+}
+
+check_docker() {
+  if ! is_runner && ! have docker; then
+    skip "docker: not installed"
+    return 0
+  fi
+  section "Docker"
+  if ! have docker; then
+    skip "docker not installed"
+    return 0
+  fi
+  if (( LIMITED )) && ! docker info >/dev/null 2>&1; then
+    skip "docker: no access (not root, not in the docker group)"
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    fail "docker daemon not responding"
+    return 0
+  fi
+  info "version $(docker version -f '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+
+  local mirrors
+  mirrors=$(docker info -f '{{range .RegistryConfig.Mirrors}}{{.}} {{end}}' 2>/dev/null || true)
+  if [[ -n "${mirrors// /}" ]]; then
+    info "registry mirrors: ${mirrors}"
+  fi
+
+  local line
+  while IFS= read -r line; do
+    info "$line"
+  done < <(docker system df --format '{{.Type}}: {{.Size}} ({{.Reclaimable}} reclaimable)' 2>/dev/null || true)
+  return 0
+}
+
+check_containers() {
+  if ! is_runner && ! have docker; then
+    return 0
+  fi
+  section "Containers"
+  if ! have docker || ! docker info >/dev/null 2>&1; then
+    skip "docker not available (or no access)"
+    return 0
+  fi
+
+  local -a ids
+  mapfile -t ids < <(docker ps -q 2>/dev/null || true)
+  if (( ${#ids[@]} == 0 )); then
+    skip "no running containers"
+    return 0
+  fi
+
+  local cores cpu_limit now
+  cores=$(nproc)
+  cpu_limit=$(( cores * 90 ))
+  now=$(date +%s)
+
+  local -A s_cpu s_mem s_memp s_pids
+  local name cpu mem memp pids
+  while IFS=$'\t' read -r name cpu mem memp pids; do
+    [[ -z "$name" ]] && continue
+    s_cpu[$name]="${cpu%\%}"
+    s_mem[$name]="$mem"
+    s_memp[$name]="${memp%\%}"
+    s_pids[$name]="$pids"
+  done < <(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}' "${ids[@]}" 2>/dev/null || true)
+
+  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}'
+  local state health restarts oom started memlimit job started_s age short details level reasons
+  local n_total=0 n_jobs=0
+
+  while IFS='|' read -r name state health restarts oom started memlimit job; do
+    [[ -z "$name" ]] && continue
+    name="${name#/}"
+    n_total=$((n_total + 1))
+    short="$name"
+    if (( ${#short} > 30 )); then short="${short:0:27}..."; fi
+
+    started_s=$(date -d "$started" +%s 2>/dev/null || echo "$now")
+    age=$(human_age $(( now - started_s )))
+    cpu="${s_cpu[$name]:-?}"
+    mem="${s_mem[$name]:-?}"
+    memp="${s_memp[$name]:-?}"
+    pids="${s_pids[$name]:-?}"
+
+    details="up ${age} | cpu ${cpu}% | mem ${mem}"
+    if [[ "${memlimit:-0}" == "0" ]]; then details+=" (no limit)"; else details+=" (${memp}%)"; fi
+    details+=" | pids ${pids} | health ${health} | restarts ${restarts}"
+    if [[ "$job" == "true" ]]; then
+      details="CI job | ${details}"
+      n_jobs=$((n_jobs + 1))
+    fi
+
+    level=ok
+    reasons=""
+    if [[ "$state" != "running" ]]; then level=fail; reasons+=" state ${state};"; fi
+    if [[ "$oom" == "true" ]]; then level=fail; reasons+=" OOM-killed;"; fi
+    case "$health" in
+      unhealthy) level=fail; reasons+=" healthcheck failing;" ;;
+      starting) if [[ "$level" == ok ]]; then level=warn; fi; reasons+=" healthcheck starting;" ;;
+    esac
+    if (( restarts > 3 )); then
+      if [[ "$level" == ok ]]; then level=warn; fi
+      reasons+=" ${restarts} restarts;"
+    fi
+    if [[ "${memlimit:-0}" != "0" ]] && isnum "$memp"; then
+      if gt "$memp" 95; then level=fail; reasons+=" memory at limit;"
+      elif gt "$memp" 85; then
+        if [[ "$level" == ok ]]; then level=warn; fi
+        reasons+=" memory near limit;"
+      fi
+    fi
+    if [[ "$job" != "true" ]] && isnum "$cpu" && gt "$cpu" "$cpu_limit"; then
+      if [[ "$level" == ok ]]; then level=warn; fi
+      reasons+=" high CPU;"
+    fi
+
+    case "$level" in
+      ok)   ok   "$(printf '%-30s' "$short") ${details}" ;;
+      warn) warn "$(printf '%-30s' "$short") ${details} |${reasons%;}" ;;
+      fail) fail "$(printf '%-30s' "$short") ${details} |${reasons%;}" ;;
+    esac
+  done < <(docker inspect -f "$tpl" "${ids[@]}" 2>/dev/null || true)
+
+  if is_runner; then
+    info "${n_total} running containers, ${n_jobs} of them CI jobs"
+  else
+    info "${n_total} running containers"
+  fi
+  return 0
+}
+
+check_caches() {
+  if ! is_runner; then
+    local d any=0
+    for d in /opt/registry-cache /opt/npm-cache /opt/monitoring /opt/logging; do
+      [[ -d "$d" ]] && any=1
+    done
+    if (( any == 0 )); then
+      skip "caches, monitoring, logging: not installed"
+      return 0
+    fi
+  fi
+  section "Caches and monitoring"
+  local c
+  if [[ -d /opt/registry-cache ]]; then
+    c=$(http_code http://127.0.0.1:5000/v2/ 3)
+    if [[ "$c" == "200" ]]; then ok "Docker Hub cache 127.0.0.1:5000"
+    else fail "Docker Hub cache not responding (HTTP ${c:-000}), pulls fall back to Docker Hub"; fi
+  else
+    is_runner && skip "Docker Hub cache not installed"
+  fi
+
+  if [[ -d /opt/npm-cache ]]; then
+    local bip
+    bip=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 || true)
+    c=$(http_code "http://${bip:-172.17.0.1}:4873/-/ping" 3)
+    if [[ "$c" == "200" ]]; then ok "npm cache (Verdaccio) ${bip:-172.17.0.1}:4873"
+    else fail "npm cache not responding (HTTP ${c:-000}), npm ci in jobs will fail"; fi
+  else
+    is_runner && skip "npm cache (Verdaccio) not installed"
+  fi
+
+  if [[ -d /srv/ci-cache ]]; then
+    info "shared cache /srv/ci-cache: $(du -sh /srv/ci-cache 2>/dev/null | cut -f1)"
+  fi
+
+  if [[ -d /opt/monitoring ]]; then
+    if [[ "$(http_code "${PROM_URL}/-/ready" 3)" == "200" ]]; then ok "Prometheus ready"
+    else fail "Prometheus not ready"; fi
+    if [[ "$(http_code http://127.0.0.1:3000/api/health 3)" == "200" ]]; then ok "Grafana healthy"
+    else fail "Grafana not healthy"; fi
+    if have jq; then
+      local down firing
+      down=$(curl -fsS -m 5 "${PROM_URL}/api/v1/targets" 2>/dev/null \
+        | jq -r '.data.activeTargets[] | select(.health != "up") | .labels.job' 2>/dev/null | tr '\n' ' ' || true)
+      if [[ -n "${down// /}" ]]; then fail "Prometheus targets down: ${down}"
+      else ok "all Prometheus targets up"; fi
+      firing=$(curl -fsS -m 5 "${PROM_URL}/api/v1/alerts" 2>/dev/null \
+        | jq -r '.data.alerts[] | select(.state == "firing") | .labels.alertname' 2>/dev/null | sort -u | tr '\n' ' ' || true)
+      if [[ -n "${firing// /}" ]]; then warn "alerts firing: ${firing}"
+      else ok "no alerts firing"; fi
+    fi
+  else
+    is_runner && skip "monitoring stack not installed"
+  fi
+
+  if [[ -d /opt/logging ]]; then
+    if [[ "$(http_code http://127.0.0.1:3100/ready 3)" == "200" ]]; then ok "Loki ready"
+    else fail "Loki not ready, logs are not stored"; fi
+    if [[ "$(http_code http://127.0.0.1:12345/-/ready 3)" == "200" ]]; then ok "Alloy ready"
+    else fail "Alloy not ready, logs are not collected"; fi
+  else
+    is_runner && skip "logging (Loki + Alloy) not installed"
+  fi
+  return 0
+}
+
+check_url() {
+  local name="$1" url="$2" expect="$3" out code t
+  out=$(curl -s -o /dev/null -m 10 -w '%{http_code} %{time_total}' "$url" 2>/dev/null || true)
+  code="${out%% *}"
+  t="${out##* }"
+  if [[ " ${expect} " == *" ${code} "* ]]; then
+    if gt "${t:-0}" 3; then warn "${name} slow (${t}s)"
+    else ok "${name} reachable (HTTP ${code}, ${t}s)"; fi
+  else
+    fail "${name} unreachable (HTTP ${code:-000})"
+  fi
+}
+
+check_network() {
+  (( QUICK == 1 )) && return 0
+  section "Network"
+  local h unresolved="" hosts
+  if is_runner; then
+    hosts="gitlab.com registry.gitlab.com registry-1.docker.io registry.npmjs.org"
+  else
+    hosts="cloudflare.com"
+    have docker && hosts+=" registry-1.docker.io"
+  fi
+  for h in $hosts; do
+    getent ahostsv4 "$h" >/dev/null 2>&1 || unresolved="${unresolved}${h} "
+  done
+  if [[ -n "$unresolved" ]]; then fail "DNS cannot resolve: ${unresolved}"
+  elif is_runner; then ok "DNS resolves GitLab, Docker Hub and npm"
+  else ok "DNS resolves ${hosts}"; fi
+
+  if is_runner; then
+    check_url "gitlab.com API" "https://gitlab.com/api/v4/version" "200 401"
+    check_url "GitLab registry" "https://registry.gitlab.com/v2/" "200 401"
+    check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"
+    check_url "npm registry" "https://registry.npmjs.org/" "200"
+  else
+    check_url "internet (HTTPS)" "https://cloudflare.com/" "200 301 302 403"
+    if have docker; then check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"; fi
+  fi
+
+  if grep -qE '^precedence ::ffff:0:0/96' /etc/gai.conf 2>/dev/null; then
+    info "IPv4 preferred over IPv6 (gai.conf)"
+  fi
+  return 0
+}
+
+check_trends() {
+  is_runner || return 0
+  section "Trends (Prometheus, last 24h)"
+  if ! have jq; then
+    skip "jq not installed, trend checks skipped"
+    return 0
+  fi
+  if [[ "$(http_code "${PROM_URL}/-/ready" 3)" != "200" ]]; then
+    skip "Prometheus not available, trend checks skipped"
+    return 0
+  fi
+
+  local lowest hist_h
+  lowest=$(prom_q 'min(prometheus_tsdb_lowest_timestamp_seconds)')
+  if isnum "$lowest"; then
+    hist_h=$(awk -v n="$(date +%s)" -v l="$lowest" 'BEGIN { printf "%.0f", (n - l) / 3600 }')
+    if (( hist_h < 24 )); then
+      info "metrics history: ${hist_h}h (less than 24h, trends are approximate)"
+    else
+      info "metrics history: $(( hist_h / 24 ))d $(( hist_h % 24 ))h"
+    fi
+  fi
+
+  # A forecast from minutes of data mostly measures the install itself (image pulls, package updates),
+  # so it needs FORECAST_MIN_HISTORY_H hours of metrics before it can warn or fail.
+  local avail deriv days
+  avail=$(prom_q 'node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"}')
+  deriv=$(prom_q 'deriv(node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"}[12h])')
+  if ! isnum "${hist_h:-}" || (( hist_h < FORECAST_MIN_HISTORY_H )); then
+    skip "disk forecast: needs ${FORECAST_MIN_HISTORY_H}h of metrics (have ${hist_h:-0}h)"
+  elif isnum "$avail" && isnum "$deriv"; then
+    if awk -v d="$deriv" 'BEGIN { exit !(d < 0) }'; then
+      days=$(awk -v a="$avail" -v d="$deriv" 'BEGIN { printf "%.1f", a / (-d) / 86400 }')
+      if gt 3 "$days"; then
+        fail "disk will be full in ~${days} days at the current rate"
+      elif gt 14 "$days"; then
+        warn "disk will be full in ~${days} days at the current rate"
+      else
+        ok "disk forecast: full in ~${days} days at the current rate"
+      fi
+    else
+      ok "disk usage not growing over the last 12h"
+    fi
+  else
+    skip "disk forecast: not enough data yet"
+  fi
+
+  local mem_peak p
+  mem_peak=$(prom_q 'max_over_time(((1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)[24h:1m])')
+  if isnum "$mem_peak"; then
+    p=$(num "$mem_peak" 0)
+    if gt "$p" 95; then fail "memory peaked at ${p}% (OOM risk during builds)"
+    elif gt "$p" 85; then warn "memory peaked at ${p}% (close to the limit during builds)"
+    else ok "memory peak ${p}%"; fi
+  else
+    skip "memory peak: no data"
+  fi
+
+  local cpu_avg cpu_peak steal
+  cpu_avg=$(prom_q 'avg_over_time((100 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)[24h:5m])')
+  cpu_peak=$(prom_q 'max_over_time((100 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)[24h:5m])')
+  if isnum "$cpu_avg" && isnum "$cpu_peak"; then
+    info "CPU average $(num "$cpu_avg" 0)%, peak $(num "$cpu_peak" 0)%"
+  fi
+  steal=$(prom_q 'avg(rate(node_cpu_seconds_total{mode="steal"}[24h])) * 100')
+  if isnum "$steal"; then
+    if gt "$steal" 10; then
+      warn "CPU steal $(num "$steal" 1)% (other VMs on the host slow your builds)"
+    else
+      ok "CPU steal $(num "$steal" 1)%"
+    fi
+  fi
+
+  local up_pct
+  up_pct=$(prom_q 'avg_over_time(up{job="gitlab-runner"}[24h]) * 100')
+  if isnum "$up_pct"; then
+    if gt 99 "$up_pct"; then warn "runner metrics available $(num "$up_pct" 1)% of the last 24h"
+    else ok "runner available $(num "$up_pct" 1)% of the last 24h"; fi
+  fi
+
+  local total
+  total=$(prom_q 'sum(increase(gitlab_runner_jobs_total[24h]))')
+  if isnum "$total"; then
+    info "jobs in the last 24h: $(num "$total" 0)"
+  else
+    info "jobs in the last 24h: none recorded"
+  fi
+
+  local reason n infra=0 line
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    reason="${line%%=*}"
+    n=$(num "${line##*=}" 0)
+    (( n == 0 )) && continue
+    if [[ "$reason" == "script_failure" ]]; then
+      info "${n} jobs failed in their scripts (build or tests, not the server)"
+    else
+      warn "${n} jobs failed with ${reason:-unknown reason} (server or runner side)"
+      infra=1
+    fi
+  done < <(prom_qv 'sum by (failure_reason) (increase(gitlab_runner_failed_jobs_total[24h])) > 0')
+  if (( infra == 0 )); then
+    ok "no server-side job failures in the last 24h"
+  fi
+
+  local p95 base
+  p95=$(prom_q 'histogram_quantile(0.95, sum by (le) (rate(gitlab_runner_job_duration_seconds_bucket[24h])))')
+  base=$(prom_q 'histogram_quantile(0.95, sum by (le) (rate(gitlab_runner_job_duration_seconds_bucket[7d] offset 1d)))')
+  if isnum "$p95"; then
+    if isnum "$base" && gt "$base" 0 && gt "$p95" "$(awk -v b="$base" 'BEGIN { print b * 1.5 }')"; then
+      warn "job duration p95 $(num "$p95" 0)s, usual $(num "$base" 0)s (1.5x slower)"
+    elif isnum "$base"; then
+      ok "job duration p95 $(num "$p95" 0)s (usual $(num "$base" 0)s)"
+    else
+      ok "job duration p95 $(num "$p95" 0)s"
+    fi
+  else
+    skip "job duration: no jobs with timing data yet"
+  fi
+
+  local q95
+  q95=$(prom_q 'histogram_quantile(0.95, sum by (le) (rate(gitlab_runner_job_queue_duration_seconds_bucket[24h])))')
+  if isnum "$q95"; then
+    if gt "$q95" 60; then
+      warn "jobs waited up to $(num "$q95" 0)s (p95) before pickup"
+    else
+      ok "job pickup wait p95 $(num "$q95" 0)s"
+    fi
+  else
+    skip "job pickup wait: metric not available in this runner version or no jobs yet"
+  fi
+
+  local fired
+  fired=$(prom_qv 'count by (alertname) (max_over_time(ALERTS{alertstate="firing"}[24h]))' | cut -d= -f1 | sort -u | tr '\n' ' ' || true)
+  if [[ -n "${fired// /}" ]]; then
+    warn "alerts fired in the last 24h: ${fired}"
+  else
+    ok "no alerts fired in the last 24h"
+  fi
+  return 0
+}
+
+# ---- brief mode: a short summary for the login screen and `srv status` -------------------------------------------
+BRIEF_DIR="${HEALTH_BRIEF_DIR:-/var/lib/server-health}"
+UPDATE_STATE="${SERVER_UPDATE_STATE:-/var/lib/server-update}/state"
+CLEANUP_STATE="${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}"
+
+# kv FILE KEY: value of key=value in a one-line state file (empty when missing)
+kv() { sed -nE "s/(^|.* )$2=([^ ]*).*/\2/p" "$1" 2>/dev/null | head -n1 || true; }
+# lvl VALUE WARN FAIL: marker for a value where higher is worse
+lvl() {
+  if (( $1 >= $3 )); then printf ' %sFAIL%s' "$C_FAIL" "$C_N"; elif (( $1 >= $2 )); then printf ' %sWARN%s' "$C_WARN" "$C_N"; fi
+  return 0
+}
+ago() { # ago EPOCH: "3d4h ago" or "never"
+  if [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]]; then echo "$(human_age $(( $(date +%s) - $1 ))) ago"; else echo never; fi
+}
+
+brief_full() { # run the full report when the last one is older than 6 hours; keep its counts for the summary
+  local f="$BRIEF_DIR/full" t=0 out w fl rc=0
+  [[ -r "$f" ]] && t=$(kv "$f" time)
+  [[ "$t" =~ ^[0-9]+$ ]] || t=0
+  (( $(date +%s) - t >= 21600 )) || return 0
+  out=$(HEALTH_REEXEC=1 "$(readlink -f "$0")" --no-color 2>&1) || rc=$?
+  ( umask 077; printf '%s\n' "$out" > "$BRIEF_DIR/last-full.log" )
+  w=$(sed -nE 's/^ +[0-9]+ OK +([0-9]+) WARN +([0-9]+) FAIL.*/\1/p' <<<"$out" | tail -n1 || true)
+  fl=$(sed -nE 's/^ +[0-9]+ OK +([0-9]+) WARN +([0-9]+) FAIL.*/\2/p' <<<"$out" | tail -n1 || true)
+  printf 'time=%s warn=%s fail=%s\n' "$(date +%s)" "${w:-0}" "${fl:-0}" > "$f.tmp" && mv -f "$f.tmp" "$f"
+  if (( ${fl:-0} > 0 )) && [[ -x "${SERVER_SBIN:-/usr/local/sbin}/server-notify" ]]; then
+    "${SERVER_SBIN:-/usr/local/sbin}/server-notify" health "health: ${fl} FAIL, ${w:-0} WARN; $(grep -E '^ +FAIL' <<<"$out" | head -n2 | tr -s ' ' | tr '\n' ';' | cut -c1-300)" || true
+  fi
+  return 0
+}
+
+brief_render() {
+  local up_s d h load dp mp mem_total mem_avail fw="" f2b="" s u r w fl st
+  up_s=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0); d=$(( up_s / 86400 )); h=$(( up_s % 86400 / 3600 ))
+  load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "?")
+  printf '%shost%s  %s  up %sd%sh  load %s  (as of %s)\n' "$C_B" "$C_N" "$(uname -n)" "$d" "$h" "$load" "$(date +%H:%M)"
+  dp=$(df -P / | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }')
+  mem_total=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo); mem_avail=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  mp=$(( mem_total > 0 ? 100 * mem_avail / mem_total : 100 ))
+  printf '%sdisk%s  / %s%% used%s   mem %s%% free%s\n' "$C_B" "$C_N" "$dp" "$(lvl "$dp" "$DISK_WARN" "$DISK_FAIL")" "$mp" \
+    "$( if (( mp <= MEM_FAIL )); then lvl 1 2 1; elif (( mp <= MEM_WARN )); then lvl 1 1 2; fi )"
+  if (( LIMITED )); then
+    printf '%sfw%s    unknown (needs root)\n' "$C_B" "$C_N"
+  else
+    detect_firewall
+    case "$FW_KIND:$FW_STATE" in
+      firewalld:active) fw="firewalld active, open: $(firewall-cmd --list-services --list-ports 2>/dev/null | tr -s ' \n' ' ' | sed 's/ $//')" ;;
+      ufw:active) fw="ufw active" ;;
+      none:*) fw="none installed $(lvl 1 1 2)" ;;
+      *) fw="$FW_KIND $FW_STATE $(lvl 1 2 1)" ;;
+    esac
+    printf '%sfw%s    %s\n' "$C_B" "$C_N" "$fw"
+    if have fail2ban-client && st=$(fail2ban-client status sshd 2>/dev/null); then
+      f2b=$(sed -nE 's/^[^C]*Currently banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -n1 || true)
+      printf '%sf2b%s   %s banned now (sshd jail)\n' "$C_B" "$C_N" "${f2b:-0}"
+    elif have fail2ban-client || unit_exists fail2ban.service; then
+      printf '%sf2b%s   not running %s\n' "$C_B" "$C_N" "$(lvl 1 1 2)"
+    fi
+  fi
+  if [[ -r "$UPDATE_STATE" ]]; then
+    u=$(kv "$UPDATE_STATE" updates); r=$(kv "$UPDATE_STATE" reboot)
+    printf '%supd%s   %s update(s) pending, reboot needed: %s%s  (checked %s)\n' "$C_B" "$C_N" "${u:-?}" "$( [[ "$r" == 1 ]] && echo yes || echo no )" \
+      "$( [[ "$r" == 1 ]] && lvl 1 1 2 )" "$(ago "$(kv "$UPDATE_STATE" time)")"
+    s="update $(ago "$(kv "$UPDATE_STATE" updated)") ($(kv "$UPDATE_STATE" uresult || true))"
+  else
+    printf '%supd%s   unknown: run `srv update --check`\n' "$C_B" "$C_N"
+    s="update never"
+  fi
+  printf '%slast%s  %s, cleanup %s (%s)\n' "$C_B" "$C_N" "$s" "$(ago "$(cat "$CLEANUP_STATE/last-run" 2>/dev/null || true)")" "$(cat "$CLEANUP_STATE/last-result" 2>/dev/null || echo none)"
+  if [[ -r "$BRIEF_DIR/full" ]]; then
+    w=$(kv "$BRIEF_DIR/full" warn); fl=$(kv "$BRIEF_DIR/full" fail)
+    printf '%scheck%s full report %s: %s FAIL, %s WARN%s\n' "$C_B" "$C_N" "$(ago "$(kv "$BRIEF_DIR/full" time)")" "${fl:-0}" "${w:-0}" \
+      "$( if (( ${fl:-0} > 0 )); then printf ' %s-> run: srv health%s' "$C_FAIL" "$C_N"; elif (( ${w:-0} > 0 )); then printf ' %s-> run: srv health%s' "$C_WARN" "$C_N"; fi )"
+  else
+    printf '%scheck%s no full report yet (health, or wait for the timer)\n' "$C_B" "$C_N"
+  fi
+}
+
+brief_main() {
+  if (( WRITE )); then
+    (( LIMITED == 0 )) || { echo "health --brief --write needs root" >&2; exit 1; }
+    C_OK=""; C_WARN=""; C_FAIL=""; C_B=""; C_D=""; C_N=""
+    mkdir -p "$BRIEF_DIR" && chmod 0755 "$BRIEF_DIR"
+    brief_full
+    local tmp; tmp=$(mktemp "$BRIEF_DIR/.brief.XXXXXX")
+    brief_render > "$tmp"
+    chmod 0644 "$tmp"; mv -f "$tmp" "$BRIEF_DIR/brief.txt"
+  else
+    brief_render
+  fi
+  exit 0
+}
+
+if (( BRIEF == 1 )); then brief_main; fi
+
+detect_profile
+detect_firewall
+
+if (( ONLY_CONTAINERS == 1 )); then
+  printf '%scontainer health%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
+  check_containers
+  print_summary_and_exit
+fi
+
+printf '%shealth report%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
+if (( LIMITED )); then info "limited mode: not root and sudo needs a password; root-only checks skipped"; fi
+if (( RUNNER_UNREGISTERED == 1 )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
+if (( RUNNER_UNREGISTERED == 2 )); then info "runner config not readable without root: checked as a plain server (run as root or use --profile runner)"; fi
+check_system
+check_security
+check_firewall
+check_updates
+check_serverinit
+check_securitytools
+check_services
+check_runner
+check_docker
+check_containers
+check_caches
+check_network
+check_trends
+print_summary_and_exit
