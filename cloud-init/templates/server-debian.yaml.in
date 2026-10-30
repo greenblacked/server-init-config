@@ -3,7 +3,7 @@
 # Paste this into the Hetzner Console "Cloud config" field when you create the server.
 # Do NOT paste it into a terminal; it is user-data for cloud-init, not shell commands.
 # Sets up: SSH keys only, admin user ops with sudo, ufw (only SSH open), fail2ban, daily security
-# updates (no auto-reboot), Docker Engine + Compose, swap if none, sysctl, journald limit, time sync, admin tools.
+# updates (no auto-reboot), Docker Engine + Compose, swap if none, sysctl, journald limit, time sync, admin tools, shell history.
 # Root keeps key login on port 22, so this cannot lock you out.
 # To change settings (ports, admin user, Docker, swap, timezone, app), edit the /etc/server-init.conf block below first.
 # Rerun any time as root: /usr/local/sbin/server-init.sh
