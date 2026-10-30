@@ -462,15 +462,16 @@ write_caddy_auth() { # returns 0 when the file was (re)written
 
 # TLS snippet imported by the Caddyfile. acme = Let's Encrypt over HTTP-01 on port 80 (TLS-ALPN-01 needs 443,
 # which is not published, so it is off). internal = Caddy's own CA, for tests only (TS_TLS=internal).
+# Returns 0 when the file changed (a running Caddy reads it only at start).
 write_tls_snippet() { # tls_mode email
   if [[ "$1" == internal ]]; then
-    printf 'tls internal\n' | install_stdin "$CADDY_TLS" 0644 || true
+    printf 'tls internal\n' | install_stdin "$CADDY_TLS" 0644
   else
     {
       printf 'tls {\n\tissuer acme {\n'
       if [[ -n "$2" ]]; then printf '\t\temail %s\n' "$2"; fi
       printf '\t\tdisable_tlsalpn_challenge\n\t}\n}\n'
-    } | install_stdin "$CADDY_TLS" 0644 || true
+    } | install_stdin "$CADDY_TLS" 0644
   fi
 }
 
@@ -478,7 +479,7 @@ write_tls_snippet() { # tls_mode email
 
 f2b_setup() { # tcp-port
   if ! command -v fail2ban-client >/dev/null 2>&1; then
-    log "installing fail2ban (bans clients that keep failing the login)"
+    log "installing fail2ban (bans clients that keep failing the login). On Debian/Ubuntu the package also turns on its default sshd jail."
     pkg_install fail2ban >/dev/null 2>&1 || { warn "fail2ban could not be installed (on EL it is in EPEL). Without it there is no rate limit on login attempts; the 32-character password is what protects the server."; return 0; }
   fi
   install -d -m 0755 "${F2B_DIR}/filter.d" "${F2B_DIR}/jail.d" "$(dirname "$F2B_DROPIN")"
@@ -487,6 +488,7 @@ f2b_setup() { # tcp-port
   install_stdin "$F2B_FILTER" 0644 <<'EOF' && ch=1
 # Managed by torrserver install.sh
 [Definition]
+datepattern = "ts":{EPOCH}
 failregex = ^.*"remote_ip":"<ADDR>".*"status":401[,}]
 ignoreregex =
 EOF
@@ -697,7 +699,7 @@ resolve_mode() {
 }
 
 do_install() {
-  local mode domain email new_creds=0 changed_creds=0 recreate=0 c
+  local mode domain email new_creds=0 changed_creds=0 recreate=0 caddy_changed=0 c
   local ip_new="" ip_old="" ip_pin="" host="" pub_port="" vpn_port="" vpn_addr="" tls_mode=""
   ensure_tools
   check_docker
@@ -777,7 +779,8 @@ do_install() {
 
   install_file "${SRC}/docker-compose.yml" "${TS_DIR}/docker-compose.yml" 0644 || true
   install_file "${SRC}/docker-compose.vpn.yml" "${TS_DIR}/docker-compose.vpn.yml" 0644 || true
-  install_file "${SRC}/Caddyfile" "${TS_DIR}/Caddyfile" 0644 || true
+  # Single-file bind mounts: Caddy keeps the old inode and reads its config only at start, so a change needs a restart.
+  install_file "${SRC}/Caddyfile" "${TS_DIR}/Caddyfile" 0644 && caddy_changed=1
   install_file "${SRC}/cleanup.sh" "${TS_DIR}/cleanup.sh" 0750 || true
 
   # .env: managed keys are rewritten on every run, there are no secrets in it.
@@ -826,7 +829,7 @@ do_install() {
   # Mode specific files that must exist before the containers start.
   if [[ "$mode" == public ]]; then
     install -d -m 0750 -o root -g root "$LOGS"
-    write_tls_snippet "$tls_mode" "$email"
+    write_tls_snippet "$tls_mode" "$email" && caddy_changed=1
   elif [[ "$mode" == vpn ]]; then
     vpn_setup "$vpn_port" "$vpn_addr"
   fi
@@ -848,6 +851,10 @@ do_install() {
     fi
     [[ "$mode" != vpn ]] || wg_apply
     if (( recreate )); then "${COMPOSE[@]}" up -d --remove-orphans --force-recreate; else "${COMPOSE[@]}" up -d --remove-orphans; fi
+    # Caddyfile or TLS snippet changed under a Caddy that already ran: restart only Caddy so it loads them.
+    if [[ "$mode" == public ]] && (( caddy_changed && ! recreate )) && container_exists torrserver-caddy; then
+      "${COMPOSE[@]}" up -d --force-recreate --no-deps caddy
+    fi
     wait_echo || die "TorrServer did not answer on 127.0.0.1:${TS_HOST_PORT} within 60 s (docker logs torrserver)"
     apply_settings
   fi
@@ -910,11 +917,12 @@ summary() {
       echo "  VPN:      WireGuard ${TS_WG_IF}, UDP ${vport}. Add a phone or laptop: sudo ./install.sh --add-device NAME"
       echo "            Hetzner Cloud Firewall: allow UDP ${vport}." ;;
   esac
-  if [[ "$new" == 1 || ( "$ROTATE" == 1 && "$changed" == 1 ) ]]; then
+  if [[ "$new" == 1 || ( "$ROTATE" == 1 && "$changed" == 1 ) || ! -e "${TS_DIR}/.login-shown" ]]; then
     echo
     echo "  Login (shown once; stored only in ${CREDS}, root 0600):"
     echo "    user:     $(grep -E '^TS_USER=' "$CREDS" | cut -d= -f2-)"
     echo "    password: $(grep -E '^TS_PASS=' "$CREDS" | cut -d= -f2-)"
+    : > "${TS_DIR}/.login-shown"
   else
     echo "  Login:    unchanged, read it with: sudo cat ${CREDS}"
   fi
