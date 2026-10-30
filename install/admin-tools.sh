@@ -58,9 +58,15 @@ restorecon_if /etc/profile.d/ci-runner.sh
 # Shell history, Ctrl+R / Ctrl+T with fzf: one source file, also embedded in server/server-init-*.sh
 install -m 0644 "$REPO_ROOT/scripts/shell-history.sh" /etc/profile.d/90-shell-history.sh
 restorecon_if /etc/profile.d/90-shell-history.sh
+# Debian and Ubuntu ship HISTSIZE=1000/HISTFILESIZE=2000 in the skeleton ~/.bashrc; bash applies them before the
+# first prompt and truncates the history file, so the larger limits in profile.d never take effect. Comment out
+# exactly those default lines (other values are a deliberate choice and are kept).
+for rc in /etc/skel/.bashrc /root/.bashrc /home/*/.bashrc; do
+  [[ -f "$rc" ]] && sed -i -E 's/^(HISTSIZE=1000|HISTFILESIZE=2000)$/# &  (raised in \/etc\/profile.d\/90-shell-history.sh)/' "$rc"
+done
 # Debian and Ubuntu name the fd binary fdfind
 if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
-  ln -s "$(command -v fdfind)" /usr/local/bin/fd
+  ln -sfn "$(command -v fdfind)" /usr/local/bin/fd
 fi
 
 # root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none

@@ -146,7 +146,8 @@ write_files:
         put /etc/profile.d/90-server-shell.sh 0644 <<'EOF'
       # shellcheck shell=bash
       # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
-      # Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+      # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
+      # The same text is embedded in server/server-init-el10.sh
       # and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
       # tools/test-cloud-init.py checks that.
       [ -n "${BASH_VERSION-}" ] || return 0
@@ -172,6 +173,13 @@ write_files:
         fi
       }
       # Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+      # When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
+      # the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
+      # then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+      if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+        unset PROMPT_COMMAND
+        PROMPT_COMMAND=('' '__shell_history_prompt')
+      fi
       case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
         "declare -a"*)
           [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
@@ -211,10 +219,10 @@ write_files:
           fi
         done
         # fzf 0.48+ can print its own bindings when the package ships no file.
-        if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
-          eval "$(fzf --bash)"
+        if [[ -z "${__fzf_done-}" ]] && __fzf_b=$(fzf --bash 2>/dev/null); then
+          eval "$__fzf_b"
         fi
-        unset __f __fzf_done
+        unset __f __fzf_done __fzf_b
       fi
       EOF
         # Docker settings are only seeded; an existing daemon.json is never overwritten.

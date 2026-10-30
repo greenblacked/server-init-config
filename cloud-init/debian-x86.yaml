@@ -295,7 +295,8 @@ write_files:
     content: |
       # shellcheck shell=bash
       # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
-      # Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+      # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
+      # The same text is embedded in server/server-init-el10.sh
       # and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
       # tools/test-cloud-init.py checks that.
       [ -n "${BASH_VERSION-}" ] || return 0
@@ -321,6 +322,13 @@ write_files:
         fi
       }
       # Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+      # When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
+      # the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
+      # then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+      if [[ -z "${PROMPT_COMMAND-}" ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+        unset PROMPT_COMMAND
+        PROMPT_COMMAND=('' '__shell_history_prompt')
+      fi
       case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
         "declare -a"*)
           [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
@@ -360,10 +368,10 @@ write_files:
           fi
         done
         # fzf 0.48+ can print its own bindings when the package ships no file.
-        if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
-          eval "$(fzf --bash)"
+        if [[ -z "${__fzf_done-}" ]] && __fzf_b=$(fzf --bash 2>/dev/null); then
+          eval "$__fzf_b"
         fi
-        unset __f __fzf_done
+        unset __f __fzf_done __fzf_b
       fi
 
   - path: /etc/apt/preferences.d/pin-gitlab-runner.pref
@@ -377,7 +385,8 @@ write_files:
 runcmd:
   - [sh, -c, "if sshd -t; then systemctl reload ssh; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi"]
   - [systemctl, enable, --now, unattended-upgrades]
-  - [sh, -c, "for p in mc fd-find ripgrep fzf; do apt-get install -y -q $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done; if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then ln -s $(command -v fdfind) /usr/local/bin/fd; fi"]
+  - [sh, -c, "for p in mc fd-find ripgrep fzf; do apt-get install -y -q $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done; if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then ln -sfn $(command -v fdfind) /usr/local/bin/fd; fi"]
+  - [sh, -c, "for rc in /etc/skel/.bashrc /root/.bashrc /home/*/.bashrc; do [ -f $rc ] && sed -i -E 's/^(HISTSIZE=1000|HISTFILESIZE=2000)$/# &/' $rc; done; true"]
   - [systemctl, restart, systemd-journald]
   - [timedatectl, set-timezone, Europe/Kyiv]
   - install -m 0755 -d /etc/apt/keyrings
