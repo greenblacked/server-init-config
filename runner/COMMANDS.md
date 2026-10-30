@@ -84,12 +84,13 @@ chmod 644 /root/.tmux.conf
 
 install -d "$(dirname /etc/profile.d/ci-runner.sh)"
 cat > /etc/profile.d/ci-runner.sh <<'__SIC_EOF__'
-alias runner-logs='journalctl -u gitlab-runner -f'
-alias runner-errors='journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
+alias health='sudo /usr/local/bin/health'
+alias runner-logs='sudo journalctl -u gitlab-runner -f'
+alias runner-errors='sudo journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
 alias runner-jobs='sudo docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "{{.Names}}  {{.Status}}"'
 alias runner-metrics='curl -s 127.0.0.1:9252/metrics | grep "^gitlab_runner_"'
-alias dfd='df -h / ; docker system df'
-alias dstats='docker stats --no-stream'
+alias dfd='df -h / ; sudo docker system df'
+alias dstats='sudo docker stats --no-stream'
 __SIC_EOF__
 chmod 644 /etc/profile.d/ci-runner.sh
 
