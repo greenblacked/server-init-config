@@ -17,6 +17,7 @@ packages:
   - tmux
   - dnf-automatic
   - policycoreutils-python-utils
+  - gnupg2
   - bind-utils
   - lsof
   - sysstat
@@ -388,27 +389,299 @@ write_files:
         unset __f __fzf_done __fzf_b
       fi
 
+  - path: /usr/local/bin/runner-engine-update.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
+      # The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
+      # without this they would never be updated. Docker is restarted first, then gitlab-runner; both must be active
+      # afterwards. The result is one line in /var/log/runner-engine-update.log, which health reads.
+      # Env: DRY_RUN=1 shows the plan only.
+      set -Eeuo pipefail
+
+      LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
+      DRY_RUN="${DRY_RUN:-0}"
+      PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
+
+      note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+
+      if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
+        exit 0
+      fi
+      [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+      [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+      exec 9>/run/runner-engine-update.lock
+      flock -n 9 || { note "SKIP another update is running"; exit 0; }
+
+      # A docker error is not "no jobs": updating then could kill running jobs.
+      if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+        note "SKIP docker does not answer, cannot tell whether jobs run"
+        exit 0
+      fi
+      if [[ -n "$jobs" ]]; then
+        note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
+        exit 0
+      fi
+
+      installed=()
+      if command -v dnf >/dev/null 2>&1; then
+        for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
+        upgrade() { dnf -y -q upgrade "${installed[@]}"; }
+        pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
+      elif command -v apt-get >/dev/null 2>&1; then
+        for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
+        upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "${installed[@]}"; }
+        pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
+      else
+        note "FAIL no supported package manager"
+        exit 1
+      fi
+      (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
+
+      if ! pending; then
+        note "OK nothing to upgrade (${installed[*]})"
+        exit 0
+      fi
+      if [[ "$DRY_RUN" == 1 ]]; then
+        note "DRY-RUN would upgrade ${installed[*]}"
+        exit 0
+      fi
+
+      before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
+      if ! upgrade >>"$LOG" 2>&1; then
+        note "FAIL package upgrade failed, see ${LOG}"
+        exit 1
+      fi
+      systemctl restart docker
+      sleep 5
+      systemctl restart gitlab-runner
+      sleep 5
+      bad=""
+      for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
+      # The isolation rules live in iptables; reapply them after the Docker restart.
+      if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+      if [[ -n "$bad" ]]; then
+        note "FAIL not active after the upgrade:${bad}; was: ${before}"
+        exit 1
+      fi
+      note "OK upgraded ${installed[*]}; was: ${before}"
+
+  - path: /usr/local/bin/ci-job-isolation.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Keep CI job containers away from the cloud metadata service and from services on the host.
+      # Run at boot and after every Docker start by ci-job-isolation.service; safe to rerun any time.
+      #
+      #   DOCKER-USER   drops traffic to 169.254.169.254 (Hetzner metadata: server data, user-data, tokens).
+      #   INPUT         traffic from docker0 and the br-* bridges to the host itself goes through the chain CI-JOBS-IN:
+      #                 only replies, ping and the npm cache (docker0 IP, port 4873) are let in, the rest is dropped.
+      #
+      # Not affected: internet access of jobs, the Docker Hub cache (Docker pulls through the mirror on 127.0.0.1:5000,
+      # jobs do not), traffic between containers of one job, and the host-network stacks (monitoring, logging, caches).
+      # Only IPv4 is handled. Remove the rules: systemctl disable --now ci-job-isolation; then iptables -F CI-JOBS-IN
+      # and delete the two "ci-job-isolation" rules shown by iptables -S.
+      set -Eeuo pipefail
+
+      META_IP="${META_IP:-169.254.169.254}"
+      NPM_PORT="${NPM_PORT:-4873}"
+      TAG=ci-job-isolation
+
+      log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$*"; }
+
+      if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        echo "Usage: $0   blocks CI jobs from ${META_IP} and from host services (except the npm cache on the docker0 IP, port ${NPM_PORT})"
+        exit 0
+      fi
+      [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+      command -v iptables >/dev/null 2>&1 || { log "iptables not found, nothing applied"; exit 1; }
+
+      # Docker creates DOCKER-USER when it starts; wait for it after a boot.
+      for _ in $(seq 1 30); do
+        if iptables -n -L DOCKER-USER >/dev/null 2>&1; then break; fi
+        sleep 1
+      done
+      iptables -n -L DOCKER-USER >/dev/null 2>&1 || { log "chain DOCKER-USER does not exist (is Docker running?), nothing applied"; exit 1; }
+
+      # Insert a rule at the top of a chain unless it is there already.
+      ensure() {
+        local chain="$1"
+        shift
+        iptables -C "$chain" "$@" 2>/dev/null || iptables -I "$chain" 1 "$@"
+      }
+
+      ensure DOCKER-USER -d "$META_IP" -m comment --comment "$TAG" -j DROP
+
+      BRIDGE_IP="${BRIDGE_IP:-}"
+      if [[ -z "$BRIDGE_IP" ]] && command -v ip >/dev/null 2>&1; then
+        BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
+      fi
+
+      iptables -N CI-JOBS-IN 2>/dev/null || true
+      iptables -F CI-JOBS-IN
+      iptables -A CI-JOBS-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+      iptables -A CI-JOBS-IN -p icmp --icmp-type echo-request -j ACCEPT
+      if [[ -n "$BRIDGE_IP" ]]; then
+        iptables -A CI-JOBS-IN -i docker0 -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT
+      fi
+      iptables -A CI-JOBS-IN -j DROP
+      ensure INPUT -i docker0 -m comment --comment "$TAG" -j CI-JOBS-IN
+      ensure INPUT -i 'br-+' -m comment --comment "$TAG" -j CI-JOBS-IN
+
+      log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT})"
+
+  - path: /etc/systemd/system/runner-engine-update.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
+      After=docker.service network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/runner-engine-update.sh
+      Nice=10
+
+  - path: /etc/systemd/system/runner-engine-update.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Upgrade Docker CE and GitLab Runner every Sunday
+
+      [Timer]
+      OnCalendar=Sun *-*-* 04:30:00
+      Persistent=true
+      RandomizedDelaySec=30m
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/systemd/system/ci-job-isolation.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Block CI jobs from the cloud metadata service and host services
+      After=docker.service network-online.target
+      Requires=docker.service
+      PartOf=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/bin/ci-job-isolation.sh
+      ExecReload=/usr/local/bin/ci-job-isolation.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/sbin/pin-repo-key
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Download a package repository signing key and install it only if it has the expected fingerprint.
+      # Usage: pin-repo-key URL FINGERPRINT DEST
+      # The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
+      # keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
+      # On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+      set -Eeuo pipefail
+
+      if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
+        echo "Usage: $0 URL FINGERPRINT DEST" >&2
+        exit 2
+      fi
+      url="$1"
+      want=$(printf '%s' "$2" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
+      dest="$3"
+      [[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
+      command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
+
+      work=$(mktemp -d)
+      trap 'rm -rf "$work"' EXIT
+      chmod 0700 "$work"
+      curl -fsSL --max-time 60 "$url" -o "${work}/key"
+      export GNUPGHOME="${work}/gnupg"
+      install -d -m 0700 "$GNUPGHOME"
+      gpg --batch --quiet --import "${work}/key" 2>/dev/null
+      if ! gpg --batch --with-colons --list-keys 2>/dev/null \
+           | awk -F: '$1 == "pub" { g = 1; next } $1 == "fpr" && g { print $10; g = 0 }' | grep -qx "$want"; then
+        echo "pin-repo-key: ${url} has no key with fingerprint ${want}; not installed" >&2
+        exit 1
+      fi
+      gpg --batch --export --armor "$want" > "${work}/out" 2>/dev/null
+      [[ -s "${work}/out" ]] || { echo "pin-repo-key: export failed" >&2; exit 1; }
+      install -D -m 0644 "${work}/out" "$dest"
+      echo "pin-repo-key: ${dest} installed (${want})"
+
+  - path: /etc/sysctl.d/90-ci-hardening.conf
+    permissions: '0644'
+    content: |
+      # Kernel hardening for runner hosts. A leading "-" ignores a key the running kernel does not have.
+      -kernel.kptr_restrict = 2
+      -kernel.dmesg_restrict = 1
+      -kernel.yama.ptrace_scope = 1
+      -fs.protected_fifos = 2
+      -fs.protected_regular = 2
+      net.ipv4.conf.all.log_martians = 1
+
+  - path: /etc/security/limits.d/50-nocore.conf
+    permissions: '0644'
+    content: |
+      * hard core 0
+
+  - path: /etc/systemd/coredump.conf.d/50-off.conf
+    permissions: '0644'
+    content: |
+      [Coredump]
+      Storage=none
+      ProcessSizeMax=0
+
+  # Vendor repositories, written here instead of piping the vendors' install scripts into a root shell.
+  # The signing keys are fetched in runcmd and installed only if their fingerprints match (pin-repo-key).
+  - path: /etc/yum.repos.d/docker-ce.repo
+    permissions: '0644'
+    content: |
+      [docker-ce-stable]
+      name=Docker CE Stable
+      baseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/stable
+      enabled=1
+      gpgcheck=1
+      gpgkey=file:///etc/pki/rpm-gpg/docker-ce.asc
+
+  - path: /etc/yum.repos.d/gitlab-runner.repo
+    permissions: '0644'
+    content: |
+      [runner_gitlab-runner]
+      name=GitLab Runner
+      baseurl=https://packages.gitlab.com/runner/gitlab-runner/el/$releasever/$basearch
+      enabled=1
+      gpgcheck=1
+      repo_gpgcheck=0
+      gpgkey=file:///etc/pki/rpm-gpg/gitlab-runner.asc
+      metadata_expire=300
+
 runcmd:
-  - restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /usr/local/bin /etc/systemd/system
+  - restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /usr/local/bin /usr/local/sbin /etc/systemd/system /etc/yum.repos.d /etc/sysctl.d
   - [sh, -c, "if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi"]
   - [sh, -c, "dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done"]
   - sed -i -E 's/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/' /etc/dnf/automatic.conf
   - [systemctl, enable, --now, dnf-automatic.timer]
   - [systemctl, restart, systemd-journald]
   - [timedatectl, set-timezone, Europe/Kyiv]
-  - sh -c 'systemctl is-enabled firewalld >/dev/null 2>&1 && systemctl disable --now firewalld || true'
-  - curl -fsSL https://download.docker.com/linux/rhel/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo
+  - [sysctl, --system]
+  - [pin-repo-key, "https://download.docker.com/linux/rhel/gpg", "9DC858229FC7DD38854AE2D88D81803C0EBFCD88", /etc/pki/rpm-gpg/docker-ce.asc]
   - dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   - [systemctl, enable, --now, docker]
   - semanage fcontext -a -t container_file_t '/opt/registry-cache(/.*)?'
   - restorecon -R /opt/registry-cache
   - docker compose -f /opt/registry-cache/docker-compose.yml up -d
-  - curl -fsSL https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.rpm.sh -o /tmp/runner-repo.sh
-  - bash /tmp/runner-repo.sh
+  # UNVERIFIED offline: this fingerprint is from GitLab's Runner install docs; check it against https://docs.gitlab.com/runner/install/linux-repository/
+  - [pin-repo-key, "https://packages.gitlab.com/runner/gitlab-runner/gpgkey", "F6403F6544A38863DAA0B6E03F01618A51312F3F", /etc/pki/rpm-gpg/gitlab-runner.asc]
   - dnf -y -q install gitlab-runner
   - usermod -aG docker gitlab-runner
   - chmod 600 /etc/gitlab-runner/config.toml
   - [systemctl, daemon-reload]
-  - [systemctl, enable, --now, runner-weekly-cleanup.timer, runner-disk-guard.timer]
+  - [systemctl, enable, --now, runner-weekly-cleanup.timer, runner-disk-guard.timer, runner-engine-update.timer, ci-job-isolation.service]
   - sed -i -E 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
   - setenforce 1

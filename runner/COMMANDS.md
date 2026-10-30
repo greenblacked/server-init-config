@@ -11,9 +11,11 @@ whole block again, the installers are safe to rerun or tell you the component is
 - [Base host](#base) (only if the server was created without the init)
 - [Users: admin, service accounts, SSH hardening](#users)
 - [Admin tools: htop, btop, ncdu, iotop and others](#packages)
-- [Health + cleanup: health, weekly cleanup, disk guard](#tools)
+- [Health, cleanup, job isolation, engine updates](#tools)
+- [Host firewall and fail2ban](#firewall)
 - [Security tools: audit, network, scan](#security)
 - [Register the runner](#register)
+- [Per-job limits](#job-limits)
 - [Docker Hub pull-through cache](#registry-cache)
 - [Monitoring: Prometheus, node_exporter, Grafana](#monitoring)
 - [Logging: Loki + Grafana Alloy](#logging)
@@ -35,7 +37,7 @@ The same steps as `rocky-clean.yaml`, for a Rocky server created without it. Ski
 sudo bash <<'INSTALL'
 set -Eeuo pipefail
 dnf -y -q upgrade --refresh
-dnf -y -q install sudo curl ca-certificates git jq tmux dnf-automatic policycoreutils-python-utils bind-utils lsof sysstat tcpdump traceroute nmap-ncat
+dnf -y -q install sudo curl ca-certificates git jq tmux dnf-automatic policycoreutils-python-utils gnupg2 bind-utils lsof sysstat tcpdump traceroute nmap-ncat
 
 install -d "$(dirname /etc/ssh/sshd_config.d/00-ci-hardening.conf)"
 cat > /etc/ssh/sshd_config.d/00-ci-hardening.conf <<'__SIC_EOF__'
@@ -93,6 +95,95 @@ alias dfd='df -h / ; sudo docker system df'
 alias dstats='sudo docker stats --no-stream'
 __SIC_EOF__
 chmod 644 /etc/profile.d/ci-runner.sh
+
+install -d "$(dirname /etc/yum.repos.d/docker-ce.repo)"
+cat > /etc/yum.repos.d/docker-ce.repo <<'__SIC_EOF__'
+[docker-ce-stable]
+name=Docker CE Stable
+baseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/stable
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/docker-ce.asc
+__SIC_EOF__
+chmod 644 /etc/yum.repos.d/docker-ce.repo
+
+install -d "$(dirname /etc/yum.repos.d/gitlab-runner.repo)"
+cat > /etc/yum.repos.d/gitlab-runner.repo <<'__SIC_EOF__'
+[runner_gitlab-runner]
+name=GitLab Runner
+baseurl=https://packages.gitlab.com/runner/gitlab-runner/el/$releasever/$basearch
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/gitlab-runner.asc
+metadata_expire=300
+__SIC_EOF__
+chmod 644 /etc/yum.repos.d/gitlab-runner.repo
+
+install -d "$(dirname /usr/local/sbin/pin-repo-key)"
+cat > /usr/local/sbin/pin-repo-key <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Download a package repository signing key and install it only if it has the expected fingerprint.
+# Usage: pin-repo-key URL FINGERPRINT DEST
+# The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
+# keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
+# On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+set -Eeuo pipefail
+
+if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
+  echo "Usage: $0 URL FINGERPRINT DEST" >&2
+  exit 2
+fi
+url="$1"
+want=$(printf '%s' "$2" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
+dest="$3"
+[[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
+command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+chmod 0700 "$work"
+curl -fsSL --max-time 60 "$url" -o "${work}/key"
+export GNUPGHOME="${work}/gnupg"
+install -d -m 0700 "$GNUPGHOME"
+gpg --batch --quiet --import "${work}/key" 2>/dev/null
+if ! gpg --batch --with-colons --list-keys 2>/dev/null \
+     | awk -F: '$1 == "pub" { g = 1; next } $1 == "fpr" && g { print $10; g = 0 }' | grep -qx "$want"; then
+  echo "pin-repo-key: ${url} has no key with fingerprint ${want}; not installed" >&2
+  exit 1
+fi
+gpg --batch --export --armor "$want" > "${work}/out" 2>/dev/null
+[[ -s "${work}/out" ]] || { echo "pin-repo-key: export failed" >&2; exit 1; }
+install -D -m 0644 "${work}/out" "$dest"
+echo "pin-repo-key: ${dest} installed (${want})"
+__SIC_EOF__
+chmod 755 /usr/local/sbin/pin-repo-key
+
+install -d "$(dirname /etc/sysctl.d/90-ci-hardening.conf)"
+cat > /etc/sysctl.d/90-ci-hardening.conf <<'__SIC_EOF__'
+# Kernel hardening for runner hosts. A leading "-" ignores a key the running kernel does not have.
+-kernel.kptr_restrict = 2
+-kernel.dmesg_restrict = 1
+-kernel.yama.ptrace_scope = 1
+-fs.protected_fifos = 2
+-fs.protected_regular = 2
+net.ipv4.conf.all.log_martians = 1
+__SIC_EOF__
+chmod 644 /etc/sysctl.d/90-ci-hardening.conf
+
+install -d "$(dirname /etc/security/limits.d/50-nocore.conf)"
+cat > /etc/security/limits.d/50-nocore.conf <<'__SIC_EOF__'
+* hard core 0
+__SIC_EOF__
+chmod 644 /etc/security/limits.d/50-nocore.conf
+
+install -d "$(dirname /etc/systemd/coredump.conf.d/50-off.conf)"
+cat > /etc/systemd/coredump.conf.d/50-off.conf <<'__SIC_EOF__'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+__SIC_EOF__
+chmod 644 /etc/systemd/coredump.conf.d/50-off.conf
 
 install -d "$(dirname /etc/profile.d/90-shell-history.sh)"
 cat > /etc/profile.d/90-shell-history.sh <<'__SIC_EOF__'
@@ -178,17 +269,17 @@ fi
 __SIC_EOF__
 chmod 644 /etc/profile.d/90-shell-history.sh
 
-restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d
+restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d /usr/local/sbin /etc/yum.repos.d /etc/sysctl.d
+sysctl --system
 sh -c 'if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi'
 sh -c 'dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done'
 sh -c 'if [ -f /etc/dnf/automatic.conf ]; then sed -i -E '"'"'s/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/'"'"' /etc/dnf/automatic.conf && systemctl enable --now dnf-automatic.timer; else echo dnf-automatic-config-not-found >> /var/log/ci-bootstrap-failed.log; fi'
 systemctl restart systemd-journald
 timedatectl set-timezone Europe/Kyiv
-curl -fsSL https://download.docker.com/linux/rhel/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo
+pin-repo-key https://download.docker.com/linux/rhel/gpg 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 /etc/pki/rpm-gpg/docker-ce.asc
 dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
-curl -fsSL https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.rpm.sh -o /tmp/runner-repo.sh
-bash /tmp/runner-repo.sh
+pin-repo-key https://packages.gitlab.com/runner/gitlab-runner/gpgkey F6403F6544A38863DAA0B6E03F01618A51312F3F /etc/pki/rpm-gpg/gitlab-runner.asc
 dnf -y -q install gitlab-runner
 usermod -aG docker gitlab-runner
 chmod 600 /etc/gitlab-runner/config.toml
@@ -1087,9 +1178,9 @@ INSTALL
 ````
 
 <a id="tools"></a>
-## Health + cleanup: health, weekly cleanup, disk guard
+## Health, cleanup, job isolation, engine updates
 
-Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency cleanup every 30 minutes when the disk is 85% full. Ends with a dry run of the cleanup.
+Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency cleanup every 30 minutes when the disk is 85% full. Also the job isolation (CI jobs cannot reach the cloud metadata address or services on the host) and the Sunday 04:30 upgrade of Docker CE and GitLab Runner, which runs only while no job runs. Ends with a dry run of the cleanup.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -1285,7 +1376,8 @@ chmod 755 "$R/common/lib.sh"
 install -d "$R/runner/install"
 cat > "$R/runner/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers.
+# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers,
+# the job isolation rules (CI jobs cannot reach the metadata service or host services) and the weekly Docker/GitLab Runner update.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
@@ -1299,19 +1391,21 @@ require_root
 
 install -m 0755 "$REPO_ROOT/common/health" /usr/local/bin/health
 restorecon_if /usr/local/bin/health
-for f in runner-weekly-cleanup.sh runner-disk-guard.sh; do
+for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
 
 systemctl daemon-reload
-systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer
+systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
+# Needs Docker (the DOCKER-USER chain). On a host without it the unit is enabled and applies at the next Docker start.
+if systemctl is-active --quiet docker; then systemctl enable --now ci-job-isolation.service; else systemctl enable ci-job-isolation.service; fi
 
 DRY_RUN=1 /usr/local/bin/runner-weekly-cleanup.sh >/dev/null
 systemctl list-timers 'runner-*' --no-pager
@@ -2011,7 +2105,7 @@ check_services() {
   done
 
   local t next
-  for t in runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+  for t in runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer ci-image-prewarm.timer; do
     is_runner || break
     unit_exists "$t" || continue
     if systemctl is-active --quiet "$t" 2>/dev/null; then
@@ -2040,6 +2134,19 @@ check_services() {
       warn "${s%.service}: last run ${started}, result ${result} (journalctl -u ${s})"
     fi
   done
+
+  if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
+    local upd
+    upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
+    case "$upd" in
+      *" FAIL "*) warn "Docker/GitLab Runner update: ${upd}" ;;
+      "") ;;
+      *) info "Docker/GitLab Runner update: ${upd}" ;;
+    esac
+  fi
+  if is_runner && unit_exists ci-job-isolation.service; then
+    if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
+  fi
 
   if is_runner && unit_exists ci-image-prewarm.service; then
     local summary noarm failed_n
@@ -2844,15 +2951,542 @@ WantedBy=timers.target
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/runner-disk-guard.timer"
 
-echo "files written to $R: 9"
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
+# The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
+# without this they would never be updated. Docker is restarted first, then gitlab-runner; both must be active
+# afterwards. The result is one line in /var/log/runner-engine-update.log, which health reads.
+# Env: DRY_RUN=1 shows the plan only.
+set -Eeuo pipefail
+
+LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
+DRY_RUN="${DRY_RUN:-0}"
+PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
+
+note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
+  exit 0
+fi
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+exec 9>/run/runner-engine-update.lock
+flock -n 9 || { note "SKIP another update is running"; exit 0; }
+
+# A docker error is not "no jobs": updating then could kill running jobs.
+if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+  note "SKIP docker does not answer, cannot tell whether jobs run"
+  exit 0
+fi
+if [[ -n "$jobs" ]]; then
+  note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
+  exit 0
+fi
+
+installed=()
+if command -v dnf >/dev/null 2>&1; then
+  for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
+  upgrade() { dnf -y -q upgrade "${installed[@]}"; }
+  pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
+elif command -v apt-get >/dev/null 2>&1; then
+  for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
+  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "${installed[@]}"; }
+  pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
+else
+  note "FAIL no supported package manager"
+  exit 1
+fi
+(( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
+
+if ! pending; then
+  note "OK nothing to upgrade (${installed[*]})"
+  exit 0
+fi
+if [[ "$DRY_RUN" == 1 ]]; then
+  note "DRY-RUN would upgrade ${installed[*]}"
+  exit 0
+fi
+
+before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
+if ! upgrade >>"$LOG" 2>&1; then
+  note "FAIL package upgrade failed, see ${LOG}"
+  exit 1
+fi
+systemctl restart docker
+sleep 5
+systemctl restart gitlab-runner
+sleep 5
+bad=""
+for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
+# The isolation rules live in iptables; reapply them after the Docker restart.
+if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+if [[ -n "$bad" ]]; then
+  note "FAIL not active after the upgrade:${bad}; was: ${before}"
+  exit 1
+fi
+note "OK upgraded ${installed[*]}; was: ${before}"
+__SIC_EOF__
+chmod 755 "$R/runner/scripts/runner-engine-update.sh"
+
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/ci-job-isolation.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Keep CI job containers away from the cloud metadata service and from services on the host.
+# Run at boot and after every Docker start by ci-job-isolation.service; safe to rerun any time.
+#
+#   DOCKER-USER   drops traffic to 169.254.169.254 (Hetzner metadata: server data, user-data, tokens).
+#   INPUT         traffic from docker0 and the br-* bridges to the host itself goes through the chain CI-JOBS-IN:
+#                 only replies, ping and the npm cache (docker0 IP, port 4873) are let in, the rest is dropped.
+#
+# Not affected: internet access of jobs, the Docker Hub cache (Docker pulls through the mirror on 127.0.0.1:5000,
+# jobs do not), traffic between containers of one job, and the host-network stacks (monitoring, logging, caches).
+# Only IPv4 is handled. Remove the rules: systemctl disable --now ci-job-isolation; then iptables -F CI-JOBS-IN
+# and delete the two "ci-job-isolation" rules shown by iptables -S.
+set -Eeuo pipefail
+
+META_IP="${META_IP:-169.254.169.254}"
+NPM_PORT="${NPM_PORT:-4873}"
+TAG=ci-job-isolation
+
+log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$*"; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0   blocks CI jobs from ${META_IP} and from host services (except the npm cache on the docker0 IP, port ${NPM_PORT})"
+  exit 0
+fi
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+command -v iptables >/dev/null 2>&1 || { log "iptables not found, nothing applied"; exit 1; }
+
+# Docker creates DOCKER-USER when it starts; wait for it after a boot.
+for _ in $(seq 1 30); do
+  if iptables -n -L DOCKER-USER >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+iptables -n -L DOCKER-USER >/dev/null 2>&1 || { log "chain DOCKER-USER does not exist (is Docker running?), nothing applied"; exit 1; }
+
+# Insert a rule at the top of a chain unless it is there already.
+ensure() {
+  local chain="$1"
+  shift
+  iptables -C "$chain" "$@" 2>/dev/null || iptables -I "$chain" 1 "$@"
+}
+
+ensure DOCKER-USER -d "$META_IP" -m comment --comment "$TAG" -j DROP
+
+BRIDGE_IP="${BRIDGE_IP:-}"
+if [[ -z "$BRIDGE_IP" ]] && command -v ip >/dev/null 2>&1; then
+  BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
+fi
+
+iptables -N CI-JOBS-IN 2>/dev/null || true
+iptables -F CI-JOBS-IN
+iptables -A CI-JOBS-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -A CI-JOBS-IN -p icmp --icmp-type echo-request -j ACCEPT
+if [[ -n "$BRIDGE_IP" ]]; then
+  iptables -A CI-JOBS-IN -i docker0 -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT
+fi
+iptables -A CI-JOBS-IN -j DROP
+ensure INPUT -i docker0 -m comment --comment "$TAG" -j CI-JOBS-IN
+ensure INPUT -i 'br-+' -m comment --comment "$TAG" -j CI-JOBS-IN
+
+log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT})"
+__SIC_EOF__
+chmod 755 "$R/runner/scripts/ci-job-isolation.sh"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
+[Unit]
+Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/runner-engine-update.sh
+Nice=10
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/runner-engine-update.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/runner-engine-update.timer" <<'__SIC_EOF__'
+[Unit]
+Description=Upgrade Docker CE and GitLab Runner every Sunday
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/runner-engine-update.timer"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/ci-job-isolation.service" <<'__SIC_EOF__'
+[Unit]
+Description=Block CI jobs from the cloud metadata service and host services
+After=docker.service network-online.target
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ci-job-isolation.sh
+ExecReload=/usr/local/bin/ci-job-isolation.sh
+
+[Install]
+WantedBy=multi-user.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/ci-job-isolation.service"
+
+echo "files written to $R: 14"
 bash "$R/runner/install/host-tools.sh" </dev/null
+INSTALL
+````
+
+<a id="firewall"></a>
+## Host firewall and fail2ban
+
+firewalld on Rocky, ufw on Debian, with SSH (22 and the port sshd listens on) allowed and everything else closed, plus the fail2ban sshd jail (5 tries in 10 minutes, 1 hour ban). The firewall starts only after SSH is in the saved rules and stops again if SSH is not allowed. Open the same ports in the Hetzner Cloud Firewall. If Docker was already running on Rocky, restart it afterwards while no job runs.
+
+````bash
+sudo bash <<'INSTALL'
+set -Eeuo pipefail
+R=/root/server-init-config
+
+install -d "$R/common"
+cat > "$R/common/lib.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Shared helpers for the installers (runner/install, server and common). Sourced, not executed.
+# shellcheck shell=bash
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export REPO_ROOT
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+require_root() { [[ $EUID -eq 0 ]] || die "run as root"; }
+
+selinux_on() { command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; }
+
+pkg_install() {
+  if command -v dnf >/dev/null 2>&1; then
+    dnf -y -q install "$@"
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update -q && apt-get install -y -q "$@"
+  else
+    die "no supported package manager"
+  fi
+}
+
+# Label a directory so containers may read files in it (no-op without SELinux).
+selinux_label_dir() {
+  local dir="$1"
+  install -d -m 0755 "$dir"
+  selinux_on || return 0
+  command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
+    semanage fcontext -a -t container_file_t "${dir}(/.*)?"
+  fi
+  restorecon -R "$dir"
+}
+
+restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
+ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+
+require_runner_idle() {
+  local n
+  n=$(ci_jobs_running)
+  (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
+}
+
+backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+
+# Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
+prom_jobs_logging() {
+  cat <<'YAML'
+  - job_name: loki
+    static_configs:
+      - targets: ["127.0.0.1:3100"]
+  - job_name: alloy
+    static_configs:
+      - targets: ["127.0.0.1:12345"]
+YAML
+}
+
+# Merge KEY=VALUE entries into the single [[runners]] environment line of config.toml.
+runner_env_merge() {
+  local cfg=/etc/gitlab-runner/config.toml existing list key e line
+  [[ $(grep -c '^\[\[runners\]\]' "$cfg") -eq 1 ]] || die "expected exactly one [[runners]] block in $cfg"
+  existing=$(grep -E '^  environment = \[' "$cfg" | sed -E 's/^  environment = \[(.*)\]$/\1/' || true)
+  list="$existing"
+  for e in "$@"; do
+    key="${e%%=*}"
+    if grep -q "\"${key}=" <<<"$list"; then
+      list=$(sed -E "s|\"${key}=[^\"]*\"|\"${e}\"|" <<<"$list")
+    else
+      list="${list:+${list}, }\"${e}\""
+    fi
+  done
+  line="  environment = [${list}]"
+  if grep -qE '^  environment = \[' "$cfg"; then
+    sed -i -E "s|^  environment = \[.*\]$|${line}|" "$cfg"
+  else
+    sed -i -E "0,/^  executor = .*/s||${line}\n&|" "$cfg"
+  fi
+  chmod 600 "$cfg"
+  runner_cfg_owner
+}
+
+# When the runner service runs as gitlab-runner (runner/install/users.sh), it must own its config after root edits it.
+runner_cfg_owner() {
+  local cfg=/etc/gitlab-runner/config.toml
+  if [[ -f /etc/systemd/system/gitlab-runner.service.d/10-service-user.conf ]] && id gitlab-runner >/dev/null 2>&1; then
+    chown -R gitlab-runner:gitlab-runner /etc/gitlab-runner
+    chmod 600 "$cfg"
+  fi
+}
+
+# --- service user for the monitoring and logging stacks (created by runner/install/users.sh) ---------------
+MON_USER="${MON_USER:-monitoring}"
+
+# Set MON_UID and MON_GID, or stop if the service user is missing.
+mon_ids() {
+  id "$MON_USER" >/dev/null 2>&1 || die "service user ${MON_USER} missing, run runner/install/users.sh first"
+  MON_UID=$(id -u "$MON_USER")
+  MON_GID=$(id -g "$MON_USER")
+}
+
+# env_set FILE KEY VALUE: set KEY=VALUE in a root-only env file.
+env_set() {
+  local f="$1" k="$2" v="$3"
+  touch "$f"
+  chmod 600 "$f"
+  if grep -q "^${k}=" "$f"; then
+    sed -i "s|^${k}=.*|${k}=${v}|" "$f"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$f"
+  fi
+}
+
+# stack_ids DIR [logging]: write the ids the compose file needs into DIR/.env.
+stack_ids() {
+  local dir="$1" docker_gid journal_gid
+  mon_ids
+  env_set "${dir}/.env" MON_UID "$MON_UID"
+  env_set "${dir}/.env" MON_GID "$MON_GID"
+  if [[ "${2:-}" == logging ]]; then
+    docker_gid=$(getent group docker | cut -d: -f3)
+    [[ -n "$docker_gid" ]] || die "docker group missing"
+    env_set "${dir}/.env" DOCKER_GID "$docker_gid"
+    journal_gid=$(getent group systemd-journal | cut -d: -f3)
+    [[ -n "$journal_gid" ]] || die "systemd-journal group missing"
+    # compose rejects equal group_add items, so the journal group is only added when it differs from docker's.
+    if [[ "$journal_gid" != "$docker_gid" ]]; then
+      printf 'services:\n  alloy:\n    group_add:\n      - "%s"\n' "$journal_gid" > "${dir}/docker-compose.override.yml"
+    else
+      rm -f "${dir}/docker-compose.override.yml"
+    fi
+  fi
+}
+
+# Config readable by the service user, writable by root only; .env (secrets) stays root-only.
+own_stack_dir() {
+  local dir="$1"
+  chown -R "root:${MON_USER}" "$dir"
+  chmod -R u=rwX,g=rX,o= "$dir"
+  if [[ -f "${dir}/.env" ]]; then
+    chown root:root "${dir}/.env"
+    chmod 600 "${dir}/.env"
+  fi
+}
+
+# Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
+chown_volumes() {
+  local dir="$1" project v
+  mon_ids
+  project=$(cd "$dir" && docker compose config --format json | jq -r .name)
+  (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
+  for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
+    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+  done
+}
+__SIC_EOF__
+chmod 755 "$R/common/lib.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
+# Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
+#
+# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T). Services of the host
+# (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
+# server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
+# stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
+#
+# Docker keeps working: on Rocky firewalld puts docker0 into its own docker zone when Docker starts after firewalld;
+# if Docker was already running, this script says so and Docker needs a restart while no job runs. On Debian
+# ufw does not touch the chains Docker manages. Jobs are kept away from the host by ci-job-isolation.sh.
+# fail2ban: sshd jail on the journal, 5 tries in 10 minutes, 1 hour ban.
+set -Eeuo pipefail
+
+JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"   # overridable for tests
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0   enables firewalld (Rocky) or ufw (Debian) with SSH allowed, plus the fail2ban sshd jail"
+  exit 0
+fi
+[[ $EUID -eq 0 ]] || die "run as root"
+
+ssh_ports() {
+  { echo 22; sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'; } | sort -un
+}
+
+put_jail() {
+  local banaction="$1" tmp
+  tmp=$(mktemp)
+  {
+    if [[ -n "$banaction" ]]; then
+      printf '[DEFAULT]\nbanaction = %s\nbanaction_allports = %s[type=allports]\n\n' "$banaction" "$banaction"
+    fi
+    printf '[sshd]\nenabled  = true\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n'
+  } > "$tmp"
+  install -D -m 0644 "$tmp" "$JAIL_FILE"
+  rm -f "$tmp"
+  if command -v restorecon >/dev/null 2>&1; then restorecon "$JAIL_FILE" || true; fi
+}
+
+firewalld_setup() {
+  local running=0 p
+  command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
+  systemctl is-active --quiet firewalld && running=1
+  # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
+  fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
+  fw --zone=public --query-service=ssh >/dev/null 2>&1 || fw --zone=public --add-service=ssh >/dev/null || die "cannot add ssh to the public zone"
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || fw --zone=public --add-port="${p}/tcp" >/dev/null || die "cannot add port ${p}"
+  done
+  # Lockout guard: the saved rules must allow SSH before the firewall runs.
+  fw --zone=public --query-service=ssh >/dev/null 2>&1 || die "ssh missing from the saved public zone; firewall left as it was"
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || die "port ${p} missing from the saved public zone; firewall left as it was"
+  done
+  if (( running )); then firewall-cmd --reload >/dev/null || die "firewalld reload failed"; else systemctl enable --now firewalld || die "firewalld did not start"; fi
+  systemctl enable firewalld >/dev/null 2>&1 || true
+  if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then
+    systemctl stop firewalld
+    die "ssh not allowed after start; firewalld stopped"
+  fi
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    if ! firewall-cmd --zone=public --query-port="${p}/tcp" >/dev/null; then
+      systemctl stop firewalld
+      die "ssh port ${p} not allowed after start; firewalld stopped"
+    fi
+  done
+  log "firewalld: active, public zone: $(firewall-cmd --zone=public --list-services) $(firewall-cmd --zone=public --list-ports)"
+  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && ! firewall-cmd --get-zones | tr ' ' '\n' | grep -qx docker; then
+    log "NOTE: Docker was running before firewalld; restart it while no CI job runs so it joins the firewalld docker zone: systemctl restart docker"
+  fi
+}
+
+ufw_setup() {
+  local p o was_active=0
+  command -v ufw >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get install -y -q ufw >/dev/null || die "cannot install ufw"; }
+  o=$(ufw status 2>/dev/null) || true
+  if grep -q '^Status: active' <<<"$o"; then was_active=1; fi
+  for p in $(ssh_ports); do ufw allow "${p}/tcp" >/dev/null || die "cannot allow ${p}/tcp"; done
+  # Lockout guard: every SSH port must be in the saved rules before ufw is enabled.
+  o=$(ufw show added 2>/dev/null) || true
+  for p in $(ssh_ports); do
+    grep -qE "^ufw (allow|limit) (in )?${p}/tcp([[:space:]]|\$)" <<<"$o" || die "${p}/tcp missing from the saved ufw rules; ufw left as it was"
+  done
+  if (( ! was_active )); then
+    ufw default deny incoming >/dev/null
+    ufw default allow outgoing >/dev/null
+    ufw --force enable >/dev/null
+  fi
+  systemctl enable ufw >/dev/null 2>&1 || true
+  o=$(ufw status 2>/dev/null) || true
+  for p in $(ssh_ports); do
+    if ! grep -qE "^${p}/tcp([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|LIMIT)" <<<"$o"; then
+      if (( ! was_active )); then ufw disable >/dev/null 2>&1 || true; fi
+      die "ssh port ${p} not allowed in the running ufw; ufw disabled again"
+    fi
+  done
+  log "ufw: $(ufw status | head -1); allowed: $(ssh_ports | tr '\n' ' ')"
+}
+
+if command -v dnf >/dev/null 2>&1; then
+  dnf -y -q install epel-release >/dev/null 2>&1 || true
+  dnf -y -q install fail2ban-server fail2ban-firewalld >/dev/null 2>&1 || log "WARN: fail2ban not available (EPEL?), sshd jail skipped"
+  firewalld_setup
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    put_jail ""
+    systemctl enable --now fail2ban >/dev/null && systemctl restart fail2ban
+  fi
+elif command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q fail2ban >/dev/null 2>&1 || log "WARN: fail2ban not installed, sshd jail skipped"
+  ufw_setup
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    put_jail nftables
+    systemctl enable --now fail2ban >/dev/null && systemctl restart fail2ban
+  fi
+else
+  die "no supported package manager"
+fi
+if command -v fail2ban-client >/dev/null 2>&1; then
+  log "fail2ban: $(fail2ban-client status 2>/dev/null | tr '\n' ' ' || true)"
+fi
+log "OK: host firewall on. If you lock yourself out, use the Hetzner web console: systemctl stop firewalld (or: ufw disable)"
+__SIC_EOF__
+chmod 755 "$R/runner/install/host-firewall.sh"
+
+echo "files written to $R: 2"
+bash "$R/runner/install/host-firewall.sh" </dev/null
 INSTALL
 ````
 
 <a id="security"></a>
 ## Security tools: audit, network, scan
 
-Optional. Tools to test and audit your own server; use them only on systems you own or are authorized to test. Default: lynis, OpenSCAP, auditd (small ruleset), ssh-audit, testssl.sh, nmap and other network tools, and trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle as SHA256-verified release binaries. Options for the installer (`bash /root/server-init-config/common/security-tools.sh --help`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, `--grype`, `--syft`, `--k8s`, `--kali`, `--audit-timer`.
+Optional. Tools to test and audit your own server; use them only on systems you own or are authorized to test. Default: lynis, OpenSCAP, auditd (small ruleset), ssh-audit, testssl.sh, nmap and other network tools, and trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle as release binaries at pinned versions, checked against the checksums file of the same release. Options for the installer (`bash /root/server-init-config/common/security-tools.sh --help`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, `--grype`, `--syft`, `--k8s`, `--kali`, `--audit-timer`.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -4101,6 +4735,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
      DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
+Per-job limits (memory 1536m, cpus 1.5, pids 2048, shm 256 MB) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
 USAGE
@@ -4131,6 +4766,8 @@ if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
 chmod 600 "$CFG"
+# Per-job CPU, memory and process limits (runner/install/job-limits.sh); the runner reloads config.toml by itself.
+bash "$(dirname "$0")/job-limits.sh" >/dev/null || log "WARN: job limits not set; run runner/install/job-limits.sh"
 runner_cfg_owner
 systemctl restart gitlab-runner
 sleep 3
@@ -4145,9 +4782,378 @@ fi
 __SIC_EOF__
 chmod 755 "$R/runner/install/register-runner.sh"
 
-echo "files written to $R: 2"
+install -d "$R/runner/install"
+cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Per-job CPU, memory, swap, process and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml,
+# so one job cannot take the whole host. Backs up the file, changes only these keys, and is safe to rerun.
+# A value you already set in config.toml is kept unless you pass it in the environment. Swap follows memory
+# (no swap) unless JOB_MEMORY_SWAP is given or the file already has a memory_swap.
+#
+# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB leave about 1 GB for
+# the host and its stacks. A bigger host: raise JOB_MEMORY and JOB_CPUS and keep concurrent x limit below the hardware.
+# A job that needs more fails with an out-of-memory kill (exit 137) instead of freezing the host.
+# gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
+#
+# Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
+#      JOB_PIDS (default 2048), JOB_SHM_SIZE in bytes (default 268435456)
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "$0")/../../common/lib.sh"
+
+CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+require_root
+[[ -f "$CFG" ]] && grep -q '^[[:space:]]*\[runners.docker\]' "$CFG" || die "no [runners.docker] section in ${CFG}: register the runner first (runner/install/register-runner.sh)"
+
+mem_default="${JOB_MEMORY:-1536m}"
+[[ "$mem_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY: ${mem_default} (for example 1536m)"
+swap_default="${JOB_MEMORY_SWAP:-$mem_default}"
+[[ "$swap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY_SWAP: ${swap_default}"
+cpus_default="${JOB_CPUS:-1.5}"
+[[ "$cpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_CPUS: ${cpus_default}"
+pids_default="${JOB_PIDS:-2048}"
+[[ "$pids_default" =~ ^[0-9]+$ ]] || die "invalid JOB_PIDS: ${pids_default}"
+shm_default="${JOB_SHM_SIZE:-268435456}"
+[[ "$shm_default" =~ ^[0-9]+$ ]] || die "invalid JOB_SHM_SIZE: ${shm_default}"
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+# FORCE_<key>=1 when the environment gave the value: it then replaces what config.toml has.
+awk -v mem="\"${mem_default}\"" -v swap="\"${swap_default}\"" -v cpus="\"${cpus_default}\"" -v pids="$pids_default" -v shm="$shm_default" \
+    -v fmem="${JOB_MEMORY:+1}" -v fswap="${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" -v fcpus="${JOB_CPUS:+1}" -v fpids="${JOB_PIDS:+1}" -v fshm="${JOB_SHM_SIZE:+1}" '
+  function flush(   k) {
+    if (!insec) return
+    # Without its own value, swap follows the memory limit of this section (swap below memory is rejected by Docker).
+    if (!seen[2] && curmem != "") vals[2] = curmem
+    for (k = 1; k <= 5; k++) if (!seen[k]) print "    " names[k] " = " vals[k]
+    insec = 0
+  }
+  BEGIN {
+    names[1] = "memory";      vals[1] = mem;  force[1] = fmem
+    names[2] = "memory_swap"; vals[2] = swap; force[2] = fswap
+    names[3] = "cpus";        vals[3] = cpus; force[3] = fcpus
+    names[4] = "pids_limit";  vals[4] = pids; force[4] = fpids
+    names[5] = "shm_size";    vals[5] = shm;  force[5] = fshm
+  }
+  /^[[:space:]]*\[/ { flush() }
+  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; split("", seen); print; next }
+  insec {
+    for (k = 1; k <= 5; k++) {
+      if ($0 ~ "^[[:space:]]*" names[k] "[[:space:]]*=") {
+        seen[k] = 1
+        if (k == 1) { curmem = $0; sub(/^[^=]*=[[:space:]]*/, "", curmem); sub(/[[:space:]]*#.*$/, "", curmem) }
+        if (force[k]) { if (k == 1) curmem = vals[1]; print "    " names[k] " = " vals[k]; next }
+      }
+    }
+  }
+  { print }
+  END { flush() }
+' "$CFG" > "$tmp"
+
+if cmp -s "$tmp" "$CFG"; then
+  log "job limits already set in ${CFG}"
+else
+  backup "$CFG"
+  cat "$tmp" > "$CFG"
+  log "job limits written to ${CFG}"
+fi
+awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|pids_limit|shm_size)[[:space:]]*=/' "$CFG"
+__SIC_EOF__
+chmod 755 "$R/runner/install/job-limits.sh"
+
+echo "files written to $R: 3"
 INSTALL
 sudo DESCRIPTION=hetzner-cax11 bash /root/server-init-config/runner/install/register-runner.sh
+````
+
+<a id="job-limits"></a>
+## Per-job limits
+
+Adds memory 1536m (no swap), 1.5 CPUs, 2048 processes and 256 MB /dev/shm per job to `[runners.docker]` in `config.toml` (a backup is made, values you set yourself are kept). Needs a registered runner. Change them with `JOB_MEMORY`, `JOB_CPUS`, `JOB_PIDS`, `JOB_SHM_SIZE` on the last line.
+
+````bash
+sudo bash <<'INSTALL'
+set -Eeuo pipefail
+R=/root/server-init-config
+
+install -d "$R/common"
+cat > "$R/common/lib.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Shared helpers for the installers (runner/install, server and common). Sourced, not executed.
+# shellcheck shell=bash
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export REPO_ROOT
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+require_root() { [[ $EUID -eq 0 ]] || die "run as root"; }
+
+selinux_on() { command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; }
+
+pkg_install() {
+  if command -v dnf >/dev/null 2>&1; then
+    dnf -y -q install "$@"
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update -q && apt-get install -y -q "$@"
+  else
+    die "no supported package manager"
+  fi
+}
+
+# Label a directory so containers may read files in it (no-op without SELinux).
+selinux_label_dir() {
+  local dir="$1"
+  install -d -m 0755 "$dir"
+  selinux_on || return 0
+  command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
+    semanage fcontext -a -t container_file_t "${dir}(/.*)?"
+  fi
+  restorecon -R "$dir"
+}
+
+restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
+ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+
+require_runner_idle() {
+  local n
+  n=$(ci_jobs_running)
+  (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
+}
+
+backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+
+# Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
+prom_jobs_logging() {
+  cat <<'YAML'
+  - job_name: loki
+    static_configs:
+      - targets: ["127.0.0.1:3100"]
+  - job_name: alloy
+    static_configs:
+      - targets: ["127.0.0.1:12345"]
+YAML
+}
+
+# Merge KEY=VALUE entries into the single [[runners]] environment line of config.toml.
+runner_env_merge() {
+  local cfg=/etc/gitlab-runner/config.toml existing list key e line
+  [[ $(grep -c '^\[\[runners\]\]' "$cfg") -eq 1 ]] || die "expected exactly one [[runners]] block in $cfg"
+  existing=$(grep -E '^  environment = \[' "$cfg" | sed -E 's/^  environment = \[(.*)\]$/\1/' || true)
+  list="$existing"
+  for e in "$@"; do
+    key="${e%%=*}"
+    if grep -q "\"${key}=" <<<"$list"; then
+      list=$(sed -E "s|\"${key}=[^\"]*\"|\"${e}\"|" <<<"$list")
+    else
+      list="${list:+${list}, }\"${e}\""
+    fi
+  done
+  line="  environment = [${list}]"
+  if grep -qE '^  environment = \[' "$cfg"; then
+    sed -i -E "s|^  environment = \[.*\]$|${line}|" "$cfg"
+  else
+    sed -i -E "0,/^  executor = .*/s||${line}\n&|" "$cfg"
+  fi
+  chmod 600 "$cfg"
+  runner_cfg_owner
+}
+
+# When the runner service runs as gitlab-runner (runner/install/users.sh), it must own its config after root edits it.
+runner_cfg_owner() {
+  local cfg=/etc/gitlab-runner/config.toml
+  if [[ -f /etc/systemd/system/gitlab-runner.service.d/10-service-user.conf ]] && id gitlab-runner >/dev/null 2>&1; then
+    chown -R gitlab-runner:gitlab-runner /etc/gitlab-runner
+    chmod 600 "$cfg"
+  fi
+}
+
+# --- service user for the monitoring and logging stacks (created by runner/install/users.sh) ---------------
+MON_USER="${MON_USER:-monitoring}"
+
+# Set MON_UID and MON_GID, or stop if the service user is missing.
+mon_ids() {
+  id "$MON_USER" >/dev/null 2>&1 || die "service user ${MON_USER} missing, run runner/install/users.sh first"
+  MON_UID=$(id -u "$MON_USER")
+  MON_GID=$(id -g "$MON_USER")
+}
+
+# env_set FILE KEY VALUE: set KEY=VALUE in a root-only env file.
+env_set() {
+  local f="$1" k="$2" v="$3"
+  touch "$f"
+  chmod 600 "$f"
+  if grep -q "^${k}=" "$f"; then
+    sed -i "s|^${k}=.*|${k}=${v}|" "$f"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$f"
+  fi
+}
+
+# stack_ids DIR [logging]: write the ids the compose file needs into DIR/.env.
+stack_ids() {
+  local dir="$1" docker_gid journal_gid
+  mon_ids
+  env_set "${dir}/.env" MON_UID "$MON_UID"
+  env_set "${dir}/.env" MON_GID "$MON_GID"
+  if [[ "${2:-}" == logging ]]; then
+    docker_gid=$(getent group docker | cut -d: -f3)
+    [[ -n "$docker_gid" ]] || die "docker group missing"
+    env_set "${dir}/.env" DOCKER_GID "$docker_gid"
+    journal_gid=$(getent group systemd-journal | cut -d: -f3)
+    [[ -n "$journal_gid" ]] || die "systemd-journal group missing"
+    # compose rejects equal group_add items, so the journal group is only added when it differs from docker's.
+    if [[ "$journal_gid" != "$docker_gid" ]]; then
+      printf 'services:\n  alloy:\n    group_add:\n      - "%s"\n' "$journal_gid" > "${dir}/docker-compose.override.yml"
+    else
+      rm -f "${dir}/docker-compose.override.yml"
+    fi
+  fi
+}
+
+# Config readable by the service user, writable by root only; .env (secrets) stays root-only.
+own_stack_dir() {
+  local dir="$1"
+  chown -R "root:${MON_USER}" "$dir"
+  chmod -R u=rwX,g=rX,o= "$dir"
+  if [[ -f "${dir}/.env" ]]; then
+    chown root:root "${dir}/.env"
+    chmod 600 "${dir}/.env"
+  fi
+}
+
+# Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
+chown_volumes() {
+  local dir="$1" project v
+  mon_ids
+  project=$(cd "$dir" && docker compose config --format json | jq -r .name)
+  (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
+  for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
+    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+  done
+}
+__SIC_EOF__
+chmod 755 "$R/common/lib.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Per-job CPU, memory, swap, process and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml,
+# so one job cannot take the whole host. Backs up the file, changes only these keys, and is safe to rerun.
+# A value you already set in config.toml is kept unless you pass it in the environment. Swap follows memory
+# (no swap) unless JOB_MEMORY_SWAP is given or the file already has a memory_swap.
+#
+# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB leave about 1 GB for
+# the host and its stacks. A bigger host: raise JOB_MEMORY and JOB_CPUS and keep concurrent x limit below the hardware.
+# A job that needs more fails with an out-of-memory kill (exit 137) instead of freezing the host.
+# gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
+#
+# Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
+#      JOB_PIDS (default 2048), JOB_SHM_SIZE in bytes (default 268435456)
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "$0")/../../common/lib.sh"
+
+CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+require_root
+[[ -f "$CFG" ]] && grep -q '^[[:space:]]*\[runners.docker\]' "$CFG" || die "no [runners.docker] section in ${CFG}: register the runner first (runner/install/register-runner.sh)"
+
+mem_default="${JOB_MEMORY:-1536m}"
+[[ "$mem_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY: ${mem_default} (for example 1536m)"
+swap_default="${JOB_MEMORY_SWAP:-$mem_default}"
+[[ "$swap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY_SWAP: ${swap_default}"
+cpus_default="${JOB_CPUS:-1.5}"
+[[ "$cpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_CPUS: ${cpus_default}"
+pids_default="${JOB_PIDS:-2048}"
+[[ "$pids_default" =~ ^[0-9]+$ ]] || die "invalid JOB_PIDS: ${pids_default}"
+shm_default="${JOB_SHM_SIZE:-268435456}"
+[[ "$shm_default" =~ ^[0-9]+$ ]] || die "invalid JOB_SHM_SIZE: ${shm_default}"
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+# FORCE_<key>=1 when the environment gave the value: it then replaces what config.toml has.
+awk -v mem="\"${mem_default}\"" -v swap="\"${swap_default}\"" -v cpus="\"${cpus_default}\"" -v pids="$pids_default" -v shm="$shm_default" \
+    -v fmem="${JOB_MEMORY:+1}" -v fswap="${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" -v fcpus="${JOB_CPUS:+1}" -v fpids="${JOB_PIDS:+1}" -v fshm="${JOB_SHM_SIZE:+1}" '
+  function flush(   k) {
+    if (!insec) return
+    # Without its own value, swap follows the memory limit of this section (swap below memory is rejected by Docker).
+    if (!seen[2] && curmem != "") vals[2] = curmem
+    for (k = 1; k <= 5; k++) if (!seen[k]) print "    " names[k] " = " vals[k]
+    insec = 0
+  }
+  BEGIN {
+    names[1] = "memory";      vals[1] = mem;  force[1] = fmem
+    names[2] = "memory_swap"; vals[2] = swap; force[2] = fswap
+    names[3] = "cpus";        vals[3] = cpus; force[3] = fcpus
+    names[4] = "pids_limit";  vals[4] = pids; force[4] = fpids
+    names[5] = "shm_size";    vals[5] = shm;  force[5] = fshm
+  }
+  /^[[:space:]]*\[/ { flush() }
+  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; split("", seen); print; next }
+  insec {
+    for (k = 1; k <= 5; k++) {
+      if ($0 ~ "^[[:space:]]*" names[k] "[[:space:]]*=") {
+        seen[k] = 1
+        if (k == 1) { curmem = $0; sub(/^[^=]*=[[:space:]]*/, "", curmem); sub(/[[:space:]]*#.*$/, "", curmem) }
+        if (force[k]) { if (k == 1) curmem = vals[1]; print "    " names[k] " = " vals[k]; next }
+      }
+    }
+  }
+  { print }
+  END { flush() }
+' "$CFG" > "$tmp"
+
+if cmp -s "$tmp" "$CFG"; then
+  log "job limits already set in ${CFG}"
+else
+  backup "$CFG"
+  cat "$tmp" > "$CFG"
+  log "job limits written to ${CFG}"
+fi
+awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|pids_limit|shm_size)[[:space:]]*=/' "$CFG"
+__SIC_EOF__
+chmod 755 "$R/runner/install/job-limits.sh"
+
+echo "files written to $R: 2"
+bash "$R/runner/install/job-limits.sh" </dev/null
+INSTALL
 ````
 
 <a id="registry-cache"></a>
@@ -7786,9 +8792,144 @@ __SIC_EOF__
 chmod 755 "$R/runner/install/grafana-domain.sh"
 
 install -d "$R/runner/install"
+cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
+# Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
+#
+# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T). Services of the host
+# (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
+# server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
+# stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
+#
+# Docker keeps working: on Rocky firewalld puts docker0 into its own docker zone when Docker starts after firewalld;
+# if Docker was already running, this script says so and Docker needs a restart while no job runs. On Debian
+# ufw does not touch the chains Docker manages. Jobs are kept away from the host by ci-job-isolation.sh.
+# fail2ban: sshd jail on the journal, 5 tries in 10 minutes, 1 hour ban.
+set -Eeuo pipefail
+
+JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"   # overridable for tests
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0   enables firewalld (Rocky) or ufw (Debian) with SSH allowed, plus the fail2ban sshd jail"
+  exit 0
+fi
+[[ $EUID -eq 0 ]] || die "run as root"
+
+ssh_ports() {
+  { echo 22; sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'; } | sort -un
+}
+
+put_jail() {
+  local banaction="$1" tmp
+  tmp=$(mktemp)
+  {
+    if [[ -n "$banaction" ]]; then
+      printf '[DEFAULT]\nbanaction = %s\nbanaction_allports = %s[type=allports]\n\n' "$banaction" "$banaction"
+    fi
+    printf '[sshd]\nenabled  = true\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n'
+  } > "$tmp"
+  install -D -m 0644 "$tmp" "$JAIL_FILE"
+  rm -f "$tmp"
+  if command -v restorecon >/dev/null 2>&1; then restorecon "$JAIL_FILE" || true; fi
+}
+
+firewalld_setup() {
+  local running=0 p
+  command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
+  systemctl is-active --quiet firewalld && running=1
+  # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
+  fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
+  fw --zone=public --query-service=ssh >/dev/null 2>&1 || fw --zone=public --add-service=ssh >/dev/null || die "cannot add ssh to the public zone"
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || fw --zone=public --add-port="${p}/tcp" >/dev/null || die "cannot add port ${p}"
+  done
+  # Lockout guard: the saved rules must allow SSH before the firewall runs.
+  fw --zone=public --query-service=ssh >/dev/null 2>&1 || die "ssh missing from the saved public zone; firewall left as it was"
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || die "port ${p} missing from the saved public zone; firewall left as it was"
+  done
+  if (( running )); then firewall-cmd --reload >/dev/null || die "firewalld reload failed"; else systemctl enable --now firewalld || die "firewalld did not start"; fi
+  systemctl enable firewalld >/dev/null 2>&1 || true
+  if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then
+    systemctl stop firewalld
+    die "ssh not allowed after start; firewalld stopped"
+  fi
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    if ! firewall-cmd --zone=public --query-port="${p}/tcp" >/dev/null; then
+      systemctl stop firewalld
+      die "ssh port ${p} not allowed after start; firewalld stopped"
+    fi
+  done
+  log "firewalld: active, public zone: $(firewall-cmd --zone=public --list-services) $(firewall-cmd --zone=public --list-ports)"
+  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && ! firewall-cmd --get-zones | tr ' ' '\n' | grep -qx docker; then
+    log "NOTE: Docker was running before firewalld; restart it while no CI job runs so it joins the firewalld docker zone: systemctl restart docker"
+  fi
+}
+
+ufw_setup() {
+  local p o was_active=0
+  command -v ufw >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get install -y -q ufw >/dev/null || die "cannot install ufw"; }
+  o=$(ufw status 2>/dev/null) || true
+  if grep -q '^Status: active' <<<"$o"; then was_active=1; fi
+  for p in $(ssh_ports); do ufw allow "${p}/tcp" >/dev/null || die "cannot allow ${p}/tcp"; done
+  # Lockout guard: every SSH port must be in the saved rules before ufw is enabled.
+  o=$(ufw show added 2>/dev/null) || true
+  for p in $(ssh_ports); do
+    grep -qE "^ufw (allow|limit) (in )?${p}/tcp([[:space:]]|\$)" <<<"$o" || die "${p}/tcp missing from the saved ufw rules; ufw left as it was"
+  done
+  if (( ! was_active )); then
+    ufw default deny incoming >/dev/null
+    ufw default allow outgoing >/dev/null
+    ufw --force enable >/dev/null
+  fi
+  systemctl enable ufw >/dev/null 2>&1 || true
+  o=$(ufw status 2>/dev/null) || true
+  for p in $(ssh_ports); do
+    if ! grep -qE "^${p}/tcp([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|LIMIT)" <<<"$o"; then
+      if (( ! was_active )); then ufw disable >/dev/null 2>&1 || true; fi
+      die "ssh port ${p} not allowed in the running ufw; ufw disabled again"
+    fi
+  done
+  log "ufw: $(ufw status | head -1); allowed: $(ssh_ports | tr '\n' ' ')"
+}
+
+if command -v dnf >/dev/null 2>&1; then
+  dnf -y -q install epel-release >/dev/null 2>&1 || true
+  dnf -y -q install fail2ban-server fail2ban-firewalld >/dev/null 2>&1 || log "WARN: fail2ban not available (EPEL?), sshd jail skipped"
+  firewalld_setup
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    put_jail ""
+    systemctl enable --now fail2ban >/dev/null && systemctl restart fail2ban
+  fi
+elif command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q fail2ban >/dev/null 2>&1 || log "WARN: fail2ban not installed, sshd jail skipped"
+  ufw_setup
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    put_jail nftables
+    systemctl enable --now fail2ban >/dev/null && systemctl restart fail2ban
+  fi
+else
+  die "no supported package manager"
+fi
+if command -v fail2ban-client >/dev/null 2>&1; then
+  log "fail2ban: $(fail2ban-client status 2>/dev/null | tr '\n' ' ' || true)"
+fi
+log "OK: host firewall on. If you lock yourself out, use the Hetzner web console: systemctl stop firewalld (or: ufw disable)"
+__SIC_EOF__
+chmod 755 "$R/runner/install/host-firewall.sh"
+
+install -d "$R/runner/install"
 cat > "$R/runner/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers.
+# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers,
+# the job isolation rules (CI jobs cannot reach the metadata service or host services) and the weekly Docker/GitLab Runner update.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
@@ -7802,19 +8943,21 @@ require_root
 
 install -m 0755 "$REPO_ROOT/common/health" /usr/local/bin/health
 restorecon_if /usr/local/bin/health
-for f in runner-weekly-cleanup.sh runner-disk-guard.sh; do
+for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
 
 systemctl daemon-reload
-systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer
+systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
+# Needs Docker (the DOCKER-USER chain). On a host without it the unit is enabled and applies at the next Docker start.
+if systemctl is-active --quiet docker; then systemctl enable --now ci-job-isolation.service; else systemctl enable ci-job-isolation.service; fi
 
 DRY_RUN=1 /usr/local/bin/runner-weekly-cleanup.sh >/dev/null
 systemctl list-timers 'runner-*' --no-pager
@@ -7906,6 +9049,90 @@ journalctl -t ci-image-prewarm --since "-30min" --no-pager -o cat | grep -E 'OK|
 log "NO ARM lines: re-mirror those tags with crane copy (see runner/ci/mirror-images.yml)"
 __SIC_EOF__
 chmod 755 "$R/runner/install/image-prewarm.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Per-job CPU, memory, swap, process and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml,
+# so one job cannot take the whole host. Backs up the file, changes only these keys, and is safe to rerun.
+# A value you already set in config.toml is kept unless you pass it in the environment. Swap follows memory
+# (no swap) unless JOB_MEMORY_SWAP is given or the file already has a memory_swap.
+#
+# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB leave about 1 GB for
+# the host and its stacks. A bigger host: raise JOB_MEMORY and JOB_CPUS and keep concurrent x limit below the hardware.
+# A job that needs more fails with an out-of-memory kill (exit 137) instead of freezing the host.
+# gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
+#
+# Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
+#      JOB_PIDS (default 2048), JOB_SHM_SIZE in bytes (default 268435456)
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "$0")/../../common/lib.sh"
+
+CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+require_root
+[[ -f "$CFG" ]] && grep -q '^[[:space:]]*\[runners.docker\]' "$CFG" || die "no [runners.docker] section in ${CFG}: register the runner first (runner/install/register-runner.sh)"
+
+mem_default="${JOB_MEMORY:-1536m}"
+[[ "$mem_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY: ${mem_default} (for example 1536m)"
+swap_default="${JOB_MEMORY_SWAP:-$mem_default}"
+[[ "$swap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY_SWAP: ${swap_default}"
+cpus_default="${JOB_CPUS:-1.5}"
+[[ "$cpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_CPUS: ${cpus_default}"
+pids_default="${JOB_PIDS:-2048}"
+[[ "$pids_default" =~ ^[0-9]+$ ]] || die "invalid JOB_PIDS: ${pids_default}"
+shm_default="${JOB_SHM_SIZE:-268435456}"
+[[ "$shm_default" =~ ^[0-9]+$ ]] || die "invalid JOB_SHM_SIZE: ${shm_default}"
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+# FORCE_<key>=1 when the environment gave the value: it then replaces what config.toml has.
+awk -v mem="\"${mem_default}\"" -v swap="\"${swap_default}\"" -v cpus="\"${cpus_default}\"" -v pids="$pids_default" -v shm="$shm_default" \
+    -v fmem="${JOB_MEMORY:+1}" -v fswap="${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" -v fcpus="${JOB_CPUS:+1}" -v fpids="${JOB_PIDS:+1}" -v fshm="${JOB_SHM_SIZE:+1}" '
+  function flush(   k) {
+    if (!insec) return
+    # Without its own value, swap follows the memory limit of this section (swap below memory is rejected by Docker).
+    if (!seen[2] && curmem != "") vals[2] = curmem
+    for (k = 1; k <= 5; k++) if (!seen[k]) print "    " names[k] " = " vals[k]
+    insec = 0
+  }
+  BEGIN {
+    names[1] = "memory";      vals[1] = mem;  force[1] = fmem
+    names[2] = "memory_swap"; vals[2] = swap; force[2] = fswap
+    names[3] = "cpus";        vals[3] = cpus; force[3] = fcpus
+    names[4] = "pids_limit";  vals[4] = pids; force[4] = fpids
+    names[5] = "shm_size";    vals[5] = shm;  force[5] = fshm
+  }
+  /^[[:space:]]*\[/ { flush() }
+  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; split("", seen); print; next }
+  insec {
+    for (k = 1; k <= 5; k++) {
+      if ($0 ~ "^[[:space:]]*" names[k] "[[:space:]]*=") {
+        seen[k] = 1
+        if (k == 1) { curmem = $0; sub(/^[^=]*=[[:space:]]*/, "", curmem); sub(/[[:space:]]*#.*$/, "", curmem) }
+        if (force[k]) { if (k == 1) curmem = vals[1]; print "    " names[k] " = " vals[k]; next }
+      }
+    }
+  }
+  { print }
+  END { flush() }
+' "$CFG" > "$tmp"
+
+if cmp -s "$tmp" "$CFG"; then
+  log "job limits already set in ${CFG}"
+else
+  backup "$CFG"
+  cat "$tmp" > "$CFG"
+  log "job limits written to ${CFG}"
+fi
+awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|pids_limit|shm_size)[[:space:]]*=/' "$CFG"
+__SIC_EOF__
+chmod 755 "$R/runner/install/job-limits.sh"
 
 install -d "$R/runner/install"
 cat > "$R/runner/install/lock-root.sh" <<'__SIC_EOF__'
@@ -8176,6 +9403,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
      DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
+Per-job limits (memory 1536m, cpus 1.5, pids 2048, shm 256 MB) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
 USAGE
@@ -8206,6 +9434,8 @@ if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
 chmod 600 "$CFG"
+# Per-job CPU, memory and process limits (runner/install/job-limits.sh); the runner reloads config.toml by itself.
+bash "$(dirname "$0")/job-limits.sh" >/dev/null || log "WARN: job limits not set; run runner/install/job-limits.sh"
 runner_cfg_owner
 systemctl restart gitlab-runner
 sleep 3
@@ -8561,9 +9791,10 @@ update_os() {
 script_path() { if [[ "$1" == health ]]; then echo common/health; else echo "runner/scripts/$1"; fi; }
 
 update_host_tools() {
-  local f u existed units_changed=0 cleanup_changed=0
-  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh)
-  local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer)
+  local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
+  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -8581,6 +9812,9 @@ update_host_tools() {
       CHANGED+=("scripts/${f}")
       if [[ "$f" == runner-weekly-cleanup.sh ]]; then
         cleanup_changed=1
+      fi
+      if [[ "$f" == ci-job-isolation.sh ]]; then
+        isolation_changed=1
       fi
     fi
   done
@@ -8613,6 +9847,15 @@ update_host_tools() {
         run systemctl restart "$u"
       fi
     done
+  fi
+
+  # The isolation rules live in iptables: apply them when the script is new or changed and Docker is up.
+  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/dev/null; then
+    if ! systemctl is-enabled --quiet ci-job-isolation.service 2>/dev/null; then
+      run systemctl enable --now ci-job-isolation.service
+    elif (( isolation_changed )); then
+      run systemctl restart ci-job-isolation.service
+    fi
   fi
 
   if (( cleanup_changed && ! DRYRUN )); then
@@ -9293,6 +10536,71 @@ __SIC_EOF__
 chmod 755 "$R/runner/scripts/ci-image-prewarm.sh"
 
 install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/ci-job-isolation.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Keep CI job containers away from the cloud metadata service and from services on the host.
+# Run at boot and after every Docker start by ci-job-isolation.service; safe to rerun any time.
+#
+#   DOCKER-USER   drops traffic to 169.254.169.254 (Hetzner metadata: server data, user-data, tokens).
+#   INPUT         traffic from docker0 and the br-* bridges to the host itself goes through the chain CI-JOBS-IN:
+#                 only replies, ping and the npm cache (docker0 IP, port 4873) are let in, the rest is dropped.
+#
+# Not affected: internet access of jobs, the Docker Hub cache (Docker pulls through the mirror on 127.0.0.1:5000,
+# jobs do not), traffic between containers of one job, and the host-network stacks (monitoring, logging, caches).
+# Only IPv4 is handled. Remove the rules: systemctl disable --now ci-job-isolation; then iptables -F CI-JOBS-IN
+# and delete the two "ci-job-isolation" rules shown by iptables -S.
+set -Eeuo pipefail
+
+META_IP="${META_IP:-169.254.169.254}"
+NPM_PORT="${NPM_PORT:-4873}"
+TAG=ci-job-isolation
+
+log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$*"; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0   blocks CI jobs from ${META_IP} and from host services (except the npm cache on the docker0 IP, port ${NPM_PORT})"
+  exit 0
+fi
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+command -v iptables >/dev/null 2>&1 || { log "iptables not found, nothing applied"; exit 1; }
+
+# Docker creates DOCKER-USER when it starts; wait for it after a boot.
+for _ in $(seq 1 30); do
+  if iptables -n -L DOCKER-USER >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+iptables -n -L DOCKER-USER >/dev/null 2>&1 || { log "chain DOCKER-USER does not exist (is Docker running?), nothing applied"; exit 1; }
+
+# Insert a rule at the top of a chain unless it is there already.
+ensure() {
+  local chain="$1"
+  shift
+  iptables -C "$chain" "$@" 2>/dev/null || iptables -I "$chain" 1 "$@"
+}
+
+ensure DOCKER-USER -d "$META_IP" -m comment --comment "$TAG" -j DROP
+
+BRIDGE_IP="${BRIDGE_IP:-}"
+if [[ -z "$BRIDGE_IP" ]] && command -v ip >/dev/null 2>&1; then
+  BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
+fi
+
+iptables -N CI-JOBS-IN 2>/dev/null || true
+iptables -F CI-JOBS-IN
+iptables -A CI-JOBS-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -A CI-JOBS-IN -p icmp --icmp-type echo-request -j ACCEPT
+if [[ -n "$BRIDGE_IP" ]]; then
+  iptables -A CI-JOBS-IN -i docker0 -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT
+fi
+iptables -A CI-JOBS-IN -j DROP
+ensure INPUT -i docker0 -m comment --comment "$TAG" -j CI-JOBS-IN
+ensure INPUT -i 'br-+' -m comment --comment "$TAG" -j CI-JOBS-IN
+
+log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT})"
+__SIC_EOF__
+chmod 755 "$R/runner/scripts/ci-job-isolation.sh"
+
+install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-disk-guard.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Emergency cleanup when the root filesystem crosses HARD_LIMIT percent.
@@ -9312,6 +10620,86 @@ if (( used >= HARD_LIMIT )); then
 fi
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/runner-disk-guard.sh"
+
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
+# The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
+# without this they would never be updated. Docker is restarted first, then gitlab-runner; both must be active
+# afterwards. The result is one line in /var/log/runner-engine-update.log, which health reads.
+# Env: DRY_RUN=1 shows the plan only.
+set -Eeuo pipefail
+
+LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
+DRY_RUN="${DRY_RUN:-0}"
+PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
+
+note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
+  exit 0
+fi
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+exec 9>/run/runner-engine-update.lock
+flock -n 9 || { note "SKIP another update is running"; exit 0; }
+
+# A docker error is not "no jobs": updating then could kill running jobs.
+if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+  note "SKIP docker does not answer, cannot tell whether jobs run"
+  exit 0
+fi
+if [[ -n "$jobs" ]]; then
+  note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
+  exit 0
+fi
+
+installed=()
+if command -v dnf >/dev/null 2>&1; then
+  for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
+  upgrade() { dnf -y -q upgrade "${installed[@]}"; }
+  pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
+elif command -v apt-get >/dev/null 2>&1; then
+  for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
+  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "${installed[@]}"; }
+  pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
+else
+  note "FAIL no supported package manager"
+  exit 1
+fi
+(( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
+
+if ! pending; then
+  note "OK nothing to upgrade (${installed[*]})"
+  exit 0
+fi
+if [[ "$DRY_RUN" == 1 ]]; then
+  note "DRY-RUN would upgrade ${installed[*]}"
+  exit 0
+fi
+
+before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
+if ! upgrade >>"$LOG" 2>&1; then
+  note "FAIL package upgrade failed, see ${LOG}"
+  exit 1
+fi
+systemctl restart docker
+sleep 5
+systemctl restart gitlab-runner
+sleep 5
+bad=""
+for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
+# The isolation rules live in iptables; reapply them after the Docker restart.
+if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+if [[ -n "$bad" ]]; then
+  note "FAIL not active after the upgrade:${bad}; was: ${before}"
+  exit 1
+fi
+note "OK upgraded ${installed[*]}; was: ${before}"
+__SIC_EOF__
+chmod 755 "$R/runner/scripts/runner-engine-update.sh"
 
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-weekly-cleanup.sh" <<'__SIC_EOF__'
@@ -9466,6 +10854,25 @@ __SIC_EOF__
 chmod 644 "$R/runner/systemd/ci-image-prewarm.timer"
 
 install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/ci-job-isolation.service" <<'__SIC_EOF__'
+[Unit]
+Description=Block CI jobs from the cloud metadata service and host services
+After=docker.service network-online.target
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ci-job-isolation.sh
+ExecReload=/usr/local/bin/ci-job-isolation.sh
+
+[Install]
+WantedBy=multi-user.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/ci-job-isolation.service"
+
+install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/runner-disk-guard.service" <<'__SIC_EOF__'
 [Unit]
 Description=Emergency disk cleanup when usage is high
@@ -9490,6 +10897,34 @@ OnUnitActiveSec=30m
 WantedBy=timers.target
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/runner-disk-guard.timer"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
+[Unit]
+Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/runner-engine-update.sh
+Nice=10
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/runner-engine-update.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/runner-engine-update.timer" <<'__SIC_EOF__'
+[Unit]
+Description=Upgrade Docker CE and GitLab Runner every Sunday
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/runner-engine-update.timer"
 
 install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/runner-weekly-cleanup.service" <<'__SIC_EOF__'
@@ -10901,7 +12336,7 @@ check_services() {
   done
 
   local t next
-  for t in runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+  for t in runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer ci-image-prewarm.timer; do
     is_runner || break
     unit_exists "$t" || continue
     if systemctl is-active --quiet "$t" 2>/dev/null; then
@@ -10930,6 +12365,19 @@ check_services() {
       warn "${s%.service}: last run ${started}, result ${result} (journalctl -u ${s})"
     fi
   done
+
+  if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
+    local upd
+    upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
+    case "$upd" in
+      *" FAIL "*) warn "Docker/GitLab Runner update: ${upd}" ;;
+      "") ;;
+      *) info "Docker/GitLab Runner update: ${upd}" ;;
+    esac
+  fi
+  if is_runner && unit_exists ci-job-isolation.service; then
+    if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
+  fi
 
   if is_runner && unit_exists ci-image-prewarm.service; then
     local summary noarm failed_n
@@ -11537,6 +12985,45 @@ __SIC_EOF__
 chmod 755 "$R/common/health"
 
 install -d "$R/common"
+cat > "$R/common/pin-repo-key.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Download a package repository signing key and install it only if it has the expected fingerprint.
+# Usage: pin-repo-key URL FINGERPRINT DEST
+# The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
+# keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
+# On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+set -Eeuo pipefail
+
+if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
+  echo "Usage: $0 URL FINGERPRINT DEST" >&2
+  exit 2
+fi
+url="$1"
+want=$(printf '%s' "$2" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
+dest="$3"
+[[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
+command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+chmod 0700 "$work"
+curl -fsSL --max-time 60 "$url" -o "${work}/key"
+export GNUPGHOME="${work}/gnupg"
+install -d -m 0700 "$GNUPGHOME"
+gpg --batch --quiet --import "${work}/key" 2>/dev/null
+if ! gpg --batch --with-colons --list-keys 2>/dev/null \
+     | awk -F: '$1 == "pub" { g = 1; next } $1 == "fpr" && g { print $10; g = 0 }' | grep -qx "$want"; then
+  echo "pin-repo-key: ${url} has no key with fingerprint ${want}; not installed" >&2
+  exit 1
+fi
+gpg --batch --export --armor "$want" > "${work}/out" 2>/dev/null
+[[ -s "${work}/out" ]] || { echo "pin-repo-key: export failed" >&2; exit 1; }
+install -D -m 0644 "${work}/out" "$dest"
+echo "pin-repo-key: ${dest} installed (${want})"
+__SIC_EOF__
+chmod 755 "$R/common/pin-repo-key.sh"
+
+install -d "$R/common"
 cat > "$R/common/shell-history.sh" <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
@@ -11632,7 +13119,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 43"
+echo "files written to $R: 51"
 INSTALL
 sudo bash /root/server-init-config/runner/install/update.sh
 ````
@@ -11926,9 +13413,144 @@ __SIC_EOF__
 chmod 755 "$R/runner/install/grafana-domain.sh"
 
 install -d "$R/runner/install"
+cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
+# Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
+#
+# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T). Services of the host
+# (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
+# server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
+# stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
+#
+# Docker keeps working: on Rocky firewalld puts docker0 into its own docker zone when Docker starts after firewalld;
+# if Docker was already running, this script says so and Docker needs a restart while no job runs. On Debian
+# ufw does not touch the chains Docker manages. Jobs are kept away from the host by ci-job-isolation.sh.
+# fail2ban: sshd jail on the journal, 5 tries in 10 minutes, 1 hour ban.
+set -Eeuo pipefail
+
+JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"   # overridable for tests
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0   enables firewalld (Rocky) or ufw (Debian) with SSH allowed, plus the fail2ban sshd jail"
+  exit 0
+fi
+[[ $EUID -eq 0 ]] || die "run as root"
+
+ssh_ports() {
+  { echo 22; sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'; } | sort -un
+}
+
+put_jail() {
+  local banaction="$1" tmp
+  tmp=$(mktemp)
+  {
+    if [[ -n "$banaction" ]]; then
+      printf '[DEFAULT]\nbanaction = %s\nbanaction_allports = %s[type=allports]\n\n' "$banaction" "$banaction"
+    fi
+    printf '[sshd]\nenabled  = true\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n'
+  } > "$tmp"
+  install -D -m 0644 "$tmp" "$JAIL_FILE"
+  rm -f "$tmp"
+  if command -v restorecon >/dev/null 2>&1; then restorecon "$JAIL_FILE" || true; fi
+}
+
+firewalld_setup() {
+  local running=0 p
+  command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
+  systemctl is-active --quiet firewalld && running=1
+  # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
+  fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
+  fw --zone=public --query-service=ssh >/dev/null 2>&1 || fw --zone=public --add-service=ssh >/dev/null || die "cannot add ssh to the public zone"
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || fw --zone=public --add-port="${p}/tcp" >/dev/null || die "cannot add port ${p}"
+  done
+  # Lockout guard: the saved rules must allow SSH before the firewall runs.
+  fw --zone=public --query-service=ssh >/dev/null 2>&1 || die "ssh missing from the saved public zone; firewall left as it was"
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || die "port ${p} missing from the saved public zone; firewall left as it was"
+  done
+  if (( running )); then firewall-cmd --reload >/dev/null || die "firewalld reload failed"; else systemctl enable --now firewalld || die "firewalld did not start"; fi
+  systemctl enable firewalld >/dev/null 2>&1 || true
+  if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then
+    systemctl stop firewalld
+    die "ssh not allowed after start; firewalld stopped"
+  fi
+  for p in $(ssh_ports); do
+    [[ "$p" == 22 ]] && continue
+    if ! firewall-cmd --zone=public --query-port="${p}/tcp" >/dev/null; then
+      systemctl stop firewalld
+      die "ssh port ${p} not allowed after start; firewalld stopped"
+    fi
+  done
+  log "firewalld: active, public zone: $(firewall-cmd --zone=public --list-services) $(firewall-cmd --zone=public --list-ports)"
+  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && ! firewall-cmd --get-zones | tr ' ' '\n' | grep -qx docker; then
+    log "NOTE: Docker was running before firewalld; restart it while no CI job runs so it joins the firewalld docker zone: systemctl restart docker"
+  fi
+}
+
+ufw_setup() {
+  local p o was_active=0
+  command -v ufw >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get install -y -q ufw >/dev/null || die "cannot install ufw"; }
+  o=$(ufw status 2>/dev/null) || true
+  if grep -q '^Status: active' <<<"$o"; then was_active=1; fi
+  for p in $(ssh_ports); do ufw allow "${p}/tcp" >/dev/null || die "cannot allow ${p}/tcp"; done
+  # Lockout guard: every SSH port must be in the saved rules before ufw is enabled.
+  o=$(ufw show added 2>/dev/null) || true
+  for p in $(ssh_ports); do
+    grep -qE "^ufw (allow|limit) (in )?${p}/tcp([[:space:]]|\$)" <<<"$o" || die "${p}/tcp missing from the saved ufw rules; ufw left as it was"
+  done
+  if (( ! was_active )); then
+    ufw default deny incoming >/dev/null
+    ufw default allow outgoing >/dev/null
+    ufw --force enable >/dev/null
+  fi
+  systemctl enable ufw >/dev/null 2>&1 || true
+  o=$(ufw status 2>/dev/null) || true
+  for p in $(ssh_ports); do
+    if ! grep -qE "^${p}/tcp([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|LIMIT)" <<<"$o"; then
+      if (( ! was_active )); then ufw disable >/dev/null 2>&1 || true; fi
+      die "ssh port ${p} not allowed in the running ufw; ufw disabled again"
+    fi
+  done
+  log "ufw: $(ufw status | head -1); allowed: $(ssh_ports | tr '\n' ' ')"
+}
+
+if command -v dnf >/dev/null 2>&1; then
+  dnf -y -q install epel-release >/dev/null 2>&1 || true
+  dnf -y -q install fail2ban-server fail2ban-firewalld >/dev/null 2>&1 || log "WARN: fail2ban not available (EPEL?), sshd jail skipped"
+  firewalld_setup
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    put_jail ""
+    systemctl enable --now fail2ban >/dev/null && systemctl restart fail2ban
+  fi
+elif command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q fail2ban >/dev/null 2>&1 || log "WARN: fail2ban not installed, sshd jail skipped"
+  ufw_setup
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    put_jail nftables
+    systemctl enable --now fail2ban >/dev/null && systemctl restart fail2ban
+  fi
+else
+  die "no supported package manager"
+fi
+if command -v fail2ban-client >/dev/null 2>&1; then
+  log "fail2ban: $(fail2ban-client status 2>/dev/null | tr '\n' ' ' || true)"
+fi
+log "OK: host firewall on. If you lock yourself out, use the Hetzner web console: systemctl stop firewalld (or: ufw disable)"
+__SIC_EOF__
+chmod 755 "$R/runner/install/host-firewall.sh"
+
+install -d "$R/runner/install"
 cat > "$R/runner/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers.
+# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers,
+# the job isolation rules (CI jobs cannot reach the metadata service or host services) and the weekly Docker/GitLab Runner update.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
@@ -11942,19 +13564,21 @@ require_root
 
 install -m 0755 "$REPO_ROOT/common/health" /usr/local/bin/health
 restorecon_if /usr/local/bin/health
-for f in runner-weekly-cleanup.sh runner-disk-guard.sh; do
+for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
 
 systemctl daemon-reload
-systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer
+systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
+# Needs Docker (the DOCKER-USER chain). On a host without it the unit is enabled and applies at the next Docker start.
+if systemctl is-active --quiet docker; then systemctl enable --now ci-job-isolation.service; else systemctl enable ci-job-isolation.service; fi
 
 DRY_RUN=1 /usr/local/bin/runner-weekly-cleanup.sh >/dev/null
 systemctl list-timers 'runner-*' --no-pager
@@ -12046,6 +13670,90 @@ journalctl -t ci-image-prewarm --since "-30min" --no-pager -o cat | grep -E 'OK|
 log "NO ARM lines: re-mirror those tags with crane copy (see runner/ci/mirror-images.yml)"
 __SIC_EOF__
 chmod 755 "$R/runner/install/image-prewarm.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Per-job CPU, memory, swap, process and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml,
+# so one job cannot take the whole host. Backs up the file, changes only these keys, and is safe to rerun.
+# A value you already set in config.toml is kept unless you pass it in the environment. Swap follows memory
+# (no swap) unless JOB_MEMORY_SWAP is given or the file already has a memory_swap.
+#
+# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB leave about 1 GB for
+# the host and its stacks. A bigger host: raise JOB_MEMORY and JOB_CPUS and keep concurrent x limit below the hardware.
+# A job that needs more fails with an out-of-memory kill (exit 137) instead of freezing the host.
+# gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
+#
+# Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
+#      JOB_PIDS (default 2048), JOB_SHM_SIZE in bytes (default 268435456)
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "$0")/../../common/lib.sh"
+
+CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+require_root
+[[ -f "$CFG" ]] && grep -q '^[[:space:]]*\[runners.docker\]' "$CFG" || die "no [runners.docker] section in ${CFG}: register the runner first (runner/install/register-runner.sh)"
+
+mem_default="${JOB_MEMORY:-1536m}"
+[[ "$mem_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY: ${mem_default} (for example 1536m)"
+swap_default="${JOB_MEMORY_SWAP:-$mem_default}"
+[[ "$swap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY_SWAP: ${swap_default}"
+cpus_default="${JOB_CPUS:-1.5}"
+[[ "$cpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_CPUS: ${cpus_default}"
+pids_default="${JOB_PIDS:-2048}"
+[[ "$pids_default" =~ ^[0-9]+$ ]] || die "invalid JOB_PIDS: ${pids_default}"
+shm_default="${JOB_SHM_SIZE:-268435456}"
+[[ "$shm_default" =~ ^[0-9]+$ ]] || die "invalid JOB_SHM_SIZE: ${shm_default}"
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+# FORCE_<key>=1 when the environment gave the value: it then replaces what config.toml has.
+awk -v mem="\"${mem_default}\"" -v swap="\"${swap_default}\"" -v cpus="\"${cpus_default}\"" -v pids="$pids_default" -v shm="$shm_default" \
+    -v fmem="${JOB_MEMORY:+1}" -v fswap="${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" -v fcpus="${JOB_CPUS:+1}" -v fpids="${JOB_PIDS:+1}" -v fshm="${JOB_SHM_SIZE:+1}" '
+  function flush(   k) {
+    if (!insec) return
+    # Without its own value, swap follows the memory limit of this section (swap below memory is rejected by Docker).
+    if (!seen[2] && curmem != "") vals[2] = curmem
+    for (k = 1; k <= 5; k++) if (!seen[k]) print "    " names[k] " = " vals[k]
+    insec = 0
+  }
+  BEGIN {
+    names[1] = "memory";      vals[1] = mem;  force[1] = fmem
+    names[2] = "memory_swap"; vals[2] = swap; force[2] = fswap
+    names[3] = "cpus";        vals[3] = cpus; force[3] = fcpus
+    names[4] = "pids_limit";  vals[4] = pids; force[4] = fpids
+    names[5] = "shm_size";    vals[5] = shm;  force[5] = fshm
+  }
+  /^[[:space:]]*\[/ { flush() }
+  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; split("", seen); print; next }
+  insec {
+    for (k = 1; k <= 5; k++) {
+      if ($0 ~ "^[[:space:]]*" names[k] "[[:space:]]*=") {
+        seen[k] = 1
+        if (k == 1) { curmem = $0; sub(/^[^=]*=[[:space:]]*/, "", curmem); sub(/[[:space:]]*#.*$/, "", curmem) }
+        if (force[k]) { if (k == 1) curmem = vals[1]; print "    " names[k] " = " vals[k]; next }
+      }
+    }
+  }
+  { print }
+  END { flush() }
+' "$CFG" > "$tmp"
+
+if cmp -s "$tmp" "$CFG"; then
+  log "job limits already set in ${CFG}"
+else
+  backup "$CFG"
+  cat "$tmp" > "$CFG"
+  log "job limits written to ${CFG}"
+fi
+awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|pids_limit|shm_size)[[:space:]]*=/' "$CFG"
+__SIC_EOF__
+chmod 755 "$R/runner/install/job-limits.sh"
 
 install -d "$R/runner/install"
 cat > "$R/runner/install/lock-root.sh" <<'__SIC_EOF__'
@@ -12316,6 +14024,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
      DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
+Per-job limits (memory 1536m, cpus 1.5, pids 2048, shm 256 MB) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
 USAGE
@@ -12346,6 +14055,8 @@ if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
 chmod 600 "$CFG"
+# Per-job CPU, memory and process limits (runner/install/job-limits.sh); the runner reloads config.toml by itself.
+bash "$(dirname "$0")/job-limits.sh" >/dev/null || log "WARN: job limits not set; run runner/install/job-limits.sh"
 runner_cfg_owner
 systemctl restart gitlab-runner
 sleep 3
@@ -12701,9 +14412,10 @@ update_os() {
 script_path() { if [[ "$1" == health ]]; then echo common/health; else echo "runner/scripts/$1"; fi; }
 
 update_host_tools() {
-  local f u existed units_changed=0 cleanup_changed=0
-  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh)
-  local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer)
+  local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
+  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -12721,6 +14433,9 @@ update_host_tools() {
       CHANGED+=("scripts/${f}")
       if [[ "$f" == runner-weekly-cleanup.sh ]]; then
         cleanup_changed=1
+      fi
+      if [[ "$f" == ci-job-isolation.sh ]]; then
+        isolation_changed=1
       fi
     fi
   done
@@ -12753,6 +14468,15 @@ update_host_tools() {
         run systemctl restart "$u"
       fi
     done
+  fi
+
+  # The isolation rules live in iptables: apply them when the script is new or changed and Docker is up.
+  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/dev/null; then
+    if ! systemctl is-enabled --quiet ci-job-isolation.service 2>/dev/null; then
+      run systemctl enable --now ci-job-isolation.service
+    elif (( isolation_changed )); then
+      run systemctl restart ci-job-isolation.service
+    fi
   fi
 
   if (( cleanup_changed && ! DRYRUN )); then
@@ -13433,6 +15157,71 @@ __SIC_EOF__
 chmod 755 "$R/runner/scripts/ci-image-prewarm.sh"
 
 install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/ci-job-isolation.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Keep CI job containers away from the cloud metadata service and from services on the host.
+# Run at boot and after every Docker start by ci-job-isolation.service; safe to rerun any time.
+#
+#   DOCKER-USER   drops traffic to 169.254.169.254 (Hetzner metadata: server data, user-data, tokens).
+#   INPUT         traffic from docker0 and the br-* bridges to the host itself goes through the chain CI-JOBS-IN:
+#                 only replies, ping and the npm cache (docker0 IP, port 4873) are let in, the rest is dropped.
+#
+# Not affected: internet access of jobs, the Docker Hub cache (Docker pulls through the mirror on 127.0.0.1:5000,
+# jobs do not), traffic between containers of one job, and the host-network stacks (monitoring, logging, caches).
+# Only IPv4 is handled. Remove the rules: systemctl disable --now ci-job-isolation; then iptables -F CI-JOBS-IN
+# and delete the two "ci-job-isolation" rules shown by iptables -S.
+set -Eeuo pipefail
+
+META_IP="${META_IP:-169.254.169.254}"
+NPM_PORT="${NPM_PORT:-4873}"
+TAG=ci-job-isolation
+
+log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$*"; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0   blocks CI jobs from ${META_IP} and from host services (except the npm cache on the docker0 IP, port ${NPM_PORT})"
+  exit 0
+fi
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+command -v iptables >/dev/null 2>&1 || { log "iptables not found, nothing applied"; exit 1; }
+
+# Docker creates DOCKER-USER when it starts; wait for it after a boot.
+for _ in $(seq 1 30); do
+  if iptables -n -L DOCKER-USER >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+iptables -n -L DOCKER-USER >/dev/null 2>&1 || { log "chain DOCKER-USER does not exist (is Docker running?), nothing applied"; exit 1; }
+
+# Insert a rule at the top of a chain unless it is there already.
+ensure() {
+  local chain="$1"
+  shift
+  iptables -C "$chain" "$@" 2>/dev/null || iptables -I "$chain" 1 "$@"
+}
+
+ensure DOCKER-USER -d "$META_IP" -m comment --comment "$TAG" -j DROP
+
+BRIDGE_IP="${BRIDGE_IP:-}"
+if [[ -z "$BRIDGE_IP" ]] && command -v ip >/dev/null 2>&1; then
+  BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
+fi
+
+iptables -N CI-JOBS-IN 2>/dev/null || true
+iptables -F CI-JOBS-IN
+iptables -A CI-JOBS-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -A CI-JOBS-IN -p icmp --icmp-type echo-request -j ACCEPT
+if [[ -n "$BRIDGE_IP" ]]; then
+  iptables -A CI-JOBS-IN -i docker0 -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT
+fi
+iptables -A CI-JOBS-IN -j DROP
+ensure INPUT -i docker0 -m comment --comment "$TAG" -j CI-JOBS-IN
+ensure INPUT -i 'br-+' -m comment --comment "$TAG" -j CI-JOBS-IN
+
+log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT})"
+__SIC_EOF__
+chmod 755 "$R/runner/scripts/ci-job-isolation.sh"
+
+install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-disk-guard.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Emergency cleanup when the root filesystem crosses HARD_LIMIT percent.
@@ -13452,6 +15241,86 @@ if (( used >= HARD_LIMIT )); then
 fi
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/runner-disk-guard.sh"
+
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
+# The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
+# without this they would never be updated. Docker is restarted first, then gitlab-runner; both must be active
+# afterwards. The result is one line in /var/log/runner-engine-update.log, which health reads.
+# Env: DRY_RUN=1 shows the plan only.
+set -Eeuo pipefail
+
+LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
+DRY_RUN="${DRY_RUN:-0}"
+PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
+
+note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
+  exit 0
+fi
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+exec 9>/run/runner-engine-update.lock
+flock -n 9 || { note "SKIP another update is running"; exit 0; }
+
+# A docker error is not "no jobs": updating then could kill running jobs.
+if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+  note "SKIP docker does not answer, cannot tell whether jobs run"
+  exit 0
+fi
+if [[ -n "$jobs" ]]; then
+  note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
+  exit 0
+fi
+
+installed=()
+if command -v dnf >/dev/null 2>&1; then
+  for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
+  upgrade() { dnf -y -q upgrade "${installed[@]}"; }
+  pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
+elif command -v apt-get >/dev/null 2>&1; then
+  for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
+  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "${installed[@]}"; }
+  pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
+else
+  note "FAIL no supported package manager"
+  exit 1
+fi
+(( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
+
+if ! pending; then
+  note "OK nothing to upgrade (${installed[*]})"
+  exit 0
+fi
+if [[ "$DRY_RUN" == 1 ]]; then
+  note "DRY-RUN would upgrade ${installed[*]}"
+  exit 0
+fi
+
+before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
+if ! upgrade >>"$LOG" 2>&1; then
+  note "FAIL package upgrade failed, see ${LOG}"
+  exit 1
+fi
+systemctl restart docker
+sleep 5
+systemctl restart gitlab-runner
+sleep 5
+bad=""
+for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
+# The isolation rules live in iptables; reapply them after the Docker restart.
+if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+if [[ -n "$bad" ]]; then
+  note "FAIL not active after the upgrade:${bad}; was: ${before}"
+  exit 1
+fi
+note "OK upgraded ${installed[*]}; was: ${before}"
+__SIC_EOF__
+chmod 755 "$R/runner/scripts/runner-engine-update.sh"
 
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-weekly-cleanup.sh" <<'__SIC_EOF__'
@@ -13606,6 +15475,25 @@ __SIC_EOF__
 chmod 644 "$R/runner/systemd/ci-image-prewarm.timer"
 
 install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/ci-job-isolation.service" <<'__SIC_EOF__'
+[Unit]
+Description=Block CI jobs from the cloud metadata service and host services
+After=docker.service network-online.target
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ci-job-isolation.sh
+ExecReload=/usr/local/bin/ci-job-isolation.sh
+
+[Install]
+WantedBy=multi-user.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/ci-job-isolation.service"
+
+install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/runner-disk-guard.service" <<'__SIC_EOF__'
 [Unit]
 Description=Emergency disk cleanup when usage is high
@@ -13630,6 +15518,34 @@ OnUnitActiveSec=30m
 WantedBy=timers.target
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/runner-disk-guard.timer"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
+[Unit]
+Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/runner-engine-update.sh
+Nice=10
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/runner-engine-update.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/runner-engine-update.timer" <<'__SIC_EOF__'
+[Unit]
+Description=Upgrade Docker CE and GitLab Runner every Sunday
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/runner-engine-update.timer"
 
 install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/runner-weekly-cleanup.service" <<'__SIC_EOF__'
@@ -15041,7 +16957,7 @@ check_services() {
   done
 
   local t next
-  for t in runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+  for t in runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer ci-image-prewarm.timer; do
     is_runner || break
     unit_exists "$t" || continue
     if systemctl is-active --quiet "$t" 2>/dev/null; then
@@ -15070,6 +16986,19 @@ check_services() {
       warn "${s%.service}: last run ${started}, result ${result} (journalctl -u ${s})"
     fi
   done
+
+  if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
+    local upd
+    upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
+    case "$upd" in
+      *" FAIL "*) warn "Docker/GitLab Runner update: ${upd}" ;;
+      "") ;;
+      *) info "Docker/GitLab Runner update: ${upd}" ;;
+    esac
+  fi
+  if is_runner && unit_exists ci-job-isolation.service; then
+    if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
+  fi
 
   if is_runner && unit_exists ci-image-prewarm.service; then
     local summary noarm failed_n
@@ -15677,6 +17606,45 @@ __SIC_EOF__
 chmod 755 "$R/common/health"
 
 install -d "$R/common"
+cat > "$R/common/pin-repo-key.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Download a package repository signing key and install it only if it has the expected fingerprint.
+# Usage: pin-repo-key URL FINGERPRINT DEST
+# The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
+# keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
+# On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+set -Eeuo pipefail
+
+if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
+  echo "Usage: $0 URL FINGERPRINT DEST" >&2
+  exit 2
+fi
+url="$1"
+want=$(printf '%s' "$2" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
+dest="$3"
+[[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
+command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+chmod 0700 "$work"
+curl -fsSL --max-time 60 "$url" -o "${work}/key"
+export GNUPGHOME="${work}/gnupg"
+install -d -m 0700 "$GNUPGHOME"
+gpg --batch --quiet --import "${work}/key" 2>/dev/null
+if ! gpg --batch --with-colons --list-keys 2>/dev/null \
+     | awk -F: '$1 == "pub" { g = 1; next } $1 == "fpr" && g { print $10; g = 0 }' | grep -qx "$want"; then
+  echo "pin-repo-key: ${url} has no key with fingerprint ${want}; not installed" >&2
+  exit 1
+fi
+gpg --batch --export --armor "$want" > "${work}/out" 2>/dev/null
+[[ -s "${work}/out" ]] || { echo "pin-repo-key: export failed" >&2; exit 1; }
+install -D -m 0644 "${work}/out" "$dest"
+echo "pin-repo-key: ${dest} installed (${want})"
+__SIC_EOF__
+chmod 755 "$R/common/pin-repo-key.sh"
+
+install -d "$R/common"
 cat > "$R/common/shell-history.sh" <<'__SIC_EOF__'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
@@ -15772,10 +17740,11 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 43"
+echo "files written to $R: 51"
 bash "$R/runner/install/users.sh" </dev/null
 bash "$R/common/admin-tools.sh" </dev/null
 bash "$R/runner/install/host-tools.sh" </dev/null
+bash "$R/runner/install/host-firewall.sh" </dev/null
 bash "$R/runner/install/registry-cache.sh" </dev/null
 bash "$R/runner/install/monitoring.sh" </dev/null
 bash "$R/runner/install/logging.sh" </dev/null
