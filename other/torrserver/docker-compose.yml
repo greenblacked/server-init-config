@@ -59,9 +59,11 @@ services:
     image: ${CADDY_IMAGE:-caddy:2.10.0@sha256:133b5eb7ef9d42e34756ba206b06d84f4e3eb308044e268e182c2747083f09de}
     container_name: torrserver-caddy
     restart: unless-stopped
+    # IPv4 only, like the sslip.io name. Without an address Docker also binds [::], where its userland proxy hides the
+    # client address (Caddy would log the bridge gateway), so fail2ban could not ban an attacker and would ban the gateway.
     ports:
-      - "${TS_HTTP_PORT:-80}:80"
-      - "${TS_PUBLIC_PORT:-8443}:${TS_PUBLIC_PORT:-8443}"
+      - "0.0.0.0:${TS_HTTP_PORT:-80}:80"
+      - "0.0.0.0:${TS_PUBLIC_PORT:-8443}:${TS_PUBLIC_PORT:-8443}"
     environment:
       TS_HOSTNAME: ${TS_HOSTNAME:-localhost}
       TS_PUBLIC_PORT: ${TS_PUBLIC_PORT:-8443}
