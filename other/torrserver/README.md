@@ -12,7 +12,7 @@ The repo is private and is not cloned on the server, and `server/bootstrap.sh` d
 git archive --format=tar HEAD:other/torrserver | ssh ops@SERVER_IP 'sudo bash -c "rm -rf /usr/local/src/torrserver.new && install -d -m 0755 /usr/local/src/torrserver.new && tar -x -C /usr/local/src/torrserver.new && rm -rf /usr/local/src/torrserver && mv /usr/local/src/torrserver.new /usr/local/src/torrserver"'
 ```
 
-Every command below runs on the server, as `ops`, in that folder (it holds `install.sh` next to the compose files it installs):
+Every command below runs on the server, as `ops` (an admin, not in the `docker` group, so Docker and journal commands use `sudo`), in that folder (it holds `install.sh` next to the compose files it installs):
 
 ```bash
 cd /usr/local/src/torrserver
@@ -99,7 +99,7 @@ TorrServer has no switch for streaming-only, so the settings are set through its
 
 DHT and PEX stay on so torrents can find peers. With upload disabled, peers may rank the server lower, so starting a stream can take a little longer.
 
-**Safety net.** `torrserver-cleanup.timer` still runs `cleanup.sh` every 3 days (output: `journalctl -u torrserver-cleanup`): it drops loaded torrents, removes torrent entries older than 3 days and deletes leftover files in `data/downloads` older than 3 days (from before the migration, or if someone turns the disk cache back on). It never touches `data/config`, the log, `credentials` or `.env`. Try it first: `sudo /opt/torrserver/cleanup.sh --dry-run`. `CLEAN_DAYS` or `--days N` change the age.
+**Safety net.** `torrserver-cleanup.timer` still runs `cleanup.sh` every 3 days (output: `sudo journalctl -u torrserver-cleanup`): it drops loaded torrents, removes torrent entries older than 3 days and deletes leftover files in `data/downloads` older than 3 days (from before the migration, or if someone turns the disk cache back on). It never touches `data/config`, the log, `credentials` or `.env`. Try it first: `sudo /opt/torrserver/cleanup.sh --dry-run`. `CLEAN_DAYS` or `--days N` change the age.
 
 ## What you get
 
@@ -133,7 +133,7 @@ data/log                                  TorrServer log
 
 ## Update
 
-Bump the version (tags: <https://github.com/YouROK/TorrServer/releases>) and, for the digest pin, resolve it from the registry (`docker buildx imagetools inspect ghcr.io/yourok/torrserver:TAG`); an empty `TS_IMAGE_DIGEST=` pins by tag only:
+Bump the version (tags: <https://github.com/YouROK/TorrServer/releases>) and, for the digest pin, resolve it from the registry (`sudo docker buildx imagetools inspect ghcr.io/yourok/torrserver:TAG`); an empty `TS_IMAGE_DIGEST=` pins by tag only:
 
 ```bash
 sudo TS_VERSION=MatriX.148 TS_IMAGE_DIGEST=sha256:... ./install.sh
@@ -148,13 +148,13 @@ sudo ./install.sh --uninstall --purge   # also deletes /opt/torrserver and the C
 
 ## Troubleshooting
 
-- `sudo ./install.sh --status`, `docker logs torrserver`, `docker inspect -f '{{.State.Health.Status}}' torrserver`, `docker compose -f /opt/torrserver/docker-compose.yml config`.
-- Certificate not issued: `docker logs torrserver-caddy`. Check that the name resolves to the server (`getent hosts 1-2-3-4.sslip.io`), TCP 80 is reachable from the internet (Hetzner Cloud Firewall too) and the Let's Encrypt limits above.
+- `sudo ./install.sh --status`, `sudo docker logs torrserver`, `sudo docker inspect -f '{{.State.Health.Status}}' torrserver`, `sudo docker compose -f /opt/torrserver/docker-compose.yml config`.
+- Certificate not issued: `sudo docker logs torrserver-caddy`. Check that the name resolves to the server (`getent hosts 1-2-3-4.sslip.io`), TCP 80 is reachable from the internet (Hetzner Cloud Firewall too) and the Let's Encrypt limits above.
 - Banned yourself: `sudo fail2ban-client set torrserver-caddy unbanip YOUR.IP`.
 - 401 with the right password: rerun `sudo ./install.sh` (rewrites `accs.db` from `credentials`).
 - Stopping takes about 10 seconds: `TS_DONTKILL=1` makes TorrServer ignore SIGTERM, so Docker waits for the grace period and then kills it.
-- SELinux (EL, Fedora, openSUSE): bind mounts use `:z`. Denials show in `ausearch -m avc -ts recent`.
-- VPN will not start: `journalctl -u wg-quick@wg0`; the kernel needs the `wireguard` module (in all current kernels; not available inside containers or some OpenVZ/LXC guests).
+- SELinux (EL, Fedora, openSUSE): bind mounts use `:z`. Denials show in `sudo ausearch -m avc -ts recent`.
+- VPN will not start: `sudo journalctl -u wg-quick@wg0`; the kernel needs the `wireguard` module (in all current kernels; not available inside containers or some OpenVZ/LXC guests).
 
 ## Unverified
 
