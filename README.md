@@ -150,7 +150,7 @@ Stop a stack without deleting data: `sudo docker compose -f /opt/monitoring/dock
 | `server/` | plain servers: `server-init-*.sh` per OS, `cloud-init/`, maintenance tools (`srv`, update, cleanup, notify, disk guard), `bootstrap.sh`, `ai/`. See [server/README.md](server/README.md). |
 | `common/` | shared: `health`, `shell-history.sh`, `lib.sh`, `admin-tools.sh`, security tools. See [common/README.md](common/README.md). |
 | `tools/` | `render-cloud-init.py`, `render-paste-commands.py` (both with `--check`), `test-cloud-init.py`, `test-server-tools.sh` |
-| `other/` | standalone extras; `other/torrserver/` installs TorrServer in Docker for streaming only: HTTPS with login on a random port (sslip.io, no domain needed), or localhost, or optional WireGuard (see its README) |
+| `other/` | standalone extras, not copied by the bootstrap scripts (each README says how to get it onto a server); `other/torrserver/` installs TorrServer in Docker for streaming only: HTTPS with login on a random port (sslip.io, no domain needed), or localhost, or optional WireGuard (see its README) |
 
 ### Supported systems
 

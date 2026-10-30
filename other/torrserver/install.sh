@@ -432,16 +432,34 @@ apply_settings() {
 
 # ---------- credentials ----------
 
+# The container user (uid ${TS_UID}) owns data/ and can replace data/config, downloads or torrents with a symlink. Root
+# (install -d chowns, mktemp and mv write) must never follow one: refuse when any of them is not a plain directory
+# inside data/ itself.
+check_data_tree() {
+  local d real base
+  [[ -e "$DATA" || -L "$DATA" ]] || return 0
+  [[ ! -L "$DATA" ]] || die "${DATA} is a symlink; refusing to continue (remove it after checking where it points)"
+  base=$(realpath -e -- "$DATA") && [[ "$base" == "$(realpath -m -- "$TS_DIR")/data" ]] || die "${DATA} resolves outside ${TS_DIR}/data; refusing to continue"
+  for d in config downloads torrents; do
+    [[ -e "${DATA}/${d}" || -L "${DATA}/${d}" ]] || continue
+    [[ ! -L "${DATA}/${d}" ]] || die "${DATA}/${d} is a symlink (the container user can create one); refusing to continue as root. Check where it points, remove it, rerun"
+    real=$(realpath -e -- "${DATA}/${d}")
+    [[ "$real" == "${base}/${d}" ]] || die "${DATA}/${d} resolves outside ${DATA} (${real}); refusing to continue"
+  done
+}
+
 write_accs() { # accs.db: {"user":"password"}, readable by the container user only
   local user pass tmp
   user=$(grep -E '^TS_USER=' "$CREDS" | head -n1 | cut -d= -f2-)
   pass=$(grep -E '^TS_PASS=' "$CREDS" | head -n1 | cut -d= -f2-)
-  tmp=$(mktemp "${DATA}/config/.accs.XXXXXX")
+  check_data_tree
+  # Staged in the root-owned install dir, moved into config/ only after the check above.
+  tmp=$(mktemp "${TS_DIR}/.accs.XXXXXX")
   # Through the environment, not argv: /proc/<pid>/cmdline is world readable, environ is not.
   TS_U="$user" TS_P="$pass" jq -nc '{(env.TS_U): env.TS_P}' > "$tmp"
   chown "${TS_UID}:${TS_GID}" "$tmp"; chmod 600 "$tmp"
   if [[ -f "${DATA}/config/accs.db" ]] && cmp -s "$tmp" "${DATA}/config/accs.db"; then rm -f "$tmp"; return 1; fi
-  mv "$tmp" "${DATA}/config/accs.db"
+  mv -T "$tmp" "${DATA}/config/accs.db"
 }
 
 # Caddy login in front of TorrServer (public mode). TorrServer leaves /play, /subs, /playlist, /stream
@@ -754,6 +772,7 @@ do_install() {
 
   log "installing TorrServer ${TS_VERSION} into ${TS_DIR} (mode: ${mode})"
   install -d -m 0755 -o root -g root "$TS_DIR"
+  check_data_tree
   install -d -m 0750 -o "$TS_UID" -g "$TS_GID" "$DATA" "${DATA}/config" "${DATA}/downloads" "${DATA}/torrents"
   [[ -f "$ENVF" ]] || { (umask 077; : > "$ENVF"); }
   chmod 600 "$ENVF"

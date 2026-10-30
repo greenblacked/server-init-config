@@ -4,6 +4,20 @@ Installs [TorrServer](https://github.com/YouROK/TorrServer) (image `ghcr.io/your
 
 Works on Rocky/Alma/CentOS Stream 10, Fedora 44, Debian 13, Ubuntu 26.04 and openSUSE 16. Docker Engine with the compose plugin must already be installed (the script stops with a clear message if not). It installs `curl`, `jq` and `openssl` if they are missing.
 
+## Get it onto the server
+
+The repo is private and is not cloned on the server, and `server/bootstrap.sh` does not copy `other/`. Copy only this folder, once and again for every new version. On your laptop, in the repo root (needs SSH access as `ops`):
+
+```bash
+git archive --format=tar HEAD:other/torrserver | ssh ops@SERVER_IP 'sudo bash -c "rm -rf /usr/local/src/torrserver.new && install -d -m 0755 /usr/local/src/torrserver.new && tar -x -C /usr/local/src/torrserver.new && rm -rf /usr/local/src/torrserver && mv /usr/local/src/torrserver.new /usr/local/src/torrserver"'
+```
+
+Every command below runs on the server, as `ops`, in that folder (it holds `install.sh` next to the compose files it installs):
+
+```bash
+cd /usr/local/src/torrserver
+```
+
 ```bash
 sudo ./install.sh              # public HTTPS with a login on a random port; prints the URL and the password once
 sudo ./install.sh --status     # mode, URL, port, devices
@@ -111,7 +125,7 @@ data/log                                  TorrServer log
 
 ## Security model
 
-- **TorrServer itself is never published on the internet.** The container port is always `127.0.0.1:8090` (plus the VPN address in vpn mode). Docker's published ports bypass firewalld and ufw, so the bind address is the control that counts. In public mode only Caddy's ports are published.
+- **TorrServer itself is never published on the internet.** The container port is always `127.0.0.1:8090` (plus the VPN address in vpn mode). Docker's published ports bypass firewalld and ufw, so the bind address is the control that counts. In public mode only Caddy's ports are published. They are published on IPv4 only (`0.0.0.0`), matching the IPv4-only sslip.io name: over IPv6 Docker's proxy hides the client address, so fail2ban could not tell clients apart. Nothing listens on IPv6; reach the service by its IPv4 name.
 - **Login.** TorrServer keeps users in `data/config/accs.db`, a JSON object `{"user":"password"}` read at start (plain text; this is how TorrServer works, see `server/web/auth/auth.go`). The file is owned by the container user, mode 0600, in a 0750 directory. If it is missing, TorrServer answers 401 to everything. `/echo` (version string) answers without a login and is what the healthcheck uses.
 - **Routes TorrServer leaves open.** Its own login does not cover `/play/:hash/:id`, `/subs/:hash/:id`, `/playlist?hash=`, `/stream` with `play` or `m3u` for a torrent already loaded, and `/swagger/*` (checked in `server/web/api/route.go`). They need a known infohash, but on the internet they would let anyone who knows one check whether the server holds it and stream it on your bandwidth. That is why Caddy asks for the same login (HTTP basic auth, bcrypt hash) on every path except `/echo` and passes the Authorization header on. Unauthenticated `/play/<hash>/1`, `/playlist` and `/swagger` through Caddy answer 401.
 - **Firewall changes are additive and recorded.** Only if firewalld or ufw is active, no reload, SSH rules are never read for change or touched. Every rule the script adds is written to `/opt/torrserver/.firewall-added`; leaving a mode or `--uninstall` removes exactly those. Rules that already existed are left alone.
