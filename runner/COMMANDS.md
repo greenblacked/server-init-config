@@ -4742,7 +4742,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
      DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
-Per-job limits (memory 1536m, cpus 1.5, pids 2048, shm 256 MB) are added to config.toml; see runner/install/job-limits.sh.
+Per-job limits (memory 1536m, cpus 1.5, shm 256 MB, services 384m, and a ci-jobs.slice with a process and memory ceiling) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
 USAGE
@@ -4792,18 +4792,27 @@ chmod 755 "$R/runner/install/register-runner.sh"
 install -d "$R/runner/install"
 cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Per-job CPU, memory, swap, process and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml,
-# so one job cannot take the whole host. Backs up the file, changes only these keys, and is safe to rerun.
-# A value you already set in config.toml is kept unless you pass it in the environment. Swap follows memory
-# (no swap) unless JOB_MEMORY_SWAP is given or the file already has a memory_swap.
+# Per-job CPU, memory, swap and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml, plus a systemd
+# slice (ci-jobs.slice) that caps the process count and, optionally, the memory of ALL job containers together, so
+# one job cannot take the whole host. The limits cover the build container and its `services:` containers (postgres,
+# redis, ...). Backs up the file, changes only these keys, and is safe to rerun. A value you already set in
+# config.toml is kept unless you pass it in the environment. Swap follows memory (no swap) unless JOB_MEMORY_SWAP
+# (JOB_SERVICE_MEMORY_SWAP) is given or the file already has a memory_swap (service_memory_swap).
 #
-# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB leave about 1 GB for
-# the host and its stacks. A bigger host: raise JOB_MEMORY and JOB_CPUS and keep concurrent x limit below the hardware.
-# A job that needs more fails with an out-of-memory kill (exit 137) instead of freezing the host.
+# GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
+# together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
+# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+#
+# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
+# and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
+# JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
+# out-of-memory kill (exit 137) instead of freezing the host.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
-#      JOB_PIDS (default 2048), JOB_SHM_SIZE in bytes (default 268435456)
+#      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
+#      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
+#      JOBS_MEMORY_MAX (default 3g)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -4811,7 +4820,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root
@@ -4823,38 +4832,74 @@ swap_default="${JOB_MEMORY_SWAP:-$mem_default}"
 [[ "$swap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY_SWAP: ${swap_default}"
 cpus_default="${JOB_CPUS:-1.5}"
 [[ "$cpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_CPUS: ${cpus_default}"
-pids_default="${JOB_PIDS:-2048}"
-[[ "$pids_default" =~ ^[0-9]+$ ]] || die "invalid JOB_PIDS: ${pids_default}"
 shm_default="${JOB_SHM_SIZE:-268435456}"
 [[ "$shm_default" =~ ^[0-9]+$ ]] || die "invalid JOB_SHM_SIZE: ${shm_default}"
+smem_default="${JOB_SERVICE_MEMORY:-384m}"
+[[ "$smem_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_SERVICE_MEMORY: ${smem_default}"
+sswap_default="${JOB_SERVICE_MEMORY_SWAP:-$smem_default}"
+[[ "$sswap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_SERVICE_MEMORY_SWAP: ${sswap_default}"
+scpus_default="${JOB_SERVICE_CPUS:-0.5}"
+[[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
+tasks_max="${JOBS_TASKS_MAX:-4096}"
+[[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
+mem_max="${JOBS_MEMORY_MAX-3g}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
 
+# The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
+slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"
+slice_tmp=$(mktemp)
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-# FORCE_<key>=1 when the environment gave the value: it then replaces what config.toml has.
-awk -v mem="\"${mem_default}\"" -v swap="\"${swap_default}\"" -v cpus="\"${cpus_default}\"" -v pids="$pids_default" -v shm="$shm_default" \
-    -v fmem="${JOB_MEMORY:+1}" -v fswap="${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" -v fcpus="${JOB_CPUS:+1}" -v fpids="${JOB_PIDS:+1}" -v fshm="${JOB_SHM_SIZE:+1}" '
+trap 'rm -f "$tmp" "$slice_tmp"' EXIT
+{
+  echo "# Written by runner/install/job-limits.sh: ceiling for all CI job containers together."
+  echo "[Slice]"
+  echo "TasksMax=${tasks_max}"
+  if [[ -n "$mem_max" && "$mem_max" != "infinity" ]]; then echo "MemoryMax=${mem_max}"; fi
+} > "$slice_tmp"
+if ! cmp -s "$slice_tmp" "$slice" 2>/dev/null; then
+  install -m 0644 "$slice_tmp" "$slice"
+  systemctl daemon-reload 2>/dev/null || true
+  log "wrote ${slice}"
+fi
+
+# Lines: key, value, force (1 when the environment gave the value: it then replaces what config.toml has).
+# memory_swap and service_memory_swap follow their memory key when neither is set.
+specs=$(printf '%s\t%s\t%s\n' \
+  memory "\"${mem_default}\"" "${JOB_MEMORY:+1}" \
+  memory_swap "\"${swap_default}\"" "${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" \
+  cpus "\"${cpus_default}\"" "${JOB_CPUS:+1}" \
+  shm_size "${shm_default}" "${JOB_SHM_SIZE:+1}" \
+  cgroup_parent '"ci-jobs.slice"' 1 \
+  service_memory "\"${smem_default}\"" "${JOB_SERVICE_MEMORY:+1}" \
+  service_memory_swap "\"${sswap_default}\"" "${JOB_SERVICE_MEMORY_SWAP:+1}${JOB_SERVICE_MEMORY:+1}" \
+  service_cpus "\"${scpus_default}\"" "${JOB_SERVICE_CPUS:+1}" \
+  service_cgroup_parent '"ci-jobs.slice"' 1)
+awk -v specs="$specs" '
   function flush(   k) {
     if (!insec) return
     # Without its own value, swap follows the memory limit of this section (swap below memory is rejected by Docker).
-    if (!seen[2] && curmem != "") vals[2] = curmem
-    for (k = 1; k <= 5; k++) if (!seen[k]) print "    " names[k] " = " vals[k]
+    if (!seen["memory_swap"] && curmem != "") vals["memory_swap"] = curmem
+    if (!seen["service_memory_swap"] && cursmem != "") vals["service_memory_swap"] = cursmem
+    for (k = 1; k <= n; k++) if (!seen[names[k]]) print "    " names[k] " = " vals[names[k]]
     insec = 0
   }
+  function val(line,   v) { v = line; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v); return v }
   BEGIN {
-    names[1] = "memory";      vals[1] = mem;  force[1] = fmem
-    names[2] = "memory_swap"; vals[2] = swap; force[2] = fswap
-    names[3] = "cpus";        vals[3] = cpus; force[3] = fcpus
-    names[4] = "pids_limit";  vals[4] = pids; force[4] = fpids
-    names[5] = "shm_size";    vals[5] = shm;  force[5] = fshm
+    n = split(specs, lines, "\n")
+    for (i = 1; i <= n; i++) { split(lines[i], f, "\t"); names[i] = f[1]; vals[f[1]] = f[2]; force[f[1]] = f[3] }
   }
   /^[[:space:]]*\[/ { flush() }
-  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; split("", seen); print; next }
+  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; cursmem = ""; split("", seen); print; next }
   insec {
-    for (k = 1; k <= 5; k++) {
-      if ($0 ~ "^[[:space:]]*" names[k] "[[:space:]]*=") {
-        seen[k] = 1
-        if (k == 1) { curmem = $0; sub(/^[^=]*=[[:space:]]*/, "", curmem); sub(/[[:space:]]*#.*$/, "", curmem) }
-        if (force[k]) { if (k == 1) curmem = vals[1]; print "    " names[k] " = " vals[k]; next }
+    # pids_limit is not a GitLab Runner key (an older version of this script wrote it): drop it.
+    if ($0 ~ "^[[:space:]]*pids_limit[[:space:]]*=") next
+    for (k = 1; k <= n; k++) {
+      nm = names[k]
+      if ($0 ~ "^[[:space:]]*" nm "[[:space:]]*=") {
+        seen[nm] = 1
+        if (nm == "memory") curmem = val($0)
+        if (nm == "service_memory") cursmem = val($0)
+        if (force[nm]) { if (nm == "memory") curmem = vals[nm]; if (nm == "service_memory") cursmem = vals[nm]; print "    " nm " = " vals[nm]; next }
       }
     }
   }
@@ -4869,7 +4914,7 @@ else
   cat "$tmp" > "$CFG"
   log "job limits written to ${CFG}"
 fi
-awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|pids_limit|shm_size)[[:space:]]*=/' "$CFG"
+awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|shm_size|cgroup_parent|service_[a-z_]+)[[:space:]]*=/' "$CFG"
 __SIC_EOF__
 chmod 755 "$R/runner/install/job-limits.sh"
 
@@ -4881,7 +4926,7 @@ sudo DESCRIPTION=hetzner-cax11 bash /root/server-init-config/runner/install/regi
 <a id="job-limits"></a>
 ## Per-job limits
 
-Adds memory 1536m (no swap), 1.5 CPUs, 2048 processes and 256 MB /dev/shm per job to `[runners.docker]` in `config.toml` (a backup is made, values you set yourself are kept). Needs a registered runner. Change them with `JOB_MEMORY`, `JOB_CPUS`, `JOB_PIDS`, `JOB_SHM_SIZE` on the last line.
+Adds memory 1536m (no swap), 1.5 CPUs and 256 MB /dev/shm per job, smaller limits for `services:` containers, and a `ci-jobs.slice` (4096 processes, 3 GB memory for all jobs together) to `[runners.docker]` in `config.toml` (a backup is made, values you set yourself are kept). Needs a registered runner. Change them with `JOB_MEMORY`, `JOB_CPUS`, `JOB_SHM_SIZE`, `JOBS_TASKS_MAX`, `JOBS_MEMORY_MAX` on the last line.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -5077,18 +5122,27 @@ chmod 755 "$R/common/lib.sh"
 install -d "$R/runner/install"
 cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Per-job CPU, memory, swap, process and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml,
-# so one job cannot take the whole host. Backs up the file, changes only these keys, and is safe to rerun.
-# A value you already set in config.toml is kept unless you pass it in the environment. Swap follows memory
-# (no swap) unless JOB_MEMORY_SWAP is given or the file already has a memory_swap.
+# Per-job CPU, memory, swap and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml, plus a systemd
+# slice (ci-jobs.slice) that caps the process count and, optionally, the memory of ALL job containers together, so
+# one job cannot take the whole host. The limits cover the build container and its `services:` containers (postgres,
+# redis, ...). Backs up the file, changes only these keys, and is safe to rerun. A value you already set in
+# config.toml is kept unless you pass it in the environment. Swap follows memory (no swap) unless JOB_MEMORY_SWAP
+# (JOB_SERVICE_MEMORY_SWAP) is given or the file already has a memory_swap (service_memory_swap).
 #
-# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB leave about 1 GB for
-# the host and its stacks. A bigger host: raise JOB_MEMORY and JOB_CPUS and keep concurrent x limit below the hardware.
-# A job that needs more fails with an out-of-memory kill (exit 137) instead of freezing the host.
+# GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
+# together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
+# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+#
+# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
+# and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
+# JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
+# out-of-memory kill (exit 137) instead of freezing the host.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
-#      JOB_PIDS (default 2048), JOB_SHM_SIZE in bytes (default 268435456)
+#      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
+#      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
+#      JOBS_MEMORY_MAX (default 3g)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -5096,7 +5150,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root
@@ -5108,38 +5162,74 @@ swap_default="${JOB_MEMORY_SWAP:-$mem_default}"
 [[ "$swap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY_SWAP: ${swap_default}"
 cpus_default="${JOB_CPUS:-1.5}"
 [[ "$cpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_CPUS: ${cpus_default}"
-pids_default="${JOB_PIDS:-2048}"
-[[ "$pids_default" =~ ^[0-9]+$ ]] || die "invalid JOB_PIDS: ${pids_default}"
 shm_default="${JOB_SHM_SIZE:-268435456}"
 [[ "$shm_default" =~ ^[0-9]+$ ]] || die "invalid JOB_SHM_SIZE: ${shm_default}"
+smem_default="${JOB_SERVICE_MEMORY:-384m}"
+[[ "$smem_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_SERVICE_MEMORY: ${smem_default}"
+sswap_default="${JOB_SERVICE_MEMORY_SWAP:-$smem_default}"
+[[ "$sswap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_SERVICE_MEMORY_SWAP: ${sswap_default}"
+scpus_default="${JOB_SERVICE_CPUS:-0.5}"
+[[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
+tasks_max="${JOBS_TASKS_MAX:-4096}"
+[[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
+mem_max="${JOBS_MEMORY_MAX-3g}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
 
+# The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
+slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"
+slice_tmp=$(mktemp)
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-# FORCE_<key>=1 when the environment gave the value: it then replaces what config.toml has.
-awk -v mem="\"${mem_default}\"" -v swap="\"${swap_default}\"" -v cpus="\"${cpus_default}\"" -v pids="$pids_default" -v shm="$shm_default" \
-    -v fmem="${JOB_MEMORY:+1}" -v fswap="${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" -v fcpus="${JOB_CPUS:+1}" -v fpids="${JOB_PIDS:+1}" -v fshm="${JOB_SHM_SIZE:+1}" '
+trap 'rm -f "$tmp" "$slice_tmp"' EXIT
+{
+  echo "# Written by runner/install/job-limits.sh: ceiling for all CI job containers together."
+  echo "[Slice]"
+  echo "TasksMax=${tasks_max}"
+  if [[ -n "$mem_max" && "$mem_max" != "infinity" ]]; then echo "MemoryMax=${mem_max}"; fi
+} > "$slice_tmp"
+if ! cmp -s "$slice_tmp" "$slice" 2>/dev/null; then
+  install -m 0644 "$slice_tmp" "$slice"
+  systemctl daemon-reload 2>/dev/null || true
+  log "wrote ${slice}"
+fi
+
+# Lines: key, value, force (1 when the environment gave the value: it then replaces what config.toml has).
+# memory_swap and service_memory_swap follow their memory key when neither is set.
+specs=$(printf '%s\t%s\t%s\n' \
+  memory "\"${mem_default}\"" "${JOB_MEMORY:+1}" \
+  memory_swap "\"${swap_default}\"" "${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" \
+  cpus "\"${cpus_default}\"" "${JOB_CPUS:+1}" \
+  shm_size "${shm_default}" "${JOB_SHM_SIZE:+1}" \
+  cgroup_parent '"ci-jobs.slice"' 1 \
+  service_memory "\"${smem_default}\"" "${JOB_SERVICE_MEMORY:+1}" \
+  service_memory_swap "\"${sswap_default}\"" "${JOB_SERVICE_MEMORY_SWAP:+1}${JOB_SERVICE_MEMORY:+1}" \
+  service_cpus "\"${scpus_default}\"" "${JOB_SERVICE_CPUS:+1}" \
+  service_cgroup_parent '"ci-jobs.slice"' 1)
+awk -v specs="$specs" '
   function flush(   k) {
     if (!insec) return
     # Without its own value, swap follows the memory limit of this section (swap below memory is rejected by Docker).
-    if (!seen[2] && curmem != "") vals[2] = curmem
-    for (k = 1; k <= 5; k++) if (!seen[k]) print "    " names[k] " = " vals[k]
+    if (!seen["memory_swap"] && curmem != "") vals["memory_swap"] = curmem
+    if (!seen["service_memory_swap"] && cursmem != "") vals["service_memory_swap"] = cursmem
+    for (k = 1; k <= n; k++) if (!seen[names[k]]) print "    " names[k] " = " vals[names[k]]
     insec = 0
   }
+  function val(line,   v) { v = line; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v); return v }
   BEGIN {
-    names[1] = "memory";      vals[1] = mem;  force[1] = fmem
-    names[2] = "memory_swap"; vals[2] = swap; force[2] = fswap
-    names[3] = "cpus";        vals[3] = cpus; force[3] = fcpus
-    names[4] = "pids_limit";  vals[4] = pids; force[4] = fpids
-    names[5] = "shm_size";    vals[5] = shm;  force[5] = fshm
+    n = split(specs, lines, "\n")
+    for (i = 1; i <= n; i++) { split(lines[i], f, "\t"); names[i] = f[1]; vals[f[1]] = f[2]; force[f[1]] = f[3] }
   }
   /^[[:space:]]*\[/ { flush() }
-  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; split("", seen); print; next }
+  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; cursmem = ""; split("", seen); print; next }
   insec {
-    for (k = 1; k <= 5; k++) {
-      if ($0 ~ "^[[:space:]]*" names[k] "[[:space:]]*=") {
-        seen[k] = 1
-        if (k == 1) { curmem = $0; sub(/^[^=]*=[[:space:]]*/, "", curmem); sub(/[[:space:]]*#.*$/, "", curmem) }
-        if (force[k]) { if (k == 1) curmem = vals[1]; print "    " names[k] " = " vals[k]; next }
+    # pids_limit is not a GitLab Runner key (an older version of this script wrote it): drop it.
+    if ($0 ~ "^[[:space:]]*pids_limit[[:space:]]*=") next
+    for (k = 1; k <= n; k++) {
+      nm = names[k]
+      if ($0 ~ "^[[:space:]]*" nm "[[:space:]]*=") {
+        seen[nm] = 1
+        if (nm == "memory") curmem = val($0)
+        if (nm == "service_memory") cursmem = val($0)
+        if (force[nm]) { if (nm == "memory") curmem = vals[nm]; if (nm == "service_memory") cursmem = vals[nm]; print "    " nm " = " vals[nm]; next }
       }
     }
   }
@@ -5154,7 +5244,7 @@ else
   cat "$tmp" > "$CFG"
   log "job limits written to ${CFG}"
 fi
-awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|pids_limit|shm_size)[[:space:]]*=/' "$CFG"
+awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|shm_size|cgroup_parent|service_[a-z_]+)[[:space:]]*=/' "$CFG"
 __SIC_EOF__
 chmod 755 "$R/runner/install/job-limits.sh"
 
@@ -9066,18 +9156,27 @@ chmod 755 "$R/runner/install/image-prewarm.sh"
 install -d "$R/runner/install"
 cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Per-job CPU, memory, swap, process and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml,
-# so one job cannot take the whole host. Backs up the file, changes only these keys, and is safe to rerun.
-# A value you already set in config.toml is kept unless you pass it in the environment. Swap follows memory
-# (no swap) unless JOB_MEMORY_SWAP is given or the file already has a memory_swap.
+# Per-job CPU, memory, swap and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml, plus a systemd
+# slice (ci-jobs.slice) that caps the process count and, optionally, the memory of ALL job containers together, so
+# one job cannot take the whole host. The limits cover the build container and its `services:` containers (postgres,
+# redis, ...). Backs up the file, changes only these keys, and is safe to rerun. A value you already set in
+# config.toml is kept unless you pass it in the environment. Swap follows memory (no swap) unless JOB_MEMORY_SWAP
+# (JOB_SERVICE_MEMORY_SWAP) is given or the file already has a memory_swap (service_memory_swap).
 #
-# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB leave about 1 GB for
-# the host and its stacks. A bigger host: raise JOB_MEMORY and JOB_CPUS and keep concurrent x limit below the hardware.
-# A job that needs more fails with an out-of-memory kill (exit 137) instead of freezing the host.
+# GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
+# together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
+# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+#
+# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
+# and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
+# JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
+# out-of-memory kill (exit 137) instead of freezing the host.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
-#      JOB_PIDS (default 2048), JOB_SHM_SIZE in bytes (default 268435456)
+#      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
+#      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
+#      JOBS_MEMORY_MAX (default 3g)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -9085,7 +9184,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root
@@ -9097,38 +9196,74 @@ swap_default="${JOB_MEMORY_SWAP:-$mem_default}"
 [[ "$swap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY_SWAP: ${swap_default}"
 cpus_default="${JOB_CPUS:-1.5}"
 [[ "$cpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_CPUS: ${cpus_default}"
-pids_default="${JOB_PIDS:-2048}"
-[[ "$pids_default" =~ ^[0-9]+$ ]] || die "invalid JOB_PIDS: ${pids_default}"
 shm_default="${JOB_SHM_SIZE:-268435456}"
 [[ "$shm_default" =~ ^[0-9]+$ ]] || die "invalid JOB_SHM_SIZE: ${shm_default}"
+smem_default="${JOB_SERVICE_MEMORY:-384m}"
+[[ "$smem_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_SERVICE_MEMORY: ${smem_default}"
+sswap_default="${JOB_SERVICE_MEMORY_SWAP:-$smem_default}"
+[[ "$sswap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_SERVICE_MEMORY_SWAP: ${sswap_default}"
+scpus_default="${JOB_SERVICE_CPUS:-0.5}"
+[[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
+tasks_max="${JOBS_TASKS_MAX:-4096}"
+[[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
+mem_max="${JOBS_MEMORY_MAX-3g}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
 
+# The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
+slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"
+slice_tmp=$(mktemp)
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-# FORCE_<key>=1 when the environment gave the value: it then replaces what config.toml has.
-awk -v mem="\"${mem_default}\"" -v swap="\"${swap_default}\"" -v cpus="\"${cpus_default}\"" -v pids="$pids_default" -v shm="$shm_default" \
-    -v fmem="${JOB_MEMORY:+1}" -v fswap="${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" -v fcpus="${JOB_CPUS:+1}" -v fpids="${JOB_PIDS:+1}" -v fshm="${JOB_SHM_SIZE:+1}" '
+trap 'rm -f "$tmp" "$slice_tmp"' EXIT
+{
+  echo "# Written by runner/install/job-limits.sh: ceiling for all CI job containers together."
+  echo "[Slice]"
+  echo "TasksMax=${tasks_max}"
+  if [[ -n "$mem_max" && "$mem_max" != "infinity" ]]; then echo "MemoryMax=${mem_max}"; fi
+} > "$slice_tmp"
+if ! cmp -s "$slice_tmp" "$slice" 2>/dev/null; then
+  install -m 0644 "$slice_tmp" "$slice"
+  systemctl daemon-reload 2>/dev/null || true
+  log "wrote ${slice}"
+fi
+
+# Lines: key, value, force (1 when the environment gave the value: it then replaces what config.toml has).
+# memory_swap and service_memory_swap follow their memory key when neither is set.
+specs=$(printf '%s\t%s\t%s\n' \
+  memory "\"${mem_default}\"" "${JOB_MEMORY:+1}" \
+  memory_swap "\"${swap_default}\"" "${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" \
+  cpus "\"${cpus_default}\"" "${JOB_CPUS:+1}" \
+  shm_size "${shm_default}" "${JOB_SHM_SIZE:+1}" \
+  cgroup_parent '"ci-jobs.slice"' 1 \
+  service_memory "\"${smem_default}\"" "${JOB_SERVICE_MEMORY:+1}" \
+  service_memory_swap "\"${sswap_default}\"" "${JOB_SERVICE_MEMORY_SWAP:+1}${JOB_SERVICE_MEMORY:+1}" \
+  service_cpus "\"${scpus_default}\"" "${JOB_SERVICE_CPUS:+1}" \
+  service_cgroup_parent '"ci-jobs.slice"' 1)
+awk -v specs="$specs" '
   function flush(   k) {
     if (!insec) return
     # Without its own value, swap follows the memory limit of this section (swap below memory is rejected by Docker).
-    if (!seen[2] && curmem != "") vals[2] = curmem
-    for (k = 1; k <= 5; k++) if (!seen[k]) print "    " names[k] " = " vals[k]
+    if (!seen["memory_swap"] && curmem != "") vals["memory_swap"] = curmem
+    if (!seen["service_memory_swap"] && cursmem != "") vals["service_memory_swap"] = cursmem
+    for (k = 1; k <= n; k++) if (!seen[names[k]]) print "    " names[k] " = " vals[names[k]]
     insec = 0
   }
+  function val(line,   v) { v = line; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v); return v }
   BEGIN {
-    names[1] = "memory";      vals[1] = mem;  force[1] = fmem
-    names[2] = "memory_swap"; vals[2] = swap; force[2] = fswap
-    names[3] = "cpus";        vals[3] = cpus; force[3] = fcpus
-    names[4] = "pids_limit";  vals[4] = pids; force[4] = fpids
-    names[5] = "shm_size";    vals[5] = shm;  force[5] = fshm
+    n = split(specs, lines, "\n")
+    for (i = 1; i <= n; i++) { split(lines[i], f, "\t"); names[i] = f[1]; vals[f[1]] = f[2]; force[f[1]] = f[3] }
   }
   /^[[:space:]]*\[/ { flush() }
-  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; split("", seen); print; next }
+  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; cursmem = ""; split("", seen); print; next }
   insec {
-    for (k = 1; k <= 5; k++) {
-      if ($0 ~ "^[[:space:]]*" names[k] "[[:space:]]*=") {
-        seen[k] = 1
-        if (k == 1) { curmem = $0; sub(/^[^=]*=[[:space:]]*/, "", curmem); sub(/[[:space:]]*#.*$/, "", curmem) }
-        if (force[k]) { if (k == 1) curmem = vals[1]; print "    " names[k] " = " vals[k]; next }
+    # pids_limit is not a GitLab Runner key (an older version of this script wrote it): drop it.
+    if ($0 ~ "^[[:space:]]*pids_limit[[:space:]]*=") next
+    for (k = 1; k <= n; k++) {
+      nm = names[k]
+      if ($0 ~ "^[[:space:]]*" nm "[[:space:]]*=") {
+        seen[nm] = 1
+        if (nm == "memory") curmem = val($0)
+        if (nm == "service_memory") cursmem = val($0)
+        if (force[nm]) { if (nm == "memory") curmem = vals[nm]; if (nm == "service_memory") cursmem = vals[nm]; print "    " nm " = " vals[nm]; next }
       }
     }
   }
@@ -9143,7 +9278,7 @@ else
   cat "$tmp" > "$CFG"
   log "job limits written to ${CFG}"
 fi
-awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|pids_limit|shm_size)[[:space:]]*=/' "$CFG"
+awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|shm_size|cgroup_parent|service_[a-z_]+)[[:space:]]*=/' "$CFG"
 __SIC_EOF__
 chmod 755 "$R/runner/install/job-limits.sh"
 
@@ -9416,7 +9551,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
      DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
-Per-job limits (memory 1536m, cpus 1.5, pids 2048, shm 256 MB) are added to config.toml; see runner/install/job-limits.sh.
+Per-job limits (memory 1536m, cpus 1.5, shm 256 MB, services 384m, and a ci-jobs.slice with a process and memory ceiling) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
 USAGE
@@ -13693,18 +13828,27 @@ chmod 755 "$R/runner/install/image-prewarm.sh"
 install -d "$R/runner/install"
 cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Per-job CPU, memory, swap, process and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml,
-# so one job cannot take the whole host. Backs up the file, changes only these keys, and is safe to rerun.
-# A value you already set in config.toml is kept unless you pass it in the environment. Swap follows memory
-# (no swap) unless JOB_MEMORY_SWAP is given or the file already has a memory_swap.
+# Per-job CPU, memory, swap and /dev/shm limits in [runners.docker] of /etc/gitlab-runner/config.toml, plus a systemd
+# slice (ci-jobs.slice) that caps the process count and, optionally, the memory of ALL job containers together, so
+# one job cannot take the whole host. The limits cover the build container and its `services:` containers (postgres,
+# redis, ...). Backs up the file, changes only these keys, and is safe to rerun. A value you already set in
+# config.toml is kept unless you pass it in the environment. Swap follows memory (no swap) unless JOB_MEMORY_SWAP
+# (JOB_SERVICE_MEMORY_SWAP) is given or the file already has a memory_swap (service_memory_swap).
 #
-# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB leave about 1 GB for
-# the host and its stacks. A bigger host: raise JOB_MEMORY and JOB_CPUS and keep concurrent x limit below the hardware.
-# A job that needs more fails with an out-of-memory kill (exit 137) instead of freezing the host.
+# GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
+# together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
+# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+#
+# Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
+# and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
+# JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
+# out-of-memory kill (exit 137) instead of freezing the host.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
-#      JOB_PIDS (default 2048), JOB_SHM_SIZE in bytes (default 268435456)
+#      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
+#      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
+#      JOBS_MEMORY_MAX (default 3g)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -13712,7 +13856,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root
@@ -13724,38 +13868,74 @@ swap_default="${JOB_MEMORY_SWAP:-$mem_default}"
 [[ "$swap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_MEMORY_SWAP: ${swap_default}"
 cpus_default="${JOB_CPUS:-1.5}"
 [[ "$cpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_CPUS: ${cpus_default}"
-pids_default="${JOB_PIDS:-2048}"
-[[ "$pids_default" =~ ^[0-9]+$ ]] || die "invalid JOB_PIDS: ${pids_default}"
 shm_default="${JOB_SHM_SIZE:-268435456}"
 [[ "$shm_default" =~ ^[0-9]+$ ]] || die "invalid JOB_SHM_SIZE: ${shm_default}"
+smem_default="${JOB_SERVICE_MEMORY:-384m}"
+[[ "$smem_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_SERVICE_MEMORY: ${smem_default}"
+sswap_default="${JOB_SERVICE_MEMORY_SWAP:-$smem_default}"
+[[ "$sswap_default" =~ ^[0-9]+[kmg]$ ]] || die "invalid JOB_SERVICE_MEMORY_SWAP: ${sswap_default}"
+scpus_default="${JOB_SERVICE_CPUS:-0.5}"
+[[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
+tasks_max="${JOBS_TASKS_MAX:-4096}"
+[[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
+mem_max="${JOBS_MEMORY_MAX-3g}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
 
+# The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
+slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"
+slice_tmp=$(mktemp)
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-# FORCE_<key>=1 when the environment gave the value: it then replaces what config.toml has.
-awk -v mem="\"${mem_default}\"" -v swap="\"${swap_default}\"" -v cpus="\"${cpus_default}\"" -v pids="$pids_default" -v shm="$shm_default" \
-    -v fmem="${JOB_MEMORY:+1}" -v fswap="${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" -v fcpus="${JOB_CPUS:+1}" -v fpids="${JOB_PIDS:+1}" -v fshm="${JOB_SHM_SIZE:+1}" '
+trap 'rm -f "$tmp" "$slice_tmp"' EXIT
+{
+  echo "# Written by runner/install/job-limits.sh: ceiling for all CI job containers together."
+  echo "[Slice]"
+  echo "TasksMax=${tasks_max}"
+  if [[ -n "$mem_max" && "$mem_max" != "infinity" ]]; then echo "MemoryMax=${mem_max}"; fi
+} > "$slice_tmp"
+if ! cmp -s "$slice_tmp" "$slice" 2>/dev/null; then
+  install -m 0644 "$slice_tmp" "$slice"
+  systemctl daemon-reload 2>/dev/null || true
+  log "wrote ${slice}"
+fi
+
+# Lines: key, value, force (1 when the environment gave the value: it then replaces what config.toml has).
+# memory_swap and service_memory_swap follow their memory key when neither is set.
+specs=$(printf '%s\t%s\t%s\n' \
+  memory "\"${mem_default}\"" "${JOB_MEMORY:+1}" \
+  memory_swap "\"${swap_default}\"" "${JOB_MEMORY_SWAP:+1}${JOB_MEMORY:+1}" \
+  cpus "\"${cpus_default}\"" "${JOB_CPUS:+1}" \
+  shm_size "${shm_default}" "${JOB_SHM_SIZE:+1}" \
+  cgroup_parent '"ci-jobs.slice"' 1 \
+  service_memory "\"${smem_default}\"" "${JOB_SERVICE_MEMORY:+1}" \
+  service_memory_swap "\"${sswap_default}\"" "${JOB_SERVICE_MEMORY_SWAP:+1}${JOB_SERVICE_MEMORY:+1}" \
+  service_cpus "\"${scpus_default}\"" "${JOB_SERVICE_CPUS:+1}" \
+  service_cgroup_parent '"ci-jobs.slice"' 1)
+awk -v specs="$specs" '
   function flush(   k) {
     if (!insec) return
     # Without its own value, swap follows the memory limit of this section (swap below memory is rejected by Docker).
-    if (!seen[2] && curmem != "") vals[2] = curmem
-    for (k = 1; k <= 5; k++) if (!seen[k]) print "    " names[k] " = " vals[k]
+    if (!seen["memory_swap"] && curmem != "") vals["memory_swap"] = curmem
+    if (!seen["service_memory_swap"] && cursmem != "") vals["service_memory_swap"] = cursmem
+    for (k = 1; k <= n; k++) if (!seen[names[k]]) print "    " names[k] " = " vals[names[k]]
     insec = 0
   }
+  function val(line,   v) { v = line; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v); return v }
   BEGIN {
-    names[1] = "memory";      vals[1] = mem;  force[1] = fmem
-    names[2] = "memory_swap"; vals[2] = swap; force[2] = fswap
-    names[3] = "cpus";        vals[3] = cpus; force[3] = fcpus
-    names[4] = "pids_limit";  vals[4] = pids; force[4] = fpids
-    names[5] = "shm_size";    vals[5] = shm;  force[5] = fshm
+    n = split(specs, lines, "\n")
+    for (i = 1; i <= n; i++) { split(lines[i], f, "\t"); names[i] = f[1]; vals[f[1]] = f[2]; force[f[1]] = f[3] }
   }
   /^[[:space:]]*\[/ { flush() }
-  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; split("", seen); print; next }
+  /^[[:space:]]*\[runners\.docker\][[:space:]]*$/ { insec = 1; curmem = ""; cursmem = ""; split("", seen); print; next }
   insec {
-    for (k = 1; k <= 5; k++) {
-      if ($0 ~ "^[[:space:]]*" names[k] "[[:space:]]*=") {
-        seen[k] = 1
-        if (k == 1) { curmem = $0; sub(/^[^=]*=[[:space:]]*/, "", curmem); sub(/[[:space:]]*#.*$/, "", curmem) }
-        if (force[k]) { if (k == 1) curmem = vals[1]; print "    " names[k] " = " vals[k]; next }
+    # pids_limit is not a GitLab Runner key (an older version of this script wrote it): drop it.
+    if ($0 ~ "^[[:space:]]*pids_limit[[:space:]]*=") next
+    for (k = 1; k <= n; k++) {
+      nm = names[k]
+      if ($0 ~ "^[[:space:]]*" nm "[[:space:]]*=") {
+        seen[nm] = 1
+        if (nm == "memory") curmem = val($0)
+        if (nm == "service_memory") cursmem = val($0)
+        if (force[nm]) { if (nm == "memory") curmem = vals[nm]; if (nm == "service_memory") cursmem = vals[nm]; print "    " nm " = " vals[nm]; next }
       }
     }
   }
@@ -13770,7 +13950,7 @@ else
   cat "$tmp" > "$CFG"
   log "job limits written to ${CFG}"
 fi
-awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|pids_limit|shm_size)[[:space:]]*=/' "$CFG"
+awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|shm_size|cgroup_parent|service_[a-z_]+)[[:space:]]*=/' "$CFG"
 __SIC_EOF__
 chmod 755 "$R/runner/install/job-limits.sh"
 
@@ -14043,7 +14223,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
      DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
-Per-job limits (memory 1536m, cpus 1.5, pids 2048, shm 256 MB) are added to config.toml; see runner/install/job-limits.sh.
+Per-job limits (memory 1536m, cpus 1.5, shm 256 MB, services 384m, and a ci-jobs.slice with a process and memory ceiling) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
 USAGE
