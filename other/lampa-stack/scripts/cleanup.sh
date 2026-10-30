@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Periodic cleanup for the Lampa stack (run by lampa-stack-cleanup.timer every 3 days).
-#   - TorrServer: empties the on-disk cache and the torrents scratch dir (data/torrserver/cache, .../torrents).
+#   - TorrServer: removes every torrent from its list through its API (this is what ends unauthenticated
+#     /stream playback of saved torrents), then empties the scratch dirs (data/torrserver/cache, .../torrents).
 #   - qBittorrent: NOTHING by default (seeding is allowed). Only when QBT_DELETE_COMPLETED_DAYS > 0 in .env:
 #     deletes downloaded FILES not modified for that many days. Off by default; see README.
 # Never touches: data/torrserver/config (settings.json, accs.db, viewed.json), data/qbt/config, data/authelia,
@@ -14,7 +15,7 @@ DRY=0
 usage() {
   cat <<USAGE
 Usage: $0 [--dry-run]
-Empties the TorrServer cache/torrents scratch directories under ${DIR}/data/torrserver.
+Removes all torrents from TorrServer's list (API) and empties the cache/torrents scratch directories under ${DIR}/data/torrserver.
 With QBT_DELETE_COMPLETED_DAYS=N (N>0) in ${DIR}/.env it also deletes qBittorrent download files older than N days.
 Never touches configuration, credentials or secrets.
   --dry-run   list what would be removed, remove nothing
@@ -66,6 +67,37 @@ empty_dir() {
 }
 
 (( DRY )) && log "dry run: nothing will be deleted"
+
+# TorrServer's torrent list lives in config/ (protected from file deletion), so it is emptied through the API:
+# POST /torrents {"action":"list"}, then {"action":"rem","hash":...} for each. The credential and bodies go to curl
+# (run inside the qBittorrent container, same internal network) as a config on stdin, never on a command line.
+ts_api() { # json body (no quotes/backslashes needed beyond plain JSON) -> stdout
+  local body="${1//\\/\\\\}" pw
+  body="${body//\"/\\\"}"
+  pw=$(cat "$DIR/secrets/ts_password")
+  { printf 'header = "Authorization: Basic %s"\nheader = "Content-Type: application/json"\n' "$(printf 'lampa:%s' "$pw" | base64 -w0)"
+    printf 'data = "%s"\nurl = "http://torrserver:8090/torrents"\n' "$body"
+  } | docker exec -i "${LAMPA_STACK_PROJECT:-lampa-stack}-qbittorrent-1" curl -sS --fail --max-time 30 -K -
+}
+
+wipe_torrserver_list() {
+  local list hashes n=0 h
+  if [[ ! -r "$DIR/secrets/ts_password" ]] || ! command -v docker >/dev/null 2>&1; then
+    log "TorrServer list: skipped (no secrets/ts_password or no docker)"; return 0
+  fi
+  if ! list=$(ts_api '{"action":"list"}' 2>/dev/null); then
+    log "TorrServer list: API not reachable (stack stopped?), skipped"; return 0
+  fi
+  hashes=$(grep -oE '"hash":"[0-9a-fA-F]{40}"' <<<"$list" | cut -d'"' -f4 | sort -u || true)
+  if [[ -z "$hashes" ]]; then log "TorrServer list: already empty"; return 0; fi
+  n=$(wc -l <<<"$hashes")
+  if (( DRY )); then log "would remove ${n} torrents from the TorrServer list"; return 0; fi
+  while read -r h; do
+    ts_api "{\"action\":\"rem\",\"hash\":\"${h}\"}" >/dev/null || log "could not remove ${h}"
+  done <<<"$hashes"
+  log "TorrServer list: removed ${n} torrents"
+}
+wipe_torrserver_list
 
 empty_dir "$DATA/torrserver/cache"
 empty_dir "$DATA/torrserver/torrents"

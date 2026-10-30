@@ -66,7 +66,7 @@ bearer tokens or OIDC for third-party apps, Authelia can also act as an OIDC pro
 | `auth.DOMAIN` | the login page itself (public by nature; 5 failed logins ban for 10 min) | Authelia portal |
 | `ts.DOMAIN` (TorrServer UI + API), browser | Authelia session; Caddy then adds TorrServer's own credential | one login, not two |
 | `ts.DOMAIN`, request with the exact TorrServer `Authorization: Basic` credential (Lampa on the TV) | Caddy compares the header with the credential from `secrets/ts_basic`; only an exact match goes to TorrServer, which checks it again (`TS_HTTPAUTH`). Any other Basic header goes to the Authelia login. `/swagger` is blocked, `/echo` (version) is public. | the TV sends Basic from Lampa's settings and cannot follow a login redirect |
-| `ts.DOMAIN` `/stream`, `/play/*`, `/subs/*`, `/playlist*` without a session, and CORS preflights (`OPTIONS`) | straight to TorrServer, which registers these routes **without** auth. It plays only torrents that are already in its database (an unknown hash answers 401); adding, preload and every API call still need the credential. | video players and `<video>` tags cannot send headers, and the browser sends the preflight without credentials. To stream a title, someone has to know its info-hash; the 3-day cleanup empties the torrent list |
+| `ts.DOMAIN` `/stream`, `/play/*`, `/subs/*`, `/playlist*` without a session, and CORS preflights (`OPTIONS`) | straight to TorrServer, which registers these routes **without** auth. It plays any torrent that is in its database, with no credential, until the next cleanup (an unknown hash answers 401); adding, preload and every API call still need the credential. | video players and `<video>` tags cannot send headers, and the browser sends the preflight without credentials. To stream a title, someone has to know its info-hash; the 3-day cleanup removes every torrent from TorrServer's list through its API, so unauthenticated playback of a saved torrent lasts at most about 3 days |
 | `qbt.DOMAIN` | Authelia session, then qBittorrent's own login (generated password) | two independent logins |
 | `DOMAIN/` (Lampa app) and the Lampac client API (`/online*`, `/lite*`, `/on/*`, `/sisi*`, `/testaccsdb` ...) | Lampac `accsdb`: a valid per-user token is required, otherwise Lampac answers with a deny. Caddy does not check the token. | the Lampa client must work without a browser login |
 | `DOMAIN` anonymous by design in Lampac: `/`, `/<name>.js` loaders, `/extensions`, `/reqinfo`, `/version`, `/api/geo`, `/api/myip`, the `/lite/*/bind` helpers | no token (Lampac's `accsdb` lets `[AllowAnonymous]` endpoints and the `/^\/[\w-]+\.js/` loaders through). They return the static page and scripts, and tell a caller its own IP. | the client has to load before it can send a token |
@@ -117,12 +117,20 @@ Local mode is for the browser UIs only (TorrServer and qBittorrent pages, Lampa 
   seeding is poor. `sudo ./install.sh --enable-qbt-port` binds it to 0.0.0.0 and opens it additively in
   ufw/firewalld. Open it in the Hetzner firewall too. UPnP is off.
 
+## Lampa, search and TorrServer
+
+Lampac's built-in CUB/TMDB relays, JacRed, TorrServer and sync modules are skipped (they are anonymous by design),
+and `LampaWeb.initPlugins` is switched off for them, so Lampa talks to cub.red and TMDB directly and keeps its own
+torrent-parser setting. Torrent search therefore needs a parser: in Lampa open *Settings > Parser*, enable
+*Use parser* and enter your own Jackett/Prowlarr-compatible URL (and key). In *Settings > TorrServer* enter
+`https://ts.DOMAIN` with user `lampa` and the password from `secrets/ts_password`.
+
 ## TorrServer (no seeding)
 
 `install.sh` sets these through TorrServer's own `/settings` API (keys are the Go field names in
 `server/settings/btsets.go`): `DisableUpload=true`, `RemoveCacheOnDrop=true`, `UseDisk=false` (RAM cache of
 `TS_CACHE_MB`, default 192), `EnableDLNA=false`, and checks them again afterwards (`--status` re-checks).
-On days 1, 4, 7 ... 28 of the month (about every 3 days) `lampa-stack-cleanup.timer` empties `data/torrserver/cache` and `data/torrserver/torrents`; it never
+On days 1, 4, 7 ... 28 of the month (about every 3 days) `lampa-stack-cleanup.timer` removes every torrent from TorrServer's list (through its API, using the stack's own credential) and empties `data/torrserver/cache` and `data/torrserver/torrents`; it never
 touches `data/torrserver/config` (settings, `accs.db`, viewed history), secrets or any other service's data.
 Preview: `sudo /opt/lampa-stack/scripts/cleanup.sh --dry-run`.
 
