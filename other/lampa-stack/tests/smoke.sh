@@ -52,8 +52,16 @@ expect "ts.* a token of the wrong length is refused" "$(req "ts.$D" "/t/${TOK:0:
 expect "ts.* the main key is not a TorrServer token" "$(req "ts.$D" "/t/${KEY}/echo")" "$LOGIN"
 expect "ts.* the token in a query string does not count" "$(req "ts.$D" "/echo?token=${TOK}")" "$LOGIN"
 expect "ts.* swagger docs blocked" "$(req "ts.$D" "/t/${TOK}/swagger/index.html")" '^404 '
-expect "ts.* with the device token works (Lampa on the TV)" "$(req "ts.$D" "/t/${TOK}/settings" -X POST -d '{"action":"get"}')" '^200'
-expect "ts.* CORS preflight with the token is answered" "$(req "ts.$D" "/t/${TOK}/settings" -X OPTIONS -H "Origin: https://${D}:${PORT}" -H 'Access-Control-Request-Method: POST')" '^2[0-9][0-9] $'
+expect "ts.* with the device token works (Lampa on the TV)" "$(req "ts.$D" "/t/${TOK}/echo")" '^200'
+expect "ts.* CORS preflight with the token is answered" "$(req "ts.$D" "/t/${TOK}/torrents" -X OPTIONS -H "Origin: https://${D}:${PORT}" -H 'Access-Control-Request-Method: POST')" '^2[0-9][0-9] $'
+# a token must not reach the admin API (UseDisk / TorrentsSavePath / shutdown)
+for p in settings shutdown swagger/index.html ''; do
+  expect "ts.* the device token does not reach /${p:-<root>}" "$(req "ts.$D" "/t/${TOK}/${p}" -X POST -d '{"action":"get"}')" '^(403|404) '
+done
+# dot segments never get past Caddy (Lampac would remove them and route somewhere else)
+for p in "/t/${TOK}/echo/../settings" "/t/${TOK}/stream/%2e%2e/settings" "/t/${TOK}//settings"; do
+  expect "ts.* dot / empty segment ${p#/t/${TOK}} is refused" "$(req "ts.$D" "$p" --path-as-is -X POST -d '{"action":"get"}')" '^400 '
+done
 expect "ts.* the torrent list with the token reaches TorrServer" "$(req "ts.$D" "/t/${TOK}/torrents" -X POST -d '{"action":"list"}')" '^200'
 expect "ts.* cross-site POST with a session cookie is refused" "$(req "ts.$D" /settings -X POST -d '{}' -H 'Sec-Fetch-Site: same-site' -H 'Cookie: lampa_session=x')" "$LOGIN_POST|^403"
 if [[ -r "$DIR/secrets/ts_password" ]]; then
@@ -68,8 +76,18 @@ if [[ -r "$DIR/secrets/ts_password" ]]; then
 fi
 
 # --- Lampa host (Lampac): no key, no entry
-for p in / /online.js /sisi.js /lampainit.js /privateinit.js /on.js /startpage.js /version /reqinfo /api/geo /api/myip /testaccsdb /lite/events /sisi /externalids /app.min.js /online/js/bad /on/js/bad; do
+for p in / /online.js /sisi.js /lampainit.js /privateinit.js /on.js /version /reqinfo /api/geo /api/myip /testaccsdb /lite/events /sisi /externalids /app.min.js /online/js/bad /on/js/bad; do
   expect "Lampa host ${p} without a key is refused" "$(req "$D" "$p")" "$LOGIN"
+done
+if [[ "$(env_get LAMPAC_SISI)" == 1 ]]; then
+  expect "SISI on: /startpage.js is open (static plugin script for a TV Lampa without the cookie)" "$(req "$D" /startpage.js)" '^(200|404) '
+else
+  expect "Lampa host /startpage.js without a key is refused (SISI off)" "$(req "$D" /startpage.js)" "$LOGIN"
+fi
+# Dot segments: Caddy used to judge the raw path while Lampac removes them, so /proxy/../online.js was anonymous
+for p in /proxy/../online.js '/proxy/%2e%2e/online.js' /proxyimg/../sisi.js /proxy/../lite/events /proxy-dash/../app.min.js /proxy/./x //online.js /on/js/../../online.js; do
+  expect "dot / empty segment ${p} is refused without a key" "$(req "$D" "$p" --path-as-is)" '^400 '
+  expect "dot / empty segment ${p} is refused with a key too" "$(req "$D" "${p}?token=${KEY}" --path-as-is)" '^400 '
 done
 expect "Lampa host with a wrong key is refused" "$(req "$D" "/lite/events?token=00000000000000000000000000000000")" "$LOGIN"
 expect "Lampa host: the TorrServer token is not a Lampa key" "$(req "$D" "/lite/events?token=${TOK}")" "$LOGIN"
@@ -85,8 +103,14 @@ expect "Lampa host with the key in the /online/js/ loader path is served" "$(req
 cookie=$(curl -ksS --noproxy '*' -D- -o /dev/null --max-time 10 --resolve "${D}:${PORT}:127.0.0.1" "https://${D}:${PORT}/?token=${KEY}" | tr -d '\r' | sed -n 's/^[Ss]et-[Cc]ookie: \(lampa_key=[^;]*\);.*/\1/p')
 expect "a valid ?token= sets the key cookie" "${cookie:+set }" '^set'
 expect "the cookie alone opens the page assets" "$(req "$D" /app.min.js -H "Cookie: ${cookie}")" '^(200|404) '
+# Lampac knows a device only by the query, so a cookie-only request must reach it with ?token=<key>
+seen=$(body "$D" "/testaccsdb?uid=abcd1234" -H "Cookie: ${cookie}" || true)
+if [[ "$SKIP_LAMPAC" == 1 ]]; then
+  if grep -q "token=${KEY}" <<<"$seen"; then ok "a cookie-only request reaches Lampac with ?token=<key>"; else bad "cookie-only request reached Lampac without the key (${seen:0:100})"; fi
+elif grep -q '"accsdb":true' <<<"$seen"; then bad "a cookie-only /testaccsdb is denied by Lampac"; else ok "a cookie-only /testaccsdb is accepted by Lampac"; fi
 if [[ "$(env_get LAMPAC_PROXY_ANON)" == 1 ]]; then
   got=$(req "$D" /proxy/zzz)
+  expect "/proxy/ with a path that is not a Lampac link shape needs a key" "$(req "$D" '/proxy/a b')" "$LOGIN|^400"
   if [[ "$got" =~ $LOGIN ]]; then bad "/proxy/ should be open (LAMPAC_PROXY_ANON=1): $got"; else ok "signed /proxy links are open as configured (LAMPAC_PROXY_ANON=1) ($got)"; fi
 else
   expect "/proxy/ needs a key (LAMPAC_PROXY_ANON=0)" "$(req "$D" /proxy/zzz)" "$LOGIN"
@@ -111,6 +135,7 @@ if [[ "$SKIP_LAMPAC" != 1 ]]; then
   else
     if grep -q '/sisi.js' <<<"$b"; then bad "SISI is off but lampainit.js loads /sisi.js"; else ok "SISI off: lampainit.js does not load /sisi.js"; fi
     expect "SISI off: /sisi.js is gone even with a key" "$(req "$D" "/sisi.js?token=${KEY}")" '^(404|500) '
+    expect "SISI off: /nexthub (18+ hub) is gone even with a key" "$(req "$D" "/nexthub?token=${KEY}")" '^(404|500) '
   fi
   appjs=$(body "$D" "/app.min.js?token=${KEY}" --max-time 20 || true)
   if grep -Eq "${D//./\\.}(:[0-9]+)?/(cub|tmdb)" <<<"$appjs"; then bad "app.min.js routes CUB/TMDB through this host (those modules are skipped)"; else ok "app.min.js does not route CUB/TMDB through this host"; fi

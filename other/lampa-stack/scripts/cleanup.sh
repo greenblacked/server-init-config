@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Periodic cleanup for the Lampa stack (run by lampa-stack-cleanup.timer every 3 days).
 #   - TorrServer: removes every torrent from its list through its API (the list survives restarts in
-#     config/), then empties the only two writable scratch locations of the container (its root is read-only):
+#     config/), then empties the two scratch locations it owns (the container root is read-only; config and /tmp are writable too):
 #     data/torrserver/cache (the disk cache if UseDisk is ever switched on; install.sh pins TorrentsSavePath to it)
 #     and data/torrserver/torrents (autoload directory). In the default streaming-only setup (UseDisk=false) the
 #     cache is RAM and this is a safety net. It also reports a TorrentsSavePath that is not the cleaned directory.

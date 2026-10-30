@@ -119,6 +119,12 @@ sudo ./install.sh --add-device phone    # prints the WireGuard client config and
 * `--add-device NAME` also issues the Lampac key and the TorrServer token (below); `--remove-device NAME` revokes
   the key, the token and the WireGuard peer. On systemd hosts a drop-in makes Docker start after `wg-quick@wg0`, so
   the containers can bind the wg address at boot.
+* `--vpn` on a stack that already has devices gives each device without a peer one and prints its client config once.
+  `--remove-device` drops the peer in every mode, so switching away from `--vpn` and back cannot revive it.
+* "Only on the wg address" rests on routing, not on a filter: Docker publishes on `10.88.77.1`, and a host on the same
+  layer-2 segment that routes that address to the server's public interface could reach the listener without being a
+  peer. Not an issue on a cloud network that does not forward it; to enforce it anyway add
+  `iptables -I DOCKER-USER -d 10.88.77.1 ! -i wg0 -j DROP` (adjust `WG_NET`).
 * A TV usually cannot run WireGuard; the VPN is for phones, laptops and routers.
 
 ## Who gets in where (authorization)
@@ -126,11 +132,12 @@ sudo ./install.sh --add-device phone    # prints the WireGuard client config and
 | Host / path | Needs | Notes |
 |---|---|---|
 | `auth.HOST` | nothing (it is the login page) | Authelia **regulation**: 3 failed logins within 5 minutes ban the user name *and* the client address for 30 minutes. Second-factor and reset endpoints are rate limited. |
-| `ts.HOST/t/<token>/...` | the **per-device TorrServer token** in the path | The token is removed before TorrServer sees the request; Caddy adds TorrServer's own Basic credential, so TorrServer authenticates it again. Players, `<video>` tags and CORS preflights work because the token is part of the URL. |
-| every other path on `ts.HOST` (`/stream`, `/play/*`, `/subs/*`, `/playlist*`, `/settings`, `OPTIONS` ...) | an **Authelia session** | no session: redirect to the login. Never anonymous. A wrong or unknown token, a Basic header, a token in a query string all fall here and are refused. |
+| `ts.HOST/t/<token>/...` | the **per-device TorrServer token** in the path | The token is removed before TorrServer sees the request; Caddy adds TorrServer's own Basic credential, so TorrServer authenticates it again. Players, `<video>` tags and CORS preflights work because the token is part of the URL. A token opens only what Lampa and players use (`/echo`, `/torrents`, `/stream`, `/play`, `/cache`, `/viewed`, `/playlist`, `/ffp`); `/settings`, `/shutdown` and the rest are refused (403), so a leaked token cannot switch TorrServer to disk or stop it. |
+| every other path on `ts.HOST` (`/stream`, `/play/*`, `/subs/*`, `/playlist*`, `/settings`, `OPTIONS` ... without a token) | an **Authelia session** | no session: redirect to the login. Never anonymous. A wrong or unknown token, a Basic header, a token in a query string all fall here and are refused. |
 | `qbt.HOST` | Authelia session, then qBittorrent's own login | two independent logins |
 | `HOST` (Lampa app, `/online.js`, `/sisi.js`, `/lite/*`, `/lampainit.js`, `/version` ...) | a **Lampa key**: `?token=` / `account_email` / `uid` / `box_mac` query value, the `lampa_key` cookie Caddy sets, or the loader paths `/on/js/<key>`, `/online/js/<key>`, `/sisi/js/<key>`; **or** an Authelia session | Caddy checks the key against the list; Lampac checks it again (`accsdb`). With a session Caddy adds that user's own key, so a person who logs in at the portal can use Lampa in the browser without typing a key. |
-| `HOST/proxy*`, `/proxyimg*` | nothing, **the one exception** (`LAMPAC_PROXY_ANON=1`, default) | These are Lampac's own media links: AES-encrypted by Lampac, they carry the upstream URL and cannot be forged or edited. Video players cannot add a key to them. Set `LAMPAC_PROXY_ANON=0` to require a key there too (external players then break). |
+| `HOST/proxy*`, `/proxyimg*` | a key, like everything else (`LAMPAC_PROXY_ANON=0`, default); `LAMPAC_PROXY_ANON=1` makes them **the one anonymous exception** | These are Lampac's own media links: AES-encrypted or hashed by Lampac, they carry the upstream URL and cannot be forged, but anyone who holds a link can replay it until it expires, and video players cannot add a key to them. With `1` Caddy lets through only the shape Lampac generates (`/proxy/<payload>[.ext]`, `/proxyimg:W:H/<payload>`), never a path with `.` / `..` segments. Set it to `1` only if you accept that trade for playback in external players; the default honors "no anonymous path". |
+| `HOST/startpage.js` (only with SISI enabled) | nothing | A static plugin script that Lampac lists in the SISI loader without a key; Lampa on a TV loads plugins cross-origin, where the key cookie is not sent. It holds no data. |
 | `HOST/admin*`, `/adminpanel*`, `/stats*`, `/weblog*`, `/ts*`, `/dlna*`, `/extensions*`, `/api/headers` | blocked (404) even with a key | Lampac control surfaces; `/extensions` is the third-party plugin store. Edit `init.conf` on the host instead. |
 | the session cookie, request headers `lcrqpasswd`, `x-client-ip`, `xhost`, `xscheme` | stripped by Caddy | `lcrqpasswd` is Lampac's local-admin bypass; the Authelia and key cookies are not passed to Lampac |
 | cross-site `POST`/`PUT`/... with a session | refused (403, `Sec-Fetch-Site`) on `ts.`, `qbt.` and the session branch of the Lampa host | a plugin on one host cannot ride on your session |
@@ -140,7 +147,9 @@ sudo ./install.sh --add-device phone    # prints the WireGuard client config and
   environment variable) and Lampac as `lampac/users.json` (`root:1000 0640`). Caddy keeps no access log (keys travel
   in URLs).
 * **Rate limiting.** Passwords: Authelia regulation (above). Keys cannot be guessed (2^128) and a wrong one costs
-  Caddy a map lookup. Lampac additionally limits distinct IPs / requests per key per hour (`accsdb`).
+  Caddy a map lookup. Lampac has per-key limits on distinct IPs and requests too, but it sees only the proxy's
+  address (it takes the client IP from the connection, and Caddy strips the headers that would carry another), so
+  those limits do not tell devices apart behind Caddy.
 * **Revocation** is immediate for Caddy (`--remove-device` / `--remove-user` reloads it); Lampac forgets a removed
   key when it restarts, which the command does.
 * Headers on every host: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`; in
@@ -170,7 +179,9 @@ as argon2id hashes. The last user cannot be removed.
    URLs below with your key and token filled in; `--show tv` prints them again.
 2. On the TV open the Lampa web app in its browser (or the Lampa TV app that lets you set a server address) at
    `https://HOST:PORT/?token=<key>`. Caddy checks the key and remembers it in a cookie (`lampa_key`, `Secure`,
-   `HttpOnly`) so the page's own files load. Without a key you are sent to the login page.
+   `HttpOnly`) so the page's own files load; for requests that carry only the cookie, Caddy adds the key to the
+   query for Lampac, which identifies a device only by the query, so Lampa does not ask for a password. Without a key
+   you are sent to the login page.
 3. **Online sources**: *Settings > Extensions > Add plugin* and enter
    `https://HOST:PORT/online/js/<key>`. That is `/online.js` with your key built into it (the bare `/online.js`
    is refused). Or add `https://HOST:PORT/on/js/<key>` once: it loads every enabled section.
@@ -192,7 +203,7 @@ segment to the links yourself.
 | Online sources | **on** | `LAMPAC_ONLINE=1` in `.env` | Lampac's online sources, loaded as `/online.js` |
 | SISI (18+) | **off** | `./install.sh --enable-sisi` / `--disable-sisi` (`LAMPAC_SISI`) | Lampac's adult section, loaded as `/sisi.js`. **Adults only**; check the law where you live. |
 
-Both set the real Lampac switches: `BaseModule.SkipModules` (folder names `Online*`, or `SISI` and `Adult`) so the
+Both set the real Lampac switches: `BaseModule.SkipModules` (folder names `Online*`, or `SISI`, `Adult` and `NextHUB`, an 18+ hub that compiles on its own) so the
 modules are not even compiled, and `LampaWeb.initPlugins.online` / `.sisi` so `lampainit.js` and `/on/js/<key>`
 list them. Lampac recompiles its modules on start, so a switch restarts it (a minute or two).
 
@@ -218,8 +229,8 @@ The Lampac online sources reach their providers from the server (`egress` networ
 * **Downloading (qBittorrent)**: the full client, for files you keep and seed. Web UI at `qbt.HOST` after the login.
 * **Safety net**: `lampa-stack-cleanup.timer` runs on days 1, 4, 7 ... of the month (about every 3 days). It removes
   every torrent from TorrServer's list through its API and empties `data/torrserver/cache` and
-  `data/torrserver/torrents`. Those are the only two writable places of the TorrServer container (its root is
-  read-only), and the installer pins `TorrentsSavePath` to the cache one, so the cleanup covers a disk cache even if
+  `data/torrserver/torrents`. Those are the two scratch places the cleanup owns (the container's root is read-only;
+  `config` and `/tmp` are writable too, and `config` is never cleaned), and the installer pins `TorrentsSavePath` to the cache one, so the cleanup covers a disk cache even if
   someone switches `UseDisk` on in the TorrServer UI (it says so if the settings point elsewhere). It never touches
   `data/torrserver/config`, credentials or other services' data. Preview: `sudo /opt/lampa-stack/scripts/cleanup.sh --dry-run`.
 * Memory: the cache is part of TorrServer's heap, so `TORRSERVER_MEM` (768 MB) must hold `TS_CACHE_MB` + about
@@ -252,7 +263,7 @@ Edit, then run `sudo ./install.sh` again. Existing values are kept when a new ve
 | `HTTPS_PORT`, `WG_PORT` | random, chosen once | the HTTPS port (public / vpn) and the WireGuard UDP port |
 | `LOCAL_PORT`, `WG_NET` | 8443, `10.88.77` | local-mode port, VPN network |
 | `AUTHELIA_POLICY` | `one_factor` | `two_factor` adds TOTP (register a device on first login) |
-| `LAMPAC_ONLINE`, `LAMPAC_SISI`, `LAMPAC_PROXY_ANON` | 1, 0, 1 | [modules](#modules) and the signed-media-link exception |
+| `LAMPAC_ONLINE`, `LAMPAC_SISI`, `LAMPAC_PROXY_ANON` | 1, 0, 0 | [modules](#modules) and the signed-media-link exception |
 | `LAMPA_AUTOUPDATE`, `LAMPA_TREE` | true, pinned commit | LampaWeb downloads that Lampa commit from GitHub on the first start, once |
 | `TS_CACHE_MB`, `TS_PRELOAD_PCT`, `TS_READAHEAD_PCT`, `TS_IDLE_SECONDS` | 384, 20, 90, 120 | TorrServer streaming |
 | `QBT_USER`, `QBT_WEBUI_PORT`, `QBT_PORT`, `QBT_PEER_BIND` | admin, 8085, 6881, 127.0.0.1 | qBittorrent (`QBT_PORT` is randomized by `--enable-qbt-port`) |
@@ -354,7 +365,7 @@ Tested on Ubuntu 24.04 with Docker 29 and compose 5:
   mode, with switches between them. `tests/smoke.sh` passes (87 checks in local mode, 76 in vpn mode, run
   against the stub with `SMOKE_SKIP_LAMPAC=1`): no TorrServer path is reachable without a token or session
   (`/stream`, `/play`, `/subs`, `/playlist`, `OPTIONS`, wrong / short / query-string tokens, the Lampa key as a
-  token), the device token reaches TorrServer (settings, preflight), every Lampa-host path is refused without a key
+  token), the device token reaches only the player endpoints of TorrServer (not `/settings` or `/shutdown`), dot segments are refused, every Lampa-host path is refused without a key
   and served with a key by query, `account_email`, `uid`, loader path and cookie, a revoked device stops working at
   once, an Authelia session reaches `ts.`, `qbt.` and the Lampa host (the user's key is added), Authelia bans after
   repeated failures, only the expected ports are published, and TorrServer itself refuses an unauthenticated request.

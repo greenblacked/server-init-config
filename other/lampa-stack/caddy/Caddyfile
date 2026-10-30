@@ -9,7 +9,8 @@
 #   ts.*    /t/<ts token>/...  a per-device token in the PATH (players cannot send headers, so the token rides in the
 #                              URL Lampa uses as its TorrServer address), or an Authelia session (browsers).
 #                              Caddy adds TorrServer's own Basic credential, so TorrServer authenticates it a second time.
-#           EVERY other path, including /stream /play /subs /playlist and CORS preflights, needs the Authelia session.
+#                              A token opens only the player endpoints, not /settings or /shutdown (see the ts site).
+#           EVERY other path, including /settings, /subs and CORS preflights outside the token route, needs the Authelia session.
 #   qbt.*   Authelia session, then qBittorrent's own login
 #   main    Lampa app + Lampac API: a per-device key (query token / account_email / uid / box_mac, the Caddy cookie it
 #           sets, or the /on/js/<key> style loader paths) that Caddy checks against the key list, then Lampac checks it
@@ -49,6 +50,16 @@
 	respond @xsite 403
 }
 
+# Dot segments and empty segments in the path. Caddy decides on the path as sent, but Lampac (Kestrel) removes
+# `..` before routing: /proxy/../online.js would pass the anonymous /proxy rule here and reach /online.js there.
+# {path} is already percent-decoded, so /proxy/%2e%2e/x shows up as /proxy/../x. Nothing legitimate needs either.
+(nodotseg) {
+	@dotseg expression `{path}.matches("(^|/)\\.\\.?(/|$)") || {path}.contains("//")`
+	handle @dotseg {
+		respond 400
+	}
+}
+
 (authelia) {
 	forward_auth authelia:9091 {
 		uri /api/authz/forward-auth
@@ -66,6 +77,7 @@ import /run/secrets/keymaps
 
 {$SITE_MAIN} {
 	import secure
+	import nodotseg
 	import keymaps
 	# Lampac control surfaces. Edit init.conf on the host instead. /ts* is the embedded TorrServer proxy (module
 	# skipped; blocked here as well). /extensions is the plugin store (third-party, unpinned plugins).
@@ -80,6 +92,11 @@ import /run/secrets/keymaps
 		# URLs) pass the same check. Neither it nor the Authelia cookie is passed on to Lampac.
 		@setkey expression {k_token} == "1"
 		header @setkey +Set-Cookie "lampa_key={query.token}; Path=/; Max-Age=31536000; Secure; HttpOnly; SameSite=Lax"
+		# Lampac identifies a device only by the query (token / account_email / uid / box_mac), never by a cookie. A
+		# request that Caddy let in on the cookie alone gets the key as ?token= (the map already checked it), so
+		# Lampa's own calls (/testaccsdb, /online.js ...) are accepted without typing the key on a TV remote.
+		@cookieonly expression {k_cookie} == "1" && {k_token} != "1" && {k_email} != "1" && {k_uid} != "1" && {k_mac} != "1" && {k_path} != "1"
+		uri @cookieonly query token {http.request.cookie.lampa_key}
 		request_header Cookie "(?i)(^|;\s*)(lampa_session|lampa_key)=[^;]*" "$1"
 		reverse_proxy lampac:9118
 	}
@@ -104,6 +121,7 @@ import /run/secrets/keymaps
 
 {$SITE_TS} {
 	import secure
+	import nodotseg
 	import keymaps
 	@docs path_regexp (?i)^(/t/[0-9a-f]{32})?/swagger
 	handle @docs {
@@ -112,12 +130,20 @@ import /run/secrets/keymaps
 	# Lampa / players: the per-device token is the first path segment, /t/<32 hex>/... ; it is removed before the
 	# request reaches TorrServer. Because it is in the path, CORS preflights, <video> tags and external players
 	# need nothing else. Only tokens from the generated list match.
+	# A token opens only what Lampa and players use: /echo /torrents /stream /play /cache /viewed /playlist /ffp.
+	# /settings (UseDisk, TorrentsSavePath), /shutdown and the rest of the admin API need the Authelia session below.
 	@tstok expression {ts_ok} == "1"
+	@tsallowed path_regexp ^/t/[0-9a-f]{32}/(echo|torrents|stream|play|cache|viewed|playlist|ffp)(/|$)
 	handle @tstok {
-		uri path_regexp ^/t/[0-9a-f]{32}(/|$) /
-		reverse_proxy torrserver:8090 {
-			header_up Authorization "Basic {file./run/secrets/ts_basic}"
-			flush_interval -1
+		handle @tsallowed {
+			uri path_regexp ^/t/[0-9a-f]{32}(/|$) /
+			reverse_proxy torrserver:8090 {
+				header_up Authorization "Basic {file./run/secrets/ts_basic}"
+				flush_interval -1
+			}
+		}
+		handle {
+			respond 403
 		}
 	}
 	# Browsers: Authelia session, then Caddy adds the TorrServer credential (one login, not two). Without a session
