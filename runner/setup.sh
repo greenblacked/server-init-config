@@ -8,7 +8,7 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 CFG=/etc/gitlab-runner/config.toml
 CURRENT=""
 
-COMPONENTS=(users packages tools security register registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux lock-root)
+COMPONENTS=(users packages tools firewall security register job-limits registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux lock-root)
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -17,9 +17,11 @@ describe() {
   case "$1" in
     users)          echo "admin user ops (sudo), service users gitlab-runner and monitoring, SSH hardening" ;;
     packages)       echo "admin tools: htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, aliases" ;;
-    tools)          echo "health, weekly cleanup, disk guard and their timers" ;;
+    tools)          echo "health, weekly cleanup, disk guard, job isolation (metadata and host services blocked), weekly Docker and runner update" ;;
+    firewall)       echo "host firewall (firewalld or ufw) with SSH allowed, plus the fail2ban sshd jail" ;;
     security)       echo "security tools: lynis, oscap, auditd, ssh-audit, nmap, trivy, gitleaks, ... (not in --base/--all)" ;;
     register)       echo "register the runner (asks for the glrt- token)" ;;
+    job-limits)     echo "per-job CPU, memory, process and /dev/shm limits in config.toml" ;;
     registry-cache) echo "Docker Hub pull-through cache on 127.0.0.1:5000" ;;
     monitoring)     echo "Prometheus, node_exporter, Grafana (127.0.0.1 only)" ;;
     logging)        echo "Loki + Grafana Alloy: container logs and the journal in Grafana" ;;
@@ -37,8 +39,10 @@ script_for() {
     users)          echo "${HERE}/install/users.sh" ;;
     packages)       echo "${ROOT}/common/admin-tools.sh" ;;
     tools)          echo "${HERE}/install/host-tools.sh" ;;
+    firewall)       echo "${HERE}/install/host-firewall.sh" ;;
     security)       echo "${ROOT}/common/security-tools.sh" ;;
     register)       echo "${HERE}/register.sh" ;;
+    job-limits)     echo "${HERE}/install/job-limits.sh" ;;
     registry-cache) echo "${HERE}/install/registry-cache.sh" ;;
     monitoring)     echo "${HERE}/install/monitoring.sh" ;;
     logging)        echo "${HERE}/install/logging.sh" ;;
@@ -65,9 +69,11 @@ is_installed() {
   case "$1" in
     users)          id monitoring >/dev/null 2>&1 && grep -qs "^AllowGroups" /etc/ssh/sshd_config.d/00-ci-hardening.conf ;;
     packages)       command -v htop >/dev/null 2>&1 && grep -qs "^alias health='sudo /usr/local/bin/health'" /etc/profile.d/ci-runner.sh ;;
-    tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh ]] ;;
+    tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh && -x /usr/local/bin/ci-job-isolation.sh && -x /usr/local/bin/runner-engine-update.sh ]] ;;
+    firewall)       systemctl is-active --quiet firewalld 2>/dev/null || ufw status 2>/dev/null | grep -q '^Status: active' ;;
     security)       command -v lynis >/dev/null 2>&1 && [[ -x /usr/local/bin/trivy ]] ;;
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;
+    job-limits)     [[ -f "$CFG" ]] && grep -q '^[[:space:]]*pids_limit' "$CFG" ;;
     registry-cache) [[ -f /opt/registry-cache/docker-compose.yml ]] ;;
     monitoring)     [[ -f /opt/monitoring/docker-compose.yml ]] ;;
     logging)        [[ -f /opt/logging/docker-compose.yml ]] ;;
@@ -86,8 +92,8 @@ usage() {
   cat <<USAGE
 Usage: $0 [--base] [--all] [--list] [--COMPONENT ...]
 
-  --base   users + packages + tools + registry-cache + monitoring (no questions asked)
-  --all    --base + register + logging + npm-cache + shared-cache (asks for the runner token)
+  --base   users + packages + tools + firewall + registry-cache + monitoring (no questions asked)
+  --all    --base + register + job-limits + logging + npm-cache + shared-cache (asks for the runner token)
            lock-root is never implied: run --lock-root after the admin login works
   --list   show what is installed and exit
 
@@ -170,8 +176,8 @@ main() {
   local c
   while (( $# )); do
     case "$1" in
-      --base) for c in users packages tools registry-cache monitoring; do WANT[$c]=1; done ;;
-      --all)  for c in users packages tools register registry-cache monitoring logging npm-cache shared-cache; do WANT[$c]=1; done ;;
+      --base) for c in users packages tools firewall registry-cache monitoring; do WANT[$c]=1; done ;;
+      --all)  for c in users packages tools firewall register job-limits registry-cache monitoring logging npm-cache shared-cache; do WANT[$c]=1; done ;;
       --list) LIST=1 ;;
       -h|--help) usage; exit 0 ;;
       --*)

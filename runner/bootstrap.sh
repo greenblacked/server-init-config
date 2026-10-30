@@ -14,6 +14,7 @@ SERVER=""
 DRY_RUN=0
 ALLOW_DIRTY=0
 DO_REGISTER=1
+DO_FIREWALL=1
 WITH_PREWARM=0
 CONTINUE_DEGRADED=0
 WAIT_SSH_SECONDS=300
@@ -36,6 +37,7 @@ to ${REMOTE_DIR} without any credential on the server, installs the safe compone
   --port PORT         SSH port (default 22)
   --no-register       do not register the runner (also skips npm-cache and shared-cache
                       unless a runner is already registered)
+  --no-firewall       do not enable the host firewall (firewalld or ufw, SSH allowed) and fail2ban
   --with-prewarm      also run the image prewarm (asks for a GitLab deploy token)
   --allow-dirty       copy HEAD even though the working tree has uncommitted changes
   --continue-degraded go on when cloud-init reports "degraded" (recoverable errors)
@@ -58,6 +60,7 @@ while (( $# )); do
     --user) [[ $# -ge 2 ]] || die "--user needs a value"; SSH_USER="$2"; shift ;;
     --port) [[ $# -ge 2 ]] || die "--port needs a value"; SSH_PORT="$2"; shift ;;
     --no-register) DO_REGISTER=0 ;;
+    --no-firewall) DO_FIREWALL=0 ;;
     --with-prewarm) WITH_PREWARM=1 ;;
     --allow-dirty) ALLOW_DIRTY=1 ;;
     --continue-degraded) CONTINUE_DEGRADED=1 ;;
@@ -128,6 +131,7 @@ registered_on_server() {
 REGISTERED=0   # 1 when the runner is (or will be) registered, which npm-cache and shared-cache need
 
 choose_components() {
+  if (( DO_FIREWALL )); then PHASE2+=(firewall); fi
   PHASE2+=(registry-cache monitoring logging)
   if (( DO_REGISTER )); then
     PHASE2+=(register)
@@ -184,7 +188,7 @@ add_cache_components() {
     REGISTERED=1
   fi
   if (( REGISTERED )); then
-    PHASE2+=(npm-cache shared-cache)
+    PHASE2+=(job-limits npm-cache shared-cache)
   elif (( DRY_RUN )); then
     log "[dry-run] --no-register: npm-cache and shared-cache are added only if the server already has a registered runner"
   else

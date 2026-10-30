@@ -60,7 +60,9 @@ def expand(paths: list[str]) -> list[str]:
 
 TOOLS = ["runner/install/host-tools.sh", "common/health", "runner/scripts/runner-weekly-cleanup.sh", "runner/scripts/runner-disk-guard.sh",
          "runner/systemd/runner-weekly-cleanup.service", "runner/systemd/runner-weekly-cleanup.timer",
-         "runner/systemd/runner-disk-guard.service", "runner/systemd/runner-disk-guard.timer"]
+         "runner/systemd/runner-disk-guard.service", "runner/systemd/runner-disk-guard.timer",
+         "runner/scripts/runner-engine-update.sh", "runner/scripts/ci-job-isolation.sh", "runner/systemd/runner-engine-update.service",
+         "runner/systemd/runner-engine-update.timer", "runner/systemd/ci-job-isolation.service"]
 REGISTRY = ["runner/install/registry-cache.sh", "runner/stacks/registry-cache"]
 MONITORING = ["runner/install/monitoring.sh", "runner/stacks/monitoring/docker-compose.yml", "runner/stacks/monitoring/env.example",
               "runner/stacks/monitoring/prometheus", "runner/stacks/monitoring/grafana"]
@@ -86,21 +88,32 @@ BLOCKS = [
           "sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, mc, fd, rg, fzf, plus the shell aliases, shell history with fzf Ctrl+R and tmux config. "
           "For a server created with an older init; safe to rerun.",
           ["common/admin-tools.sh", "common/shell-history.sh"], run=["common/admin-tools.sh"]),
-    Block("tools", "Health + cleanup: health, weekly cleanup, disk guard",
+    Block("tools", "Health, cleanup, job isolation, engine updates",
           "Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, "
           "runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency "
-          "cleanup every 30 minutes when the disk is 85% full. Ends with a dry run of the cleanup.",
+          "cleanup every 30 minutes when the disk is 85% full. Also the job isolation (CI jobs cannot reach the cloud metadata "
+          "address or services on the host) and the Sunday 04:30 upgrade of Docker CE and GitLab Runner, which runs only while no job runs. "
+          "Ends with a dry run of the cleanup.",
           TOOLS, run=["runner/install/host-tools.sh"]),
+    Block("firewall", "Host firewall and fail2ban",
+          "firewalld on Rocky, ufw on Debian, with SSH (22 and the port sshd listens on) allowed and everything else closed, plus the fail2ban sshd jail "
+          "(5 tries in 10 minutes, 1 hour ban). The firewall starts only after SSH is in the saved rules and stops again if SSH is not allowed. "
+          "Open the same ports in the Hetzner Cloud Firewall. If Docker was already running on Rocky, restart it afterwards while no job runs.",
+          ["runner/install/host-firewall.sh"], run=["runner/install/host-firewall.sh"]),
     Block("security", "Security tools: audit, network, scan",
           "Optional. Tools to test and audit your own server; use them only on systems you own or are authorized to test. "
           "Default: lynis, OpenSCAP, auditd (small ruleset), ssh-audit, testssl.sh, nmap and other network tools, and trivy, gitleaks, "
-          "hadolint, cosign, osv-scanner, trufflehog, dockle as SHA256-verified release binaries. Options for the installer "
+          "hadolint, cosign, osv-scanner, trufflehog, dockle as release binaries at pinned versions, checked against the checksums file of the same release. Options for the installer "
           "(`bash /root/server-init-config/common/security-tools.sh --help`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, "
           "`--grype`, `--syft`, `--k8s`, `--kali`, `--audit-timer`.",
           SECURITY, run=["common/security-tools.sh"]),
     Block("register", "Register the runner",
           "Asks for the `glrt-` token (GitLab: Settings > CI/CD > Runners > New runner). Change `DESCRIPTION` if you like.",
-          ["runner/install/register-runner.sh"], interactive=["sudo DESCRIPTION=hetzner-cax11 bash {d}/runner/install/register-runner.sh"]),
+          ["runner/install/register-runner.sh", "runner/install/job-limits.sh"], interactive=["sudo DESCRIPTION=hetzner-cax11 bash {d}/runner/install/register-runner.sh"]),
+    Block("job-limits", "Per-job limits",
+          "Adds memory 1536m (no swap), 1.5 CPUs, 2048 processes and 256 MB /dev/shm per job to `[runners.docker]` in `config.toml` (a backup is made, values you set yourself are kept). "
+          "Needs a registered runner. Change them with `JOB_MEMORY`, `JOB_CPUS`, `JOB_PIDS`, `JOB_SHM_SIZE` on the last line.",
+          ["runner/install/job-limits.sh"], run=["runner/install/job-limits.sh"]),
     Block("registry-cache", "Docker Hub pull-through cache",
           "Cache on `127.0.0.1:5000`, set as the Docker mirror. Restarts Docker: run it while no jobs are running.",
           REGISTRY, run=["runner/install/registry-cache.sh"]),
@@ -141,7 +154,7 @@ BLOCKS = [
           "runner token and then sets up the npm and shared caches. Root SSH stays open: lock it with the Lock root SSH block "
           "after the admin login works.",
           EVERYTHING,
-          run=["runner/install/users.sh", "common/admin-tools.sh", "runner/install/host-tools.sh", "runner/install/registry-cache.sh", "runner/install/monitoring.sh", "runner/install/logging.sh"],
+          run=["runner/install/users.sh", "common/admin-tools.sh", "runner/install/host-tools.sh", "runner/install/host-firewall.sh", "runner/install/registry-cache.sh", "runner/install/monitoring.sh", "runner/install/logging.sh"],
           interactive=[("sudo DESCRIPTION=hetzner-cax11 bash {d}/runner/install/register-runner.sh && "
                         "sudo bash {d}/runner/install/npm-cache.sh && sudo bash {d}/runner/install/shared-cache.sh && "
                         "sudo /usr/local/bin/health -q")],

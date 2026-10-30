@@ -688,7 +688,7 @@ check_services() {
   done
 
   local t next
-  for t in runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+  for t in runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer ci-image-prewarm.timer; do
     is_runner || break
     unit_exists "$t" || continue
     if systemctl is-active --quiet "$t" 2>/dev/null; then
@@ -717,6 +717,19 @@ check_services() {
       warn "${s%.service}: last run ${started}, result ${result} (journalctl -u ${s})"
     fi
   done
+
+  if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
+    local upd
+    upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
+    case "$upd" in
+      *" FAIL "*) warn "Docker/GitLab Runner update: ${upd}" ;;
+      "") ;;
+      *) info "Docker/GitLab Runner update: ${upd}" ;;
+    esac
+  fi
+  if is_runner && unit_exists ci-job-isolation.service; then
+    if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
+  fi
 
   if is_runner && unit_exists ci-image-prewarm.service; then
     local summary noarm failed_n
