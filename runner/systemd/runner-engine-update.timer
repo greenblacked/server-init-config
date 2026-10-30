@@ -1,0 +1,10 @@
+[Unit]
+Description=Upgrade Docker CE and GitLab Runner every Sunday
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
