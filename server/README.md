@@ -45,6 +45,22 @@ Settings are saved to `/etc/server-init.conf` on the first run (`ADMIN_USER`, `E
 `"80/tcp 443/tcp"`, `INSTALL_DOCKER`, `INSTALL_SWAP`, `TIMEZONE`, the cleanup keys below, and for the Debian script `APP`). Edit the file and rerun
 `/usr/local/sbin/server-init.sh` to change them. An existing conf is never rewritten: keys it lacks use the defaults.
 
+## Bootstrap from your laptop
+
+Run on your laptop, in a clean checkout of this repo, after the server is up and your SSH key works for root:
+
+```bash
+server/bootstrap.sh SERVER_IP
+```
+
+It waits for cloud-init, streams `server/` and `common/` of `git HEAD` to `/root/server-init-config` over SSH (the repo is
+private, so it is never cloned on the server and no credential goes there), runs the `server-init-*.sh` that matches the
+OS read from `/etc/os-release`, installs `health` (plus the maintenance tools on Fedora and EL, see below) and ends with
+`health`. It never installs or registers a GitLab Runner; for a runner host use [`runner/bootstrap.sh`](../runner/README.md).
+Root keeps SSH login by key on port 22 and nothing here closes it. Options: `--user`, `--port`, `--os`, `--allow-dirty`,
+`--continue-degraded`, `--dry-run` (see `--help`). `ADMIN_USER`, `EXTRA_PORTS`, `TIMEZONE`, `INSTALL_DOCKER`, `INSTALL_SWAP`,
+`INSTALL_CLEANUP` and `APP` in the environment are saved to `/etc/server-init.conf` on the first run. Rerunning is safe.
+
 ## Cleanup
 
 The `cleanup` step installs `/usr/local/sbin/server-cleanup` and a weekly systemd timer (`server-cleanup.timer`,
