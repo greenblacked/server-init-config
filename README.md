@@ -23,7 +23,7 @@ What a server built from this repo has:
 | Path | Purpose |
 |---|---|
 | `cloud-init/rocky.yaml`, `cloud-init/debian.yaml`, `cloud-init/rocky-x86.yaml`, `cloud-init/debian-x86.yaml` | user-data for new servers (generated, do not edit); the `-x86` files have the same content, labelled for x86 servers |
-| `cloud-init/server-fedora.yaml`, `cloud-init/server-el10.yaml` | user-data for new general (non-runner) servers: embed `server/server-init-*.sh` (generated, do not edit); see [`server/README.md`](server/README.md#cloud-config-new-servers) |
+| `cloud-init/server-fedora.yaml`, `cloud-init/server-el10.yaml`, `cloud-init/server-debian.yaml` | user-data for new general (non-runner) servers: embed `server/server-init-*.sh` (generated, do not edit); see [`server/README.md`](server/README.md#cloud-config-new-servers) |
 | `cloud-init/templates/` | sources for the cloud-init files |
 | `gitlab-runner/` | **start here for a Rocky runner**: base init, `setup.sh` and copy-paste blocks for every component, `update.sh`, everyday commands and troubleshooting (see its README) |
 | `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
@@ -34,7 +34,7 @@ What a server built from this repo has:
 | `install/` | idempotent installers for optional components, run on the server from a clone; `update.sh` updates everything installed |
 | `monitoring/`, `logging/`, `registry-cache/`, `npm-cache/` | Docker Compose stacks and their configs |
 | `ai/` | Ollama + Open WebUI for a separate small server, installed by `install/ai.sh` (see [Local AI](#local-ai-separate-server)) |
-| `server/` | **general servers (not runners)**: base setup scripts for Fedora 44 and CentOS Stream / Rocky / AlmaLinux 10 (see its README) |
+| `server/` | **general servers (not runners)**: base setup scripts for Fedora 44, CentOS Stream / Rocky / AlmaLinux 10 and Ubuntu 26.04 / Debian 13, including Hetzner Apps images (see its README) |
 | `ci/` | `.gitlab-ci.yml` snippets: smoke test, defaults, arm64 check, multi-arch mirroring |
 
 ## Build a new server
