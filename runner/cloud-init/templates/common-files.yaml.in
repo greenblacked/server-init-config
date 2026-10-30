@@ -78,3 +78,50 @@
     permissions: '0644'
     content: |
 @@FILE common/shell-history.sh@@
+
+  - path: /usr/local/bin/runner-engine-update.sh
+    permissions: '0755'
+    content: |
+@@FILE runner/scripts/runner-engine-update.sh@@
+
+  - path: /usr/local/bin/ci-job-isolation.sh
+    permissions: '0755'
+    content: |
+@@FILE runner/scripts/ci-job-isolation.sh@@
+
+  - path: /etc/systemd/system/runner-engine-update.service
+    permissions: '0644'
+    content: |
+@@FILE runner/systemd/runner-engine-update.service@@
+
+  - path: /etc/systemd/system/runner-engine-update.timer
+    permissions: '0644'
+    content: |
+@@FILE runner/systemd/runner-engine-update.timer@@
+
+  - path: /etc/systemd/system/ci-job-isolation.service
+    permissions: '0644'
+    content: |
+@@FILE runner/systemd/ci-job-isolation.service@@
+
+  - path: /usr/local/sbin/pin-repo-key
+    permissions: '0755'
+    content: |
+@@FILE common/pin-repo-key.sh@@
+
+  - path: /etc/sysctl.d/90-ci-hardening.conf
+    permissions: '0644'
+    content: |
+@@FILE common/sysctl-hardening.conf@@
+
+  - path: /etc/security/limits.d/50-nocore.conf
+    permissions: '0644'
+    content: |
+      * hard core 0
+
+  - path: /etc/systemd/coredump.conf.d/50-off.conf
+    permissions: '0644'
+    content: |
+      [Coredump]
+      Storage=none
+      ProcessSizeMax=0

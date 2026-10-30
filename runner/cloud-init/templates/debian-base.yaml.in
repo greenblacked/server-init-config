@@ -33,17 +33,20 @@ runcmd:
   - [systemctl, restart, systemd-journald]
   - [timedatectl, set-timezone, Europe/Kyiv]
   - install -m 0755 -d /etc/apt/keyrings
-  - curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-  - chmod a+r /etc/apt/keyrings/docker.asc
+  - [sysctl, --system]
+  # Vendor keys are installed only if their fingerprints match (pin-repo-key); no vendor script is piped into a shell.
+  - [pin-repo-key, "https://download.docker.com/linux/debian/gpg", "9DC858229FC7DD38854AE2D88D81803C0EBFCD88", /etc/apt/keyrings/docker.asc]
   - sh -c '. /etc/os-release; echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list'
   - apt-get update -q
   - apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   - [systemctl, enable, --now, docker]
   - docker compose -f /opt/registry-cache/docker-compose.yml up -d
-  - curl -fsSL https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh -o /tmp/runner-repo.sh
-  - bash /tmp/runner-repo.sh
+  # UNVERIFIED offline: this fingerprint is from GitLab's Runner install docs; check it against https://docs.gitlab.com/runner/install/linux-repository/
+  - [pin-repo-key, "https://packages.gitlab.com/runner/gitlab-runner/gpgkey", "F6403F6544A38863DAA0B6E03F01618A51312F3F", /etc/apt/keyrings/gitlab-runner.asc]
+  - sh -c '. /etc/os-release; echo "deb [signed-by=/etc/apt/keyrings/gitlab-runner.asc] https://packages.gitlab.com/runner/gitlab-runner/debian ${VERSION_CODENAME} main" > /etc/apt/sources.list.d/gitlab-runner.list'
+  - apt-get update -q
   - apt-get install -y -q gitlab-runner
   - usermod -aG docker gitlab-runner
   - chmod 600 /etc/gitlab-runner/config.toml
   - [systemctl, daemon-reload]
-  - [systemctl, enable, --now, runner-weekly-cleanup.timer, runner-disk-guard.timer]
+  - [systemctl, enable, --now, runner-weekly-cleanup.timer, runner-disk-guard.timer, runner-engine-update.timer, ci-job-isolation.service]
