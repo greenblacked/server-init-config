@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Laptop-side bootstrap of a new server built from one of the cloud-init files.
+# Laptop-side bootstrap of a new GitLab Runner host built from one of the runner cloud-init files.
+# For a plain server without a runner use server/bootstrap.sh.
 # Waits for cloud-init, streams this repo (git HEAD) to the server over SSH, runs the safe components
 # through runner/setup.sh and finishes with `health`. Nothing secret is stored on the server
 # beforehand: the repo is private, so it is never cloned there, and the runner token is typed at the
@@ -28,7 +29,7 @@ usage() {
   cat <<USAGE
 Usage: $0 [options] SERVER_IP
 
-Run after creating a server from a cloud-init file. Waits for cloud-init, copies this repo (git HEAD)
+Run after creating a runner server from a runner cloud-init file (for a plain server: server/bootstrap.sh). Waits for cloud-init, copies this repo (git HEAD)
 to ${REMOTE_DIR} without any credential on the server, installs the safe components and runs health.
 
   --user USER         SSH user (default root); a non-root user needs passwordless sudo
