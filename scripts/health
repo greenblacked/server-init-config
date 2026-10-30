@@ -9,6 +9,7 @@ MEM_WARN=15
 MEM_FAIL=5
 LOAD_WARN=1.5
 LOAD_FAIL=3
+CLAM_SIG_WARN_DAYS=7
 QUICK=0
 ONLY_CONTAINERS=0
 COLOR=1
@@ -575,6 +576,68 @@ check_serverinit() {
   return 0
 }
 
+# Optional section: only for security tools that are installed (install/security-tools.sh). Reads existing reports and
+# files only, runs no scan, so it is cheap and -q does not change it. Prints nothing when none is installed.
+check_securitytools() {
+  local shown=0 f idx n age newest sig
+  hdr() { if (( shown == 0 )); then section "Security tools"; shown=1; fi; }
+
+  if have lynis && [[ -r /var/log/lynis-report.dat ]]; then
+    idx=$(sed -n 's/^hardening_index=//p' /var/log/lynis-report.dat 2>/dev/null | tail -1 || true)
+    if isnum "$idx"; then
+      hdr
+      f=$(stat -c %Y /var/log/lynis-report.dat 2>/dev/null || echo 0)
+      info "lynis hardening index ${idx} (last audit $(human_age $(( $(date +%s) - f ))) ago)"
+    fi
+  fi
+
+  if have rkhunter; then
+    f=$(ls -1t /var/log/security-audit/rkhunter-*.log 2>/dev/null | head -1 || true)
+    if [[ -n "$f" && -r "$f" ]]; then
+      hdr
+      n=$(grep -c '^Warning' "$f" 2>/dev/null || true)
+      age=$(human_age $(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) )))
+      if [[ "${n:-0}" -gt 0 ]]; then warn "rkhunter: ${n} warning(s) in the last run (${age} ago), see ${f}"
+      else ok "rkhunter: no warnings in the last run (${age} ago)"; fi
+    fi
+  fi
+
+  if have aide; then
+    f=/var/lib/security-tools/aide/aide.db.gz
+    if [[ -e "$f" ]]; then
+      hdr
+      info "aide database from $(date -d "@$(stat -c %Y "$f" 2>/dev/null || echo 0)" +%F)"
+    elif [[ -f /etc/security-tools/aide.conf ]]; then
+      hdr
+      warn "aide installed but its database is missing (aide --config /etc/security-tools/aide.conf --init)"
+    fi
+  fi
+
+  if have freshclam || have clamscan; then
+    newest=0
+    for f in /var/lib/clamav/*.cvd /var/lib/clamav/*.cld; do
+      [[ -e "$f" ]] || continue
+      sig=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+      if (( sig > newest )); then newest=$sig; fi
+    done
+    hdr
+    if (( newest == 0 )); then
+      warn "clamav: no signature database (run freshclam)"
+    else
+      age=$(( ( $(date +%s) - newest ) / 86400 ))
+      if (( age > CLAM_SIG_WARN_DAYS )); then warn "clamav signatures are ${age} days old (freshclam)"
+      else ok "clamav signatures ${age} day(s) old"; fi
+    fi
+  fi
+
+  if have auditctl && (( ! LIMITED )); then
+    hdr
+    if auditctl -s 2>/dev/null | grep -q '^enabled [12]'; then ok "auditd: audit enabled"
+    else warn "auditd installed but audit is not enabled"; fi
+  fi
+  return 0
+}
+
 check_services() {
   section "Services"
   local u
@@ -1125,6 +1188,7 @@ check_security
 check_firewall
 check_updates
 check_serverinit
+check_securitytools
 check_services
 check_runner
 check_docker
