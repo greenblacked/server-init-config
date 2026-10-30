@@ -33,6 +33,7 @@ What a server built from this repo has:
 | `install/` | idempotent installers for optional components, run on the server from a clone; `update.sh` updates everything installed |
 | `monitoring/`, `logging/`, `registry-cache/`, `npm-cache/` | Docker Compose stacks and their configs |
 | `ai/` | Ollama + Open WebUI for a separate small server, installed by `install/ai.sh` (see [Local AI](#local-ai-separate-server)) |
+| `server/` | **general servers (not runners)**: base setup scripts for Fedora 44 and CentOS Stream / Rocky / AlmaLinux 10 (see its README) |
 | `ci/` | `.gitlab-ci.yml` snippets: smoke test, defaults, arm64 check, multi-arch mirroring |
 
 ## Build a new server
