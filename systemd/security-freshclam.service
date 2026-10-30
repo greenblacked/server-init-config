@@ -1,0 +1,14 @@
+[Unit]
+Description=Update ClamAV signatures (freshclam, no daemon)
+
+[Service]
+Type=oneshot
+SyslogIdentifier=security-freshclam
+ExecStart=/usr/bin/freshclam --quiet
+Nice=19
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/clamav /var/log
