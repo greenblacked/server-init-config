@@ -2686,7 +2686,8 @@ wipe_dir() {
 
 usage() {
   cat <<USAGE
-Usage: $0 [--help]
+Usage: $0 [--dry-run] [--help]
+  --dry-run                   same as DRY_RUN=1: show what would be cleaned without deleting anything
 Env:
   RETENTION_DAYS              keep images, builds and temp files newer than N days (default: 7)
   JOURNAL_MAX                 max systemd journal size (default: 500M)
@@ -2696,7 +2697,14 @@ Env:
 USAGE
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then usage; exit 0; fi
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -n|--dry-run) DRY_RUN=1 ;;
+    *) usage >&2; echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 
 exec 9>/run/runner-weekly-cleanup.lock
@@ -9345,7 +9353,8 @@ wipe_dir() {
 
 usage() {
   cat <<USAGE
-Usage: $0 [--help]
+Usage: $0 [--dry-run] [--help]
+  --dry-run                   same as DRY_RUN=1: show what would be cleaned without deleting anything
 Env:
   RETENTION_DAYS              keep images, builds and temp files newer than N days (default: 7)
   JOURNAL_MAX                 max systemd journal size (default: 500M)
@@ -9355,7 +9364,14 @@ Env:
 USAGE
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then usage; exit 0; fi
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -n|--dry-run) DRY_RUN=1 ;;
+    *) usage >&2; echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 
 exec 9>/run/runner-weekly-cleanup.lock
@@ -13465,7 +13481,8 @@ wipe_dir() {
 
 usage() {
   cat <<USAGE
-Usage: $0 [--help]
+Usage: $0 [--dry-run] [--help]
+  --dry-run                   same as DRY_RUN=1: show what would be cleaned without deleting anything
 Env:
   RETENTION_DAYS              keep images, builds and temp files newer than N days (default: 7)
   JOURNAL_MAX                 max systemd journal size (default: 500M)
@@ -13475,7 +13492,14 @@ Env:
 USAGE
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then usage; exit 0; fi
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -n|--dry-run) DRY_RUN=1 ;;
+    *) usage >&2; echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 
 exec 9>/run/runner-weekly-cleanup.lock

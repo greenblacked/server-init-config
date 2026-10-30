@@ -93,7 +93,7 @@ ssh ops@SERVER_IP 'sudo bash -c "cd /root/server-init-config && runner/update.sh
 ssh ops@SERVER_IP 'sudo bash -c "cd /root/server-init-config && runner/update.sh"'
 ```
 
-`update.sh` backs up every file it changes, restores them if a check fails, and skips steps that would interrupt CI while jobs run (exit code 3, rerun later). Do not use `update.sh --pull`: the server has no git clone and no credential. Cleanup runs weekly by itself; to run it now: `srv clean` (Fedora and EL) or `sudo server-cleanup` (plain servers), `sudo runner-weekly-cleanup.sh` (runner). Add `--dry-run` or `DRY_RUN=1` to preview.
+`update.sh` backs up every file it changes, restores them if a check fails, and skips steps that would interrupt CI while jobs run (exit code 3, rerun later). Do not use `update.sh --pull`: the server has no git clone and no credential. Cleanup runs weekly by itself; to run it now: `srv clean` or `sudo server-cleanup` (plain servers on Fedora, EL and openSUSE), `sudo bash /root/server-init-config/server/server-cleanup.sh` (Ubuntu and Debian), `sudo runner-weekly-cleanup.sh` (runner). Add `--dry-run` to any of them to preview.
 
 ## Roll back
 
