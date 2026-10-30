@@ -158,6 +158,7 @@ sudo gitlab-runner/setup.sh --lock-root                  # after the admin login
 | `--users` | admin user, service users, SSH hardening (root SSH stays open) |
 | `--packages` | admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, sar, ...), aliases, tmux config |
 | `--tools` | `health`, weekly cleanup, disk guard and their timers |
+| `--security` | security tools for your own host (lynis, OpenSCAP, auditd, nmap, trivy, gitleaks, ...); not part of `--base` or `--all`, see [Security tools](#security-tools) |
 | `--register` | registers the runner (asks for the token) |
 | `--registry-cache` | Docker Hub pull-through cache on `127.0.0.1:5000` |
 | `--monitoring` | Prometheus, node_exporter, Grafana, as the `monitoring` user |
@@ -181,6 +182,7 @@ Components are installed in that order whatever the order of the flags. If one f
 | [Users](COMMANDS.md#users) | admin user, service users, SSH hardening |
 | [Admin tools](COMMANDS.md#packages) | htop, btop, ncdu, iotop and others, aliases, tmux config |
 | [Health + cleanup](COMMANDS.md#tools) | `health`, weekly cleanup, disk guard |
+| [Security tools](COMMANDS.md#security) | lynis, OpenSCAP, auditd, nmap, trivy, gitleaks and more |
 | [Register](COMMANDS.md#register) | registers the runner (asks for the token) |
 | [Docker Hub cache](COMMANDS.md#registry-cache) | pull-through cache on `127.0.0.1:5000` |
 | [Monitoring](COMMANDS.md#monitoring) | Prometheus, node_exporter, Grafana |
@@ -209,6 +211,24 @@ sudo gitlab-runner/update.sh --rollback  # restore the files from the last backu
 ```
 
 It syncs scripts, units and stack configs for what is installed. It backs up every changed file, restores them if a check fails, and skips CI-affecting steps while jobs are running (exit code `3`, rerun later). It also moves the monitoring and logging containers to the `monitoring` user, handing their data volumes over to it, so it needs `install/users.sh` to have run.
+
+## Security tools
+
+Optional tools to audit and test **this host and your own projects**. Only against systems you own or are authorized to
+test; on Hetzner, scanning or attacking third-party systems violates their terms, so check Hetzner's current policy.
+
+```bash
+sudo gitlab-runner/setup.sh --security                          # lynis, oscap, auditd, ssh-audit, testssl, nmap and friends, trivy, gitleaks, ...
+sudo install/security-tools.sh --aide --audit-timer             # opt-in extras (see --help); the runner host is a 4 GB machine, mind the RAM
+sudo lynis audit system
+sudo rkhunter --check --sk                                      # with --rkhunter
+trivy image IMAGE        # also: trivy fs .   gitleaks detect -s .   hadolint Dockerfile   dockle IMAGE
+nmap -sV your-host       # and: kali, then nmap / nikto -h your-site inside the container
+```
+
+The default set has no daemons that use real memory (ClamAV's `clamd` is never installed). AIDE only watches `/etc`,
+`/usr/local`, `/boot`, `/usr/bin`, `/usr/sbin`. The full command list is in [`server/README.md`](../server/README.md#security-tools).
+`health` shows the lynis index, rkhunter warnings, AIDE database, ClamAV signature age and auditd state when they are installed.
 
 ## Everyday commands
 

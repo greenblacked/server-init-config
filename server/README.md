@@ -76,10 +76,62 @@ From a second terminal, before you log out:
 ssh ops@SERVER_IP 'sudo -n true && echo sudo-ok'
 ```
 
+## Security tools
+
+Tools to test and audit **your own** servers. Use them only against systems you own or are authorized to test. On Hetzner,
+scanning or attacking third-party systems violates their terms: check Hetzner's current policy before you run anything
+against a host that is not yours.
+
+```bash
+sudo install/security-tools.sh                  # default: --audit --network --scan
+sudo install/security-tools.sh --audit --network --scan --kali
+sudo install/security-tools.sh --aide --clamav  # opt-in tools; --help lists all and what they cost
+```
+
+| Group | Installs |
+|---|---|
+| `--audit` | lynis, OpenSCAP (EL/Fedora, evaluation only), auditd with a small ruleset, ssh-audit, testssl.sh |
+| `--network` | nmap, tcpdump, tshark, iperf3, socat, ncat, whois, dig, lsof, mtr, traceroute, iftop, nethogs, bmon |
+| `--scan` | trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: pinned release binaries, SHA256 checked, a mismatch is refused |
+| opt-in | `--aide`, `--clamav` (no clamd), `--rkhunter`, `--chkrootkit`, `--arp-scan`, `--grype`, `--syft`, `--k8s` (kubescape, kube-bench) |
+| `--kali` | the `kali` command: Kali Linux in a Docker container, built on first use (2-3 GB); needs Docker |
+| `--audit-timer` | weekly lynis, oscap, aide and rkhunter reports in `/var/log/security-audit` (idle priority) |
+
+It supports CentOS Stream/Rocky/AlmaLinux 10, Fedora 44, Debian 13 and Ubuntu 26.04, skips what a release does not
+package and never fails the run for a missing optional tool. A failed checksum is the exception: that tool is not
+installed and the script exits non-zero. Versions are variables at the top of the script.
+
+```bash
+sudo lynis audit system                                # hardening report, index in /var/log/lynis-report.dat
+sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_standard --report /tmp/oscap.html \
+  /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml      # ssg-almalinux10-ds.xml, ssg-cs10-ds.xml, ssg-fedora-ds.xml; never --remediate
+sudo rkhunter --check --sk                             # with --rkhunter
+sudo aide --config /etc/security-tools/aide.conf --check   # with --aide
+sudo clamscan -r -i /srv                               # with --clamav (needs ~1.2 GB RAM while it runs)
+ssh-audit your-host                                    # SSH algorithms and known weaknesses
+testssl your-site.example.com:443                      # TLS configuration
+nmap -sV your-host                                     # open ports and versions
+sudo tshark -i eth0 -c 100 -f 'port 53'                # capture; iftop and nethogs show live traffic
+trivy image IMAGE                                      # image CVEs; trivy fs . for a project folder
+gitleaks detect -s .                                   # secrets in a repo and its history
+trufflehog git file://. --only-verified                # secrets, verified ones only
+osv-scanner scan source -r .                           # dependency CVEs
+hadolint Dockerfile                                    # Dockerfile lint
+dockle IMAGE                                           # image best practices (CIS Docker)
+cosign verify --key cosign.pub IMAGE                   # signature check (key or --certificate-identity options)
+kubescape scan                                         # with --k8s, against a cluster you own
+kube-bench run                                         # with --k8s, run on a node of your own cluster
+kali                                                   # shell in the Kali container; then: nmap -sV your-host, nikto -h your-site
+```
+
+`kali` runs with `--rm`, on the Docker bridge network (`kali --host-net` for the host network) and without the Docker
+socket; files in `/home/kali` live in the volume `kali-home`. `kali update` rebuilds the image, `kali remove` deletes
+image and volume. auditd rules only cover the paths that exist when the script runs: rerun it after installing Docker or the runner.
+
 ## Health report
 
 `health` gives a one-command status report: system, disk and memory, security, firewall and open ports, fail2ban,
-automatic updates, pending reboot, SSH settings, services, Docker and containers. Install it once from a checkout
+automatic updates, pending reboot, SSH settings, services, Docker and containers, and (only when installed) lynis, rkhunter, AIDE, ClamAV and auditd status. Install it once from a checkout
 of this repo on the server:
 
 ```bash

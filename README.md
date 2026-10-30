@@ -32,6 +32,7 @@ What a server built from this repo has:
 | `scripts/` | host scripts: `health`, weekly cleanup, disk guard, image prewarm |
 | `systemd/` | services and timers for the scripts |
 | `install/` | idempotent installers for optional components, run on the server from a clone; `update.sh` updates everything installed |
+| `install/security-tools.sh`, `scripts/kali`, `security/kali/` | optional security tools for auditing your own servers: lynis, OpenSCAP, auditd, nmap, trivy, gitleaks and more, plus a Kali container helper (see [`server/README.md`](server/README.md#security-tools)) |
 | `monitoring/`, `logging/`, `registry-cache/`, `npm-cache/` | Docker Compose stacks and their configs |
 | `ai/` | Ollama + Open WebUI for a separate small server, installed by `install/ai.sh` (see [Local AI](#local-ai-separate-server)) |
 | `server/` | **general servers (not runners)**: base setup scripts for Fedora 44 and CentOS Stream / Rocky / AlmaLinux 10 (see its README) |
