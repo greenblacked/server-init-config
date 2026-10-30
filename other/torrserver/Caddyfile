@@ -7,6 +7,12 @@
 	}
 }
 
+(torrserver_proxy) {
+	reverse_proxy torrserver:8090 {
+		flush_interval -1
+	}
+}
+
 {$DOMAIN} {
 	encode zstd gzip
 
@@ -18,9 +24,16 @@
 		-Server
 	}
 
-	# TorrServer does the login itself (HTTP basic auth); the Authorization header is passed through.
-	reverse_proxy torrserver:8090 {
-		flush_interval -1
+	# TorrServer leaves /play, /subs, /playlist, /stream and /swagger outside its own login, so Caddy
+	# asks for the same login (bcrypt hash in auth.caddy, written by install.sh) on every path but /echo.
+	# The Authorization header is passed on, so TorrServer's own check passes as well.
+	@echo path /echo
+	handle @echo {
+		import torrserver_proxy
+	}
+	handle {
+		import /etc/caddy/auth.caddy
+		import torrserver_proxy
 	}
 
 	log {

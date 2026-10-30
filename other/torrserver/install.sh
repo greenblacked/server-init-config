@@ -94,6 +94,7 @@ CREDS="${TS_DIR}/credentials"
 ENVF="${TS_DIR}/.env"
 DATA="${TS_DIR}/data"
 FWSTATE="${TS_DIR}/.firewall-added"
+CADDY_AUTH="${TS_DIR}/caddy-auth.caddy"
 COMPOSE=(docker compose --project-directory "$TS_DIR" -f "${TS_DIR}/docker-compose.yml")
 
 # ---------- helpers ----------
@@ -266,14 +267,35 @@ write_accs() { # accs.db: {"user":"password"}, readable by the container user on
   user=$(grep -E '^TS_USER=' "$CREDS" | head -n1 | cut -d= -f2-)
   pass=$(grep -E '^TS_PASS=' "$CREDS" | head -n1 | cut -d= -f2-)
   tmp=$(mktemp "${DATA}/config/.accs.XXXXXX")
-  jq -nc --arg u "$user" --arg p "$pass" '{($u):$p}' > "$tmp"
+  # Through the environment, not argv: /proc/<pid>/cmdline is world readable, environ is not.
+  TS_U="$user" TS_P="$pass" jq -nc '{(env.TS_U): env.TS_P}' > "$tmp"
   chown "${TS_UID}:${TS_GID}" "$tmp"; chmod 600 "$tmp"
   if [[ -f "${DATA}/config/accs.db" ]] && cmp -s "$tmp" "${DATA}/config/accs.db"; then rm -f "$tmp"; return 1; fi
   mv "$tmp" "${DATA}/config/accs.db"
 }
 
+# Caddy login in front of TorrServer (public mode). TorrServer leaves /play, /subs, /playlist, /stream
+# and /swagger outside its own auth, so Caddy asks for the same login on every path except /echo.
+# Only a bcrypt hash is stored (0600, root). The password goes to caddy hash-password on stdin.
+write_caddy_auth() { # returns 0 when the file was (re)written
+  local user pass hash tmp
+  user=$(grep -E '^TS_USER=' "$CREDS" | head -n1 | cut -d= -f2-)
+  pass=$(grep -E '^TS_PASS=' "$CREDS" | head -n1 | cut -d= -f2-)
+  hash=$(printf '%s\n' "$pass" | docker run --rm -i --network none --read-only "$CADDY_IMAGE" caddy hash-password) \
+    || die "could not hash the password with the caddy image"
+  [[ "$hash" =~ ^\$2[aby]\$[0-9]{2}\$[A-Za-z0-9./]{53}$ ]] || die "caddy hash-password returned an unexpected value"
+  tmp=$(mktemp "${CADDY_AUTH}.XXXXXX")
+  chmod 600 "$tmp"
+  printf 'basic_auth {\n\t%s %s\n}\n' "$user" "$hash" > "$tmp"
+  mv "$tmp" "$CADDY_AUTH"
+}
+
+# Print the compose project label of a container; empty if there is no such container.
+container_project() { docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$1" 2>/dev/null || true; }
+container_exists() { docker inspect "$1" >/dev/null 2>&1; }
+
 do_install() {
-  local public_now domain_now email_now new_creds=0 changed_creds=0
+  local public_now domain_now email_now new_creds=0 changed_creds=0 recreate=0 c
   ensure_tools
   check_docker
 
@@ -288,6 +310,13 @@ do_install() {
     [[ "$domain_now" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$domain_now" == *.* ]] || die "DOMAIN '${domain_now}' is not a valid host name"
     [[ "$email_now" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die "ACME_EMAIL '${email_now}' is not a valid address"
   fi
+
+  # Containers named like ours but started from somewhere else (for example a hand-written compose file).
+  for c in torrserver torrserver-caddy; do
+    if container_exists "$c" && [[ "$(container_project "$c")" != torrserver ]]; then
+      die "a container named '${c}' already exists and was not created by this script. Stop and remove it (docker rm -f ${c}), then rerun."
+    fi
+  done
 
   log "installing TorrServer ${TS_VERSION} into ${TS_DIR}"
   install -d -m 0755 -o root -g root "$TS_DIR"
@@ -329,15 +358,25 @@ do_install() {
   chown root:root "$CREDS"; chmod 600 "$CREDS"
   write_accs && changed_creds=1
 
+  # accs.db is read only at start: if it changed under a container that already exists, recreate it.
+  if (( changed_creds )) && container_exists torrserver; then recreate=1; fi
+
   if (( NO_START )); then
     log "--no-start: files written, containers not started"
   else
     if ! "${COMPOSE[@]}" config -q; then die "docker compose config failed"; fi
     "${COMPOSE[@]}" pull -q >/dev/null 2>&1 || warn "image pull failed; using a local copy if present"
-    # Going private: a profile that is no longer active is not an orphan, so remove Caddy explicitly.
-    if [[ "$public_now" != 1 ]]; then "${COMPOSE[@]}" --profile public rm -sf caddy >/dev/null 2>&1 || true; fi
-    # Credentials changed on a running container: it reads accs.db only at start.
-    if (( changed_creds && ! new_creds )); then "${COMPOSE[@]}" up -d --remove-orphans --force-recreate; else "${COMPOSE[@]}" up -d --remove-orphans; fi
+    if [[ "$public_now" == 1 ]]; then
+      # New hash when the password changed or the file is gone (bcrypt salts differ, so it cannot be compared).
+      if (( changed_creds )) || [[ ! -s "$CADDY_AUTH" ]]; then
+        write_caddy_auth && recreate=1
+      fi
+    else
+      # Going private: a profile that is no longer active is not an orphan, so remove Caddy explicitly.
+      "${COMPOSE[@]}" --profile public rm -sf caddy >/dev/null 2>&1 || true
+      rm -f "$CADDY_AUTH"
+    fi
+    if (( recreate )); then "${COMPOSE[@]}" up -d --remove-orphans --force-recreate; else "${COMPOSE[@]}" up -d --remove-orphans; fi
     wait_echo || die "TorrServer did not answer on 127.0.0.1:${TS_HOST_PORT} within 60 s (docker logs torrserver)"
     apply_settings
   fi
@@ -387,7 +426,21 @@ summary() {
 
 # ---------- uninstall ----------
 
+# Refuse to purge anything that is not this script's own directory.
+check_purge_target() {
+  local d="${TS_DIR%/}"
+  case "$d" in
+    ""|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/mnt|/media|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/*|/var|/var/lib|/var/log)
+      die "refusing to purge '${TS_DIR}': it is a system path" ;;
+  esac
+  [[ -d "$d" && ! -L "$d" ]] || die "refusing to purge '${TS_DIR}': not a plain directory"
+  grep -qE '^name: torrserver[[:space:]]*$' "${d}/docker-compose.yml" 2>/dev/null \
+    || die "refusing to purge '${TS_DIR}': no docker-compose.yml with 'name: torrserver' (not installed by this script). Delete it by hand if you are sure."
+}
+
 do_uninstall() {
+  local c
+  if (( PURGE )); then check_purge_target; fi
   log "uninstalling TorrServer (data kept unless --purge)"
   if command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now torrserver-cleanup.timer >/dev/null 2>&1 || true
@@ -405,7 +458,10 @@ do_uninstall() {
         "${COMPOSE[@]}" --profile '*' down --remove-orphans || warn "compose down failed"
       fi
     fi
-    docker rm -f torrserver torrserver-caddy >/dev/null 2>&1 || true
+    # Leftovers only if they belong to this compose project; a container someone started by hand stays.
+    for c in torrserver torrserver-caddy; do
+      if container_exists "$c" && [[ "$(container_project "$c")" == torrserver ]]; then docker rm -f "$c" >/dev/null 2>&1 || true; fi
+    done
   else
     warn "docker not found: containers not touched"
   fi
@@ -413,10 +469,10 @@ do_uninstall() {
   fw_close
 
   if (( PURGE )); then
-    [[ "$TS_DIR" != "/" && -d "$TS_DIR" ]] && rm -rf --one-file-system -- "$TS_DIR"
+    rm -rf --one-file-system -- "${TS_DIR%/}"
     log "removed ${TS_DIR} (data, credentials, config)"
   else
-    rm -f "${TS_DIR}/cleanup.sh" "${TS_DIR}/.firewall-added"
+    rm -f "${TS_DIR}/cleanup.sh" "${TS_DIR}/.firewall-added" "$CADDY_AUTH"
     log "kept ${TS_DIR} (data/, credentials, .env). Delete it with: ./install.sh --uninstall --purge"
   fi
   log "uninstalled"
