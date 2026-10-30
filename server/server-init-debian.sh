@@ -39,8 +39,9 @@ EXTRA_PORTS="${EXTRA_PORTS:-}"
 INSTALL_DOCKER=${INSTALL_DOCKER:-1}
 INSTALL_SWAP=${INSTALL_SWAP:-1}
 TIMEZONE=${TIMEZONE:-Europe/Kyiv}
-# Hetzner Apps image: auto detects it, none ignores it, or name it: coolify docker-ce gitlab jitsi owncast
-# photoprism prometheus-grafana rustdesk. A detected app gets its own ports opened in ufw.
+# Hetzner Apps image: auto detects it, none ignores it, or name it: coolify docker-ce gitlab jitsi lamp
+# nextcloud owncast photoprism prometheus-grafana rustdesk wireguard wordpress. A detected app gets its
+# own ports opened in ufw. On a wireguard image ufw is left off (its nftables.service flushes the ruleset).
 APP=${APP:-auto}
 CONF
 fi
@@ -217,6 +218,8 @@ system_tuning() {
 # image itself serves or publishes. APP_PORTS and APP_NAME are set by detect_app.
 APP_NAME=""
 APP_PORTS=""
+# Set to 1 for an app whose image owns the firewall (ufw must not be enabled).
+APP_OWN_FW=0
 app_ports() {
   case "$1" in
     # coolify/test.sh checks the dashboard on http://localhost:8000; the rest is set up by Coolify's
@@ -228,8 +231,15 @@ app_ports() {
     # gitlab/README.md enables HTTPS (external_url https, Let's Encrypt) afterwards.
     gitlab) APP_PORTS="80/tcp 443/tcp" ;;
     # jitsi/files/etc/nginx/sites-available/hetzner listens on 80; jitsi/files/opt/hcloud/jitsi_setup.sh
-    # sets up the nginx site with a certificate (443). Media 10000/udp is not in the repo: use EXTRA_PORTS.
-    jitsi) APP_PORTS="80/tcp 443/tcp" ;;
+    # sets up the nginx site with a certificate (443). jitsi-videobridge2 takes media on 10000/udp
+    # (Jitsi quick-install guide); coturn (3478/udp, 5349/tcp) is added in firewall() when installed.
+    jitsi) APP_PORTS="80/tcp 443/tcp 10000/udp" ;;
+    # lamp, wordpress and nextcloud run the native Apache of the image (/opt/hcloud/{lamp,wp,nextcloud}_setup.sh).
+    lamp|wordpress|nextcloud) APP_PORTS="80/tcp 443/tcp" ;;
+    # wireguard: wg on WGUI_SERVER_LISTEN_PORT=51820/udp plus Caddy on 80/443 for the UI. Its
+    # /etc/nftables.conf starts with "flush ruleset" and nftables.service is enabled, so the image owns the
+    # firewall: firewall() does not enable ufw here.
+    wireguard) APP_PORTS="51820/udp 80/tcp 443/tcp"; APP_OWN_FW=1 ;;
     # apps/hetzner/<app>/files/opt/containers/<app>/docker-compose.yml, "ports:" of traefik/caddy/services.
     owncast) APP_PORTS="80/tcp 443/tcp 1935/tcp" ;;
     photoprism) APP_PORTS="80/tcp 443/tcp 2342/tcp" ;;
@@ -240,7 +250,7 @@ app_ports() {
 }
 
 detect_app() {
-  APP_NAME=""; APP_PORTS=""
+  APP_NAME=""; APP_PORTS=""; APP_OWN_FW=0
   case "$APP" in
     none) return 0 ;;
     auto) ;;
@@ -257,6 +267,10 @@ detect_app() {
   if [[ -z "$APP_NAME" ]]; then
     if pkg_installed gitlab-ce || [[ -f /opt/hcloud/gitlab_setup.sh ]]; then APP_NAME=gitlab
     elif pkg_installed jitsi-meet || [[ -f /opt/hcloud/jitsi_setup.sh ]]; then APP_NAME=jitsi
+    elif [[ -f /opt/hcloud/lamp_setup.sh ]]; then APP_NAME=lamp
+    elif [[ -f /opt/hcloud/wp_setup.sh ]]; then APP_NAME=wordpress
+    elif [[ -f /opt/hcloud/nextcloud_setup.sh ]]; then APP_NAME=nextcloud
+    elif [[ -f /opt/hcloud/wireguard_setup.sh || -f /etc/default/wireguard-ui ]]; then APP_NAME=wireguard
     elif [[ -d /data/coolify || -f /opt/hcloud/coolify_setup.sh ]]; then APP_NAME=coolify
     elif [[ -f /etc/apt/preferences.d/docker-ce.pref && -f /etc/apt/sources.list.d/docker.list ]]; then APP_NAME=docker-ce
     fi
@@ -275,8 +289,24 @@ ufw_ssh_live() { local o; o=$(ufw status 2>/dev/null) || return 1; grep -qE '^(2
 # A port range in ufw is written 6000:6007/tcp.
 ufw_open() { ufw allow "${1/-/:}" >/dev/null || { fail "could not open $1"; return 1; }; }
 
+# True for a Hetzner Apps image this script has no port list for.
+unknown_hetzner_app() {
+  local f
+  for f in /opt/hcloud/*_setup.sh /var/lib/cloud/scripts/per-instance/001_onboot; do [[ -e "$f" ]] && return 0; done
+  return 1
+}
+
 firewall() {
   local was_active=0 p
+  detect_app
+  if [[ "$APP" == auto && -z "$APP_NAME" ]] && unknown_hetzner_app; then
+    fail "unrecognised Hetzner Apps image: its ports are unknown, so ufw was not enabled (set APP=<name> or APP=none and EXTRA_PORTS in $CONF_FILE, then rerun)"
+    return 1
+  fi
+  if (( APP_OWN_FW )); then
+    log "Hetzner app: ${APP_NAME}; its image manages the firewall (nftables), so ufw is not enabled. Ports it serves: ${APP_PORTS}"
+    return 0
+  fi
   ufw_is_active && was_active=1
   ufw_ssh_saved || ufw allow 22/tcp >/dev/null || return 1
   # Lockout guard: never enable the firewall unless SSH is in the saved rules.
@@ -289,10 +319,9 @@ firewall() {
   for p in $EXTRA_PORTS; do
     if [[ "$p" =~ ^[0-9]{1,5}(-[0-9]{1,5})?/(tcp|udp)$ ]]; then ufw_open "$p" || true; else fail "ignored invalid EXTRA_PORTS entry: $p"; fi
   done
-  detect_app
   if [[ -n "$APP_NAME" ]]; then
+    [[ "$APP_NAME" != jitsi ]] || ! pkg_installed coturn || APP_PORTS="$APP_PORTS 3478/udp 5349/tcp"
     log "Hetzner app: ${APP_NAME}; opening its ports: ${APP_PORTS:-none}"
-    [[ "$APP_NAME" != jitsi ]] || log "jitsi media needs 10000/udp, not in the app repo; add it to EXTRA_PORTS if you use the videobridge"
     for p in $APP_PORTS; do ufw_open "$p" || true; done
   fi
   if (( ! was_active )); then

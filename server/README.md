@@ -75,8 +75,8 @@ Then run the commands under [Check](#check).
 
 ## Hetzner Apps images
 
-The [Hetzner Apps](https://github.com/hetznercloud/apps) (Coolify, Docker CE, GitLab CE, Jitsi Meet, Owncast,
-PhotoPrism, Prometheus Grafana, RustDesk) are Ubuntu 24.04 images with the software preinstalled, so
+The [Hetzner Apps](https://github.com/hetznercloud/apps) (Coolify, Docker CE, GitLab CE, Jitsi Meet, LAMP,
+Nextcloud, Owncast, PhotoPrism, Prometheus Grafana, RustDesk, WireGuard, WordPress) are Ubuntu 24.04 images with the software preinstalled, so
 `server-init-debian.sh` accepts Ubuntu 24.04 as well as 26.04. With `APP=auto` (default in
 `/etc/server-init.conf`) it recognises the image by the files and packages that repo installs and then:
 
@@ -89,15 +89,26 @@ PhotoPrism, Prometheus Grafana, RustDesk) are Ubuntu 24.04 images with the softw
 | `coolify` | `/data/coolify` or `/opt/hcloud/coolify_setup.sh` | `8000/tcp` (`test.sh`) |
 | `docker-ce` | `/etc/apt/preferences.d/docker-ce.pref` and `docker.list` | none |
 | `gitlab` | package `gitlab-ce` or `/opt/hcloud/gitlab_setup.sh` | `80/tcp 443/tcp` |
-| `jitsi` | package `jitsi-meet` or `/opt/hcloud/jitsi_setup.sh` | `80/tcp 443/tcp` |
+| `jitsi` | package `jitsi-meet` or `/opt/hcloud/jitsi_setup.sh` | `80/tcp 443/tcp 10000/udp` (videobridge media), plus `3478/udp 5349/tcp` when `coturn` is installed |
+| `lamp` | `/opt/hcloud/lamp_setup.sh` | `80/tcp 443/tcp` |
+| `nextcloud` | `/opt/hcloud/nextcloud_setup.sh` | `80/tcp 443/tcp` |
+| `wordpress` | `/opt/hcloud/wp_setup.sh` | `80/tcp 443/tcp` |
+| `wireguard` | `/opt/hcloud/wireguard_setup.sh` or `/etc/default/wireguard-ui` | `51820/udp 80/tcp 443/tcp`, but ufw is **not** enabled (see below) |
 | `owncast` | `/opt/containers/owncast/docker-compose.yml` | `80/tcp 443/tcp 1935/tcp` |
 | `photoprism` | `/opt/containers/photoprism/docker-compose.yml` | `80/tcp 443/tcp 2342/tcp` |
 | `prometheus-grafana` | `/opt/containers/prometheus-grafana/docker-compose.yml` | `80/tcp 443/tcp` |
 | `rustdesk` | `/opt/containers/rustdesk/docker-compose.yml` | `21115-21119/tcp`, `21116/udp` |
 
-The repo documents no ports beyond these. Anything else (for example Jitsi media `10000/udp`, Coolify's own
-proxy ports) goes into `EXTRA_PORTS`. Set `APP=none` to ignore app detection, or name the app to force its ports.
-The app repo configures no ufw rules, so the first run switches ufw on with SSH and these ports. Hetzner Cloud Firewalls, if you use them, are separate and unaffected.
+Anything else (for example Coolify's own proxy ports) goes into `EXTRA_PORTS`. Set `APP=none` to ignore app
+detection, or name the app to force its ports.
+
+- **WireGuard** image: its `/etc/nftables.conf` starts with `flush ruleset` and `nftables.service` is enabled, which
+  could wipe ufw's and fail2ban's tables at boot. The script therefore leaves ufw off there and logs the ports.
+- **Unrecognised Hetzner app** (`/opt/hcloud/*_setup.sh` or the `001_onboot` script exists but is not in the table):
+  the firewall step does not enable ufw, logs why and fails, so the app's public service is never blocked by guesswork.
+  Set `APP=none` plus `EXTRA_PORTS` in `/etc/server-init.conf` and rerun to take over the firewall yourself.
+
+For the other apps the app repo configures no ufw rules, so the first run switches ufw on with SSH and these ports. Hetzner Cloud Firewalls, if you use them, are separate and unaffected.
 
 ## Check
 
