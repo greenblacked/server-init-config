@@ -360,7 +360,30 @@ check "a running CI job: skipped, exit 0" '[[ $rc -eq 0 ]] && grep -q "SKIP 1 CI
 stub docker 'exit 1'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "docker not answering is not 'no jobs'" '[[ $rc -eq 0 ]] && grep -q "SKIP docker does not answer" <<<"$out"'
-rm -f "$T/bin/docker" "$T/bin/logger"; unset ENGINE_UPDATE_LOG; reset_calls
+# idle at the first look: the runner is stopped, the job list is read again, then the upgrade runs
+export ENGINE_UPDATE_DROPIN="$T/graceful-stop.conf"
+stub sleep 'exit 0'
+stub dnf 'if [[ "$1 $2" == "-q check-update" ]]; then exit 100; fi; exit 0'
+stub rpm 'echo "pkg-1-1"'
+stub systemctl 'case "$1" in
+  stop) touch "'"$T"'/runner-stopped" ;;
+  start) rm -f "'"$T"'/runner-stopped" ;;
+  is-active) [[ "$3" == gitlab-runner && -e "'"$T"'/runner-stopped" ]] && exit 3 ;;
+  cat) exit 1 ;;
+esac
+exit 0'
+rm -f "$T/runner-stopped" "$T/docker-calls"
+stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 1 ]] && echo jobabc; exit 0'
+reset_calls
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+check "a job picked up before the runner stopped: runner started again, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP a CI job appeared" <<<"$out" && grep -q "^start gitlab-runner" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)" && [[ ! -e "$T/runner-stopped" ]]'
+check "runner is stopped gracefully (SIGQUIT drop-in)" 'grep -q "^KillSignal=SIGQUIT" "$ENGINE_UPDATE_DROPIN" && grep -q "^stop --no-block gitlab-runner" <<<"$(calls systemctl)"'
+rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
+stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; exit 0'
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+seq=$(calls systemctl | grep -E '^(stop|mask|restart docker|start)' | tr '\n' ';')
+check "idle: stop, mask, upgrade, restart docker, start runner, OK" '[[ $rc -eq 0 ]] && grep -q "OK upgraded" <<<"$out" && grep -q "upgrade" <<<"$(calls dnf)" && [[ "$seq" == "stop --no-block gitlab-runner;mask --runtime gitlab-runner;restart docker;start gitlab-runner;" ]]' || echo "    seq: $seq"
+rm -f "$T/bin/docker" "$T/bin/logger" "$T/bin/sleep" "$T/bin/dnf" "$T/bin/rpm" "$T/bin/systemctl" "$T/runner-stopped" "$T/docker-calls"; unset ENGINE_UPDATE_LOG ENGINE_UPDATE_DROPIN; reset_calls
 
 section "server lock-root"
 LR="$ROOT/server/lock-root.sh"

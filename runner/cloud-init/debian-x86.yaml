@@ -387,13 +387,19 @@ write_files:
       #!/usr/bin/env bash
       # Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
       # The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
-      # without this they would never be updated. Docker is restarted first, then gitlab-runner; both must be active
-      # afterwards. The result is one line in /var/log/runner-engine-update.log, which health reads.
-      # Env: DRY_RUN=1 shows the plan only.
+      # without this they would never be updated. No job is started or killed by the upgrade: the runner is first stopped
+      # gracefully (it takes no new job and lets a job that is already running finish; the unit gets KillSignal=SIGQUIT),
+      # the job list is checked again, and only then are the packages upgraded. gitlab-runner is masked until the end, so
+      # a package scriptlet cannot start it in between. Docker is restarted, then gitlab-runner is started; both must be
+      # active afterwards. If a job is still there after the stop, the runner is started again and nothing is changed.
+      # The result is one line in /var/log/runner-engine-update.log, which health reads.
+      # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
       set -Eeuo pipefail
 
       LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
       DRY_RUN="${DRY_RUN:-0}"
+      STOP_WAIT="${STOP_WAIT:-1800}"
+      DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
       PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
 
       note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
@@ -442,18 +448,53 @@ write_files:
       fi
 
       before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
+
+      # From here the runner may be stopped; whatever happens, leave it running again.
+      runner_stopped=0
+      runner_back() {
+        systemctl unmask --runtime gitlab-runner >/dev/null 2>&1 || true
+        systemctl start gitlab-runner >/dev/null 2>&1 || true
+      }
+      trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
+
+      # SIGQUIT is the runner's graceful stop: no new job, running jobs finish. The default SIGTERM ends them.
+      if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null; then
+        mkdir -p "$(dirname "$DROPIN")"
+        printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=%s\n' "$STOP_WAIT" > "$DROPIN"
+        systemctl daemon-reload
+      fi
+      runner_stopped=1
+      systemctl stop --no-block gitlab-runner
+      waited=0
+      while systemctl is-active --quiet gitlab-runner; do
+        if (( waited >= STOP_WAIT )); then
+          note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
+          runner_stopped=0   # still stopping on its own: systemd restarts it when it exits
+          exit 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+      done
+      if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) || [[ -n "$jobs" ]]; then
+        note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
+        exit 0
+      fi
+      systemctl mask --runtime gitlab-runner >/dev/null 2>&1 || true
+
       if ! upgrade >>"$LOG" 2>&1; then
         note "FAIL package upgrade failed, see ${LOG}"
         exit 1
       fi
       systemctl restart docker
       sleep 5
-      systemctl restart gitlab-runner
-      sleep 5
-      bad=""
-      for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
       # The isolation rules live in iptables; reapply them after the Docker restart.
+      bad=""
       if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+      systemctl unmask --runtime gitlab-runner >/dev/null 2>&1 || true
+      systemctl start gitlab-runner || true
+      runner_stopped=0
+      sleep 5
+      for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
       if [[ -n "$bad" ]]; then
         note "FAIL not active after the upgrade:${bad}; was: ${before}"
         exit 1
