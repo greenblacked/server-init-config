@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install health, cleanup and disk guard scripts plus their systemd timers.
+# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
@@ -15,6 +15,7 @@ for f in health runner-weekly-cleanup.sh runner-disk-guard.sh; do
   install -m 0755 "$REPO_ROOT/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
+ensure_secure_path
 
 for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer; do
   install -m 0644 "$REPO_ROOT/systemd/$u" "/etc/systemd/system/$u"
@@ -26,4 +27,4 @@ systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer
 
 DRY_RUN=1 /usr/local/bin/runner-weekly-cleanup.sh >/dev/null
 systemctl list-timers 'runner-*' --no-pager
-log "OK: run 'health' for a full report"
+log "OK: run 'health' for a full report (it uses sudo itself when needed)"
