@@ -327,7 +327,9 @@ docker_engine() {
     docker info >/dev/null
     return
   fi
-  local arch repo_ok=0 src
+  local arch repo_ok=0 src compose_pkg=docker-compose
+  # Compose v2 is docker-compose-v2 on Ubuntu but docker-compose on Debian.
+  [[ "$DOCKER_DISTRO" != ubuntu ]] || compose_pkg=docker-compose-v2
   arch=$(dpkg --print-architecture)
   src="https://download.docker.com/linux/${DOCKER_DISTRO}"
   # Docker publishes a repo per codename; use it only when the index exists for this architecture.
@@ -349,8 +351,8 @@ EOF
     log "Docker source: download.docker.com (${DOCKER_DISTRO} ${CODENAME}, ${arch})"
   else
     log "download.docker.com has no repo for ${DOCKER_DISTRO} ${CODENAME:-unknown} ${arch}; using the distro packages"
-    apt_get install docker.io docker-compose-v2 >/dev/null || return 1
-    log "Docker source: distro packages docker.io + docker-compose-v2"
+    apt_get install docker.io "$compose_pkg" >/dev/null || return 1
+    log "Docker source: distro packages docker.io + ${compose_pkg}"
   fi
   systemctl enable --now docker || return 1
   docker info >/dev/null
@@ -397,7 +399,7 @@ step fail2ban fail2ban
 step auto-updates auto_updates
 step docker docker_engine
 step swap swap
-log "open in firewall: $(ufw status 2>/dev/null | awk 'NR > 4 && NF { printf "%s ", $1 }')"
+log "open in firewall: $(ufw status 2>/dev/null | awk 'NR > 4 && NF && !/\(v6\)/ { printf "%s ", $1 }')"
 if (( ${#FAILED_STEPS[@]} )); then
   log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"
   exit 1
