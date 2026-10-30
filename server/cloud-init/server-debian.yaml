@@ -152,6 +152,21 @@ write_files:
       net.ipv6.conf.default.accept_redirects = 0
       net.ipv4.conf.all.send_redirects = 0
       net.ipv4.conf.all.rp_filter = 2
+      -kernel.kptr_restrict = 2
+      -kernel.dmesg_restrict = 1
+      -kernel.yama.ptrace_scope = 1
+      -fs.protected_fifos = 2
+      -fs.protected_regular = 2
+      net.ipv4.conf.all.log_martians = 1
+      EOF
+        # No core dumps: they can hold keys and tokens.
+        put /etc/security/limits.d/50-nocore.conf 0644 <<'EOF'
+      * hard core 0
+      EOF
+        put /etc/systemd/coredump.conf.d/50-off.conf 0644 <<'EOF'
+      [Coredump]
+      Storage=none
+      ProcessSizeMax=0
       EOF
         # The journal backend is needed because Debian 13 has no /var/log/auth.log. Bans go through nftables,
         # which works whether or not ufw is active (ufw uses its own chains). Both are also the package defaults.

@@ -11620,7 +11620,19 @@ fi
 __SIC_EOF__
 chmod 755 "$R/common/shell-history.sh"
 
-echo "files written to $R: 42"
+install -d "$R/common"
+cat > "$R/common/sysctl-hardening.conf" <<'__SIC_EOF__'
+# Kernel hardening for runner hosts. A leading "-" ignores a key the running kernel does not have.
+-kernel.kptr_restrict = 2
+-kernel.dmesg_restrict = 1
+-kernel.yama.ptrace_scope = 1
+-fs.protected_fifos = 2
+-fs.protected_regular = 2
+net.ipv4.conf.all.log_martians = 1
+__SIC_EOF__
+chmod 644 "$R/common/sysctl-hardening.conf"
+
+echo "files written to $R: 43"
 INSTALL
 sudo bash /root/server-init-config/runner/install/update.sh
 ````
@@ -15748,7 +15760,19 @@ fi
 __SIC_EOF__
 chmod 755 "$R/common/shell-history.sh"
 
-echo "files written to $R: 42"
+install -d "$R/common"
+cat > "$R/common/sysctl-hardening.conf" <<'__SIC_EOF__'
+# Kernel hardening for runner hosts. A leading "-" ignores a key the running kernel does not have.
+-kernel.kptr_restrict = 2
+-kernel.dmesg_restrict = 1
+-kernel.yama.ptrace_scope = 1
+-fs.protected_fifos = 2
+-fs.protected_regular = 2
+net.ipv4.conf.all.log_martians = 1
+__SIC_EOF__
+chmod 644 "$R/common/sysctl-hardening.conf"
+
+echo "files written to $R: 43"
 bash "$R/runner/install/users.sh" </dev/null
 bash "$R/common/admin-tools.sh" </dev/null
 bash "$R/runner/install/host-tools.sh" </dev/null
