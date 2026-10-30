@@ -244,7 +244,7 @@ On Ubuntu and Debian use `sudo ufw status`. Then `sudo fail2ban-client status ss
 
 ### Hetzner Apps images
 
-The [Hetzner Apps](https://github.com/hetznercloud/apps) (Coolify, Docker CE, GitLab CE, Jitsi Meet, LAMP, Nextcloud, Owncast, PhotoPrism, Prometheus Grafana, RustDesk, WireGuard, WordPress) are Ubuntu 24.04 images with the software preinstalled. With `APP=auto` (default) the Debian init recognises the app by its files and packages, never reinstalls or reconfigures Docker when it exists, never touches the app's configuration, keeps existing firewall rules and adds only the app's documented ports.
+The [Hetzner Apps](https://github.com/hetznercloud/apps) (Coolify, Docker CE, GitLab CE, Jitsi Meet, LAMP, Nextcloud, Owncast, PhotoPrism, Prometheus Grafana, RustDesk, WireGuard, WordPress) are Ubuntu 24.04 images with the software preinstalled. With `APP=auto` (default) the Debian init recognises the app by its files and packages (a fresh Coolify image has none until Coolify is installed on first login: set `APP=coolify` for it, otherwise the init sees an unknown Hetzner image and stops before the firewall), never reinstalls or reconfigures Docker when it exists, never touches the app's configuration, keeps existing firewall rules and adds only the app's documented ports.
 
 | APP | Ports opened |
 |---|---|
