@@ -45,6 +45,8 @@ What a server built from this repo has:
    tools/bootstrap-server.sh SERVER_IP
    ```
 
+   On a new server, accept its host key first (the script uses `BatchMode` and never auto-accepts keys): connect once with `ssh root@SERVER_IP` and compare the fingerprint with the one in the cloud-init console output (Hetzner Console, server, Console), or `ssh-keyscan -p PORT SERVER_IP >> ~/.ssh/known_hosts` after verifying it the same way.
+
    It waits for cloud-init (and stops with `/var/log/ci-bootstrap-failed.log` if it failed), streams `git archive HEAD` to `/root/server-init-config` over SSH (the repo is private and no credential goes to the server), installs users, admin tools, host tools, the runner registration, Docker Hub cache, monitoring, logging and the npm and shared caches via `gitlab-runner/setup.sh`, and ends with `health`. You type the `glrt-` token at the prompt on the server. Root SSH stays open: the script never runs `lock-root` or `selinux`. Options: `--no-register`, `--with-prewarm`, `--user`, `--port`, `--allow-dirty`, `--dry-run` (see `--help`); `DOMAIN` and `ACME_EMAIL` in the environment add Grafana on a domain. Rerunning is safe: the server copy is replaced and installed components are skipped.
 
    Then go to step 6. Steps 4 and 5 below, and the copy in this paragraph, are the manual alternative to step 3.
