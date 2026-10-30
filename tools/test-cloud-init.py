@@ -30,7 +30,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FILES = ["gitlab-runner/cloud-init-rocky.yaml", "cloud-init/rocky.yaml", "cloud-init/rocky-x86.yaml", "cloud-init/debian.yaml",
-                 "cloud-init/debian-x86.yaml", "cloud-init/server-fedora.yaml", "cloud-init/server-el10.yaml"]
+                 "cloud-init/debian-x86.yaml", "cloud-init/server-fedora.yaml", "cloud-init/server-el10.yaml",
+                 "cloud-init/server-opensuse.yaml"]
 LIMIT = 32 * 1024
 LOCKOUT = ("permitrootlogin no", "allowusers", "allowgroups", "port ", "listenaddress")
 
