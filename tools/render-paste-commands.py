@@ -37,6 +37,7 @@ class Block:
     files: list[str]
     run: list[str] = field(default_factory=list)
     interactive: list[str] = field(default_factory=list)
+    skip: frozenset[str] = frozenset()
 
 
 # Never copied onto the runner host: the separate AI server installs it (its compose file is not embedded either).
@@ -67,6 +68,10 @@ LOGGING = ["install/logging.sh", "logging"]
 NPM = ["install/npm-cache.sh", "npm-cache"]
 PREWARM = ["install/image-prewarm.sh", "scripts/ci-image-prewarm.sh",
            "systemd/ci-image-prewarm.service", "systemd/ci-image-prewarm.timer"]
+# Optional security tooling: has its own block, left out of the update and everything-at-once blocks to keep them small.
+SECURITY = ["install/security-tools.sh", "scripts/kali", "scripts/security-audit-run.sh", "security/kali/Dockerfile",
+            "systemd/security-audit.service", "systemd/security-audit.timer",
+            "systemd/security-freshclam.service", "systemd/security-freshclam.timer"]
 EVERYTHING = ["install", "scripts", "systemd", "monitoring", "logging", "registry-cache", "npm-cache"]
 
 BLOCKS = [
@@ -86,6 +91,13 @@ BLOCKS = [
           "runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency "
           "cleanup every 30 minutes when the disk is 85% full. Ends with a dry run of the cleanup.",
           TOOLS, run=["install/host-tools.sh"]),
+    Block("security", "Security tools: audit, network, scan",
+          "Optional. Tools to test and audit your own server; use them only on systems you own or are authorized to test. "
+          "Default: lynis, OpenSCAP, auditd (small ruleset), ssh-audit, testssl.sh, nmap and other network tools, and trivy, gitleaks, "
+          "hadolint, cosign, osv-scanner, trufflehog, dockle as SHA256-verified release binaries. Options for the installer "
+          "(`bash /root/server-init-config/install/security-tools.sh --help`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, "
+          "`--grype`, `--syft`, `--k8s`, `--kali`, `--audit-timer`.",
+          SECURITY, run=["install/security-tools.sh"]),
     Block("register", "Register the runner",
           "Asks for the `glrt-` token (GitLab: Settings > CI/CD > Runners > New runner). Change `DESCRIPTION` if you like.",
           ["install/register-runner.sh"], interactive=["sudo DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh"]),
@@ -123,7 +135,7 @@ BLOCKS = [
     Block("update", "Update everything installed",
           "Writes the current repo files and runs `update.sh`: syncs what is installed, backs up and restores on failure. "
           "Add `--dry-run` to the last line to preview, `--os` to upgrade packages too.",
-          EVERYTHING, interactive=["sudo bash {d}/install/update.sh"]),
+          EVERYTHING, interactive=["sudo bash {d}/install/update.sh"], skip=frozenset(SECURITY)),
     Block("all", "Everything at once",
           "Users, admin tools, host tools, Docker Hub cache, monitoring and logging are installed first; the last line asks for the "
           "runner token and then sets up the npm and shared caches. Root SSH stays open: lock it with the Lock root SSH block "
@@ -132,7 +144,8 @@ BLOCKS = [
           run=["install/users.sh", "install/admin-tools.sh", "install/host-tools.sh", "install/registry-cache.sh", "install/monitoring.sh", "install/logging.sh"],
           interactive=[("sudo DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh && "
                         "sudo bash {d}/install/npm-cache.sh && sudo bash {d}/install/shared-cache.sh && "
-                        "sudo /usr/local/bin/health -q")]),
+                        "sudo /usr/local/bin/health -q")],
+          skip=frozenset(SECURITY)),
 ]
 
 
@@ -146,7 +159,7 @@ def file_heredoc(rel: str) -> list[str]:
 
 
 def render_block(b: Block) -> str:
-    files = expand(["install/lib.sh", *b.files])
+    files = [f for f in expand(["install/lib.sh", *b.files]) if f not in b.skip]
     lines = ["sudo bash <<'INSTALL'", "set -Eeuo pipefail", f"R={DEST}", ""]
     for rel in files:
         lines += file_heredoc(rel) + [""]
