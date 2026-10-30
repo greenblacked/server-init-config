@@ -507,8 +507,15 @@ render_keymaps() {
         [[ -n "$name" ]] || continue
         printf '~^/(on|online|sisi|dorama)/(js|h)/%s(/|$) 1\n~^/on/%s$ 1\n' "$key" "$key"
       done < "$(users_file)"
-      # Lampac's own /proxy links are encrypted by Lampac and carry no key (players cannot add one); see README
-      if [[ "$(env_get LAMPAC_PROXY_ANON)" == 1 ]]; then printf '%s\n' '~(?i)^/(proxy|proxy-dash|proxyimg)(/|$) 1'; fi
+      # Lampac's own /proxy links are encrypted by Lampac and carry no key (players cannot add one); see README.
+      # Only the shape Lampac generates (/proxy/<payload>[.ext], /proxyimg:W:H/<payload>) and no dot segments (the
+      # nodotseg snippet in the Caddyfile refuses those before this map is used).
+      if [[ "$(env_get LAMPAC_PROXY_ANON)" == 1 ]]; then
+        printf '%s\n' '~(?i)^/(proxy|proxy-dash|proxyimg(:[0-9]+:[0-9]+)?)(/[A-Za-z0-9_=.,:%+-]+)+$ 1'
+      fi
+      # SISI's start page plugin is a static script that Lampac lists in /on/js/<key> without a token; Lampa on a TV
+      # loads plugins cross-origin, where the key cookie is not sent. It holds no data.
+      if sisi_on; then printf '%s\n' '~^/startpage\.js$ 1'; fi
     } | emit '{path}' k_path
     while IFS=$'\t' read -r name kind key ts hash; do if [[ -n "$name" ]]; then printf '~^/t/%s(/|$) 1\n' "$ts"; fi; done < "$(users_file)" | emit '{path}' ts_ok
     echo "}"
@@ -584,11 +591,15 @@ render_lampac() {
   # Skipped always: embedded TorrServer (we run our own), admin/stat/log pages, DLNA and the modules whose endpoints
   # are open relays or anonymous bind helpers by design (relays to cub.red / TMDB, media proxies, device binding,
   # Telegram login, Kit, WatchTogether, ForkPlayer, MSX), the third-party plugin store is blocked in Caddy.
-  skip=(AdminPanel Catalog CorsMedia Corseu CubProxy DLNA ExternalBind ForkPlayerXML JacRed Kit MsxNative Sync TelegramAuth TelegramAuthBot TimeCode TmdbProxy TorrServer Tracks Transcoding WatchTogether WebLog)
+  # init.conf's SkipModules REPLACES the list in base.conf (arrays are not merged), so base.conf's own entries
+  # (Catalog DLNA Tracks Transcoding WebLog CacheMedia ProxyLimiter ForkPlayerXML MsxNative TelegramAuth
+  # TelegramAuthBot) are all repeated here. PidTor searches an external indexer (jac.red); we have no use for it.
+  skip=(AdminPanel Catalog CacheMedia CorsMedia Corseu CubProxy DLNA ExternalBind ForkPlayerXML JacRed Kit MsxNative PidTor ProxyLimiter Sync TelegramAuth TelegramAuthBot TimeCode TmdbProxy TorrServer Tracks Transcoding WatchTogether WebLog)
   online=false; sisi=false
   if online_on; then online=true; else skip+=(Online OnlineAnime OnlineENG OnlineGEO OnlinePaid OnlineRUS OnlineUKR); fi
-  # SISI = the 18+ section (/sisi.js). The Adult group holds its sources and needs SISI to compile.
-  if sisi_on; then sisi=true; else skip+=(SISI Adult); fi
+  # SISI = the 18+ section (/sisi.js). The Adult group holds its sources and needs SISI to compile. NextHUB is an
+  # 18+ hub of its own (/nexthub, adult site definitions) that compiles without SISI, so it goes with it.
+  if sisi_on; then sisi=true; else skip+=(SISI Adult NextHUB); fi
   local list="" before=""
   [[ -f "$f" ]] && before=$(md5sum < "$f")
   for m in "${skip[@]}"; do list+="\"${m}\", "; done
@@ -771,6 +782,28 @@ PresharedKey = ${psk}
 Endpoint = $(env_get PUBLIC_IP):$(env_get WG_PORT)
 AllowedIPs = ${net}.1/32
 PersistentKeepalive = 25"
+}
+
+wg_client_block() { # name -> appends the client config (WG_CLIENT_CONF, set by wg_add_peer) to NEW_BLOCKS, shown once
+  local qr=""
+  if command -v qrencode >/dev/null 2>&1; then qr=$(printf '%s\n' "$WG_CLIENT_CONF" | qrencode -t ansiutf8 2>/dev/null || true); fi
+  NEW_BLOCKS+=("WireGuard client config for '${1}' (shown ONCE, save it as ${1}.conf or scan the QR code in the WireGuard app):
+${WG_CLIENT_CONF}
+${qr}")
+}
+
+WG_BACKFILLED=0
+wg_backfill_peers() { # --vpn on a stack that has devices from public / local mode: give each one a peer, once
+  local name kind rest
+  [[ -f "$(users_file)" ]] || return 0
+  while IFS=$'\t' read -r name kind rest; do
+    [[ "$kind" == device ]] || continue
+    if [[ -f "$(wg_peers_file)" ]] && cut -f1 "$(wg_peers_file)" | grep -qx "$name"; then continue; fi
+    wg_add_peer "$name"
+    wg_client_block "$name"
+    WG_BACKFILLED=1
+    log "device '${name}' had no WireGuard peer: created one (its client config is printed below, once)"
+  done < "$(users_file)"
 }
 
 wg_remove_peer() {
@@ -1123,6 +1156,12 @@ do_install() {
   reload_caddy
   apply_torrserver || warn "TorrServer settings not applied; rerun $0 once the container is up"
   apply_qbt || warn "qBittorrent settings not applied"
+  # Peers for devices that predate --vpn are made last, once the stack is up, so a failed run cannot lose the one-time
+  # client configs it would have printed.
+  if [[ "$MODE" == vpn ]]; then
+    wg_backfill_peers
+    if (( WG_BACKFILLED )); then wg_render; wg_apply; fi
+  fi
   # leaving vpn mode: Caddy no longer publishes on the wg address (recreated above), so the interface can go
   if [[ "$MODE" != vpn && "$PREV_MODE" == vpn ]]; then wg_teardown; fi
   fw_reconcile
@@ -1146,11 +1185,7 @@ do_add() { # kind
   if [[ "$kind" == device && "$MODE" == vpn ]]; then
     wg_add_peer "$TARGET_NAME"
     wg_render; wg_apply
-    local qr=""
-    if command -v qrencode >/dev/null 2>&1; then qr=$(printf '%s\n' "$WG_CLIENT_CONF" | qrencode -t ansiutf8 2>/dev/null || true); fi
-    NEW_BLOCKS+=("WireGuard client config for '${TARGET_NAME}' (shown ONCE, save it as ${TARGET_NAME}.conf or scan the QR code in the WireGuard app):
-${WG_CLIENT_CONF}
-${qr}")
+    wg_client_block "$TARGET_NAME"
   elif [[ "$kind" == device ]]; then
     log "mode ${MODE}: '${TARGET_NAME}' gets a key and a TorrServer token (no WireGuard peer outside --vpn)"
   fi
@@ -1169,8 +1204,11 @@ do_remove() { # name (user or device)
   chmod 0600 "$(users_file).new"; mv -f "$(users_file).new" "$(users_file)"
   render_users
   reload_caddy    # the key and the TorrServer token stop working at once
-  if [[ "$MODE" == vpn && -f "$(wg_peers_file)" ]] && cut -f1 "$(wg_peers_file)" | grep -qx "$TARGET_NAME"; then
-    wg_remove_peer "$TARGET_NAME"; wg_render; wg_apply
+  # The peer goes in every mode: the peer list outlives a switch away from --vpn, and a later --vpn would write a
+  # revoked device back into wg0.conf. Only touch the live interface when it is the active mode.
+  if [[ -f "$(wg_peers_file)" ]] && cut -f1 "$(wg_peers_file)" | grep -qx "$TARGET_NAME"; then
+    wg_remove_peer "$TARGET_NAME"
+    if [[ "$MODE" == vpn ]]; then wg_render; wg_apply; fi
   fi
   # Lampac only ever adds users from users.json while running; it forgets a removed one on restart.
   # (a removed person's browser sessions end with the Authelia restart; a device has none)
