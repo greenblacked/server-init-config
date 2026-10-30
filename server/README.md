@@ -181,7 +181,7 @@ The first installs the default groups; the second adds the Kali helper. `--help`
 |---|---|
 | `--audit` | lynis, OpenSCAP (EL/Fedora, evaluation only), auditd with a small ruleset, ssh-audit, testssl.sh |
 | `--network` | nmap, tcpdump, tshark, iperf3, socat, ncat, whois, dig, lsof, mtr, traceroute, iftop, nethogs, bmon |
-| `--scan` | trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: pinned release binaries, SHA256 checked; a mismatch is refused |
+| `--scan` | trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: release binaries at pinned versions, checked against the checksums file of the same release (catches corrupt downloads, not a replaced release); a mismatch is refused |
 | opt-in | `--aide`, `--clamav` (no clamd), `--rkhunter`, `--chkrootkit`, `--arp-scan`, `--grype`, `--syft`, `--k8s` |
 | `--kali` | the `kali` command: Kali Linux in a Docker container, built on first use (2 to 3 GB); needs Docker |
 | `--audit-timer` | weekly lynis, oscap, aide and rkhunter reports in `/var/log/security-audit` (idle priority) |
