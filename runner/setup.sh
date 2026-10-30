@@ -64,7 +64,7 @@ is_component() {
 is_installed() {
   case "$1" in
     users)          id monitoring >/dev/null 2>&1 && grep -qs "^AllowGroups" /etc/ssh/sshd_config.d/00-ci-hardening.conf ;;
-    packages)       command -v htop >/dev/null 2>&1 && grep -qs "alias runner-jobs='sudo " /etc/profile.d/ci-runner.sh ;;
+    packages)       command -v htop >/dev/null 2>&1 && grep -qs "^alias health='sudo /usr/local/bin/health'" /etc/profile.d/ci-runner.sh ;;
     tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh ]] ;;
     security)       command -v lynis >/dev/null 2>&1 && [[ -x /usr/local/bin/trivy ]] ;;
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;
