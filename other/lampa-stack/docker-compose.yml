@@ -1,0 +1,183 @@
+# Lampa stack: Caddy (TLS + routing) -> Authelia (login, forward auth) ; Lampac (serves the Lampa web
+# app and the online-source API) ; TorrServer (streaming, no seeding) ; qBittorrent (full client).
+# Values come from .env (versions, mode, limits); secrets from ./secrets (never in this file).
+# Networks:
+#   backend  internal:true  service-to-service only, no route to the internet, no host ports.
+#   egress   normal bridge  attached ONLY to services that must reach the internet (Lampac for
+#                           sources, TorrServer and qBittorrent for peers/trackers, Caddy for ACME).
+# Nothing but Caddy (and, opt-in, the qBittorrent peer port) publishes a host port.
+name: lampa-stack
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+networks:
+  backend:
+    internal: true
+  egress: {}
+
+secrets:
+  authelia_jwt:      {file: ./secrets/authelia_jwt}
+  authelia_session:  {file: ./secrets/authelia_session}
+  authelia_storage:  {file: ./secrets/authelia_storage}
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
+
+services:
+  caddy:
+    <<: *hardening
+    image: ${CADDY_IMAGE:?set in .env}
+    ports:
+      - "${PUBLISH_HTTP:-127.0.0.1:8080:80}"
+      - "${PUBLISH_HTTPS:-127.0.0.1:8443:8443}"
+    env_file: [./secrets/caddy.env]   # TS_BASIC (TorrServer credential injected for Authelia-authenticated browsers)
+    environment:
+      SITE_MAIN: ${SITE_PREFIX-https://}${DOMAIN:-lampa.localhost}${SITE_SUFFIX-:8443}
+      SITE_TS: ${SITE_PREFIX-https://}ts.${DOMAIN:-lampa.localhost}${SITE_SUFFIX-:8443}
+      SITE_QBT: ${SITE_PREFIX-https://}qbt.${DOMAIN:-lampa.localhost}${SITE_SUFFIX-:8443}
+      SITE_AUTH: ${SITE_PREFIX-https://}auth.${DOMAIN:-lampa.localhost}${SITE_SUFFIX-:8443}
+      QBT_WEBUI_PORT: ${QBT_WEBUI_PORT:-8085}
+      TLS_LINE: ${TLS_LINE-tls internal}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.invalid}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - caddy_data:/data
+      - caddy_config:/config
+    cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs: [/tmp]
+    pids_limit: 128
+    mem_limit: ${CADDY_MEM:-96m}
+    cpus: 1.0
+    networks: [backend, egress]
+    depends_on:
+      authelia: {condition: service_healthy}
+    healthcheck:
+      # Admin API listens on 127.0.0.1:2019 inside the container only. wget is busybox (verified in the image).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  authelia:
+    <<: *hardening
+    image: ${AUTHELIA_IMAGE:?set in .env}
+    # Runs as root inside the container ONLY so it can read the root-owned 0600 secret files;
+    # all capabilities are dropped.
+    command: ["authelia", "--config", "/config/configuration.yml"]
+    environment:
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /run/secrets/authelia_jwt
+      AUTHELIA_SESSION_SECRET_FILE: /run/secrets/authelia_session
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/authelia_storage
+    secrets: [authelia_jwt, authelia_session, authelia_storage]
+    volumes:
+      - ./authelia:/config:ro,z
+      - ./data/authelia:/data:z
+    # Tested: with read_only Authelia 4.39.28 exits at its startup checks (no cause logged), so the root
+    # filesystem stays writable here; /config is mounted read-only and the container has no capabilities.
+    tmpfs: [/tmp]
+    pids_limit: 128
+    mem_limit: ${AUTHELIA_MEM:-256m}
+    cpus: 0.5
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9091/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  lampac:
+    <<: *hardening
+    image: ${LAMPAC_IMAGE:?set in .env}
+    # Serves the Lampa web app (LampaWeb module) and the online-source API on 9118 (backend only).
+    # The image already runs as uid 1000 (user "lampac").
+    shm_size: ${LAMPAC_SHM:-256m}
+    volumes:
+      - ./lampac/init.conf:/lampac/init.conf:ro,z
+      - ./lampac/passwd:/lampac/passwd:ro,z
+      - ./lampac/users.json:/lampac/users.json:ro,z
+      - ./data/lampac/database:/lampac/database:z
+      - ./data/lampac/cache:/lampac/cache:z
+    # UNVERIFIED on a live container (image could not be pulled where this was written): read_only needs
+    # every writable path listed. Off by default; set LAMPAC_READ_ONLY=true to try it.
+    read_only: ${LAMPAC_READ_ONLY:-false}
+    tmpfs: [/tmp, "/lampac/logs:uid=1000,gid=1000"]
+    pids_limit: 512
+    mem_limit: ${LAMPAC_MEM:-1024m}
+    cpus: 2.0
+    networks: [backend, egress]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9118/version?type=hash"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  torrserver:
+    <<: *hardening
+    image: ${TORRSERVER_IMAGE:?set in .env}
+    # Streaming only. Seeding is switched off through its API by install.sh (DisableUpload etc.).
+    user: "${STACK_UID:-10000}:${STACK_UID:-10000}"
+    environment:
+      TS_CONF_PATH: /opt/ts/config
+      TS_LOG_PATH: /opt/ts/config/torrserver.log
+      TS_TORR_DIR: /opt/ts/torrents
+      TS_PORT: "8090"
+      TS_HTTPAUTH: "1"        # HTTP basic auth from config/accs.db (written by install.sh)
+      TS_DONTKILL: "1"
+    volumes:
+      - ./data/torrserver/config:/opt/ts/config:z
+      - ./data/torrserver/torrents:/opt/ts/torrents:z
+      - ./data/torrserver/cache:/opt/ts/cache:z
+    read_only: true
+    tmpfs: [/tmp]
+    pids_limit: 512
+    mem_limit: ${TORRSERVER_MEM:-512m}
+    cpus: 2.0
+    networks: [backend, egress]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/echo"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  qbittorrent:
+    <<: *hardening
+    image: ${QBITTORRENT_IMAGE:?set in .env}
+    # linuxserver image: s6-overlay starts as root, then runs the app as PUID:PGID.
+    environment:
+      PUID: "${STACK_UID:-10000}"
+      PGID: "${STACK_UID:-10000}"
+      TZ: ${TZ:-Etc/UTC}
+      WEBUI_PORT: "${QBT_WEBUI_PORT:-8085}"
+      TORRENTING_PORT: "${QBT_PORT:-6881}"
+    ports:
+      # Default bind is 127.0.0.1 (peers cannot reach it). install.sh --enable-qbt-port sets QBT_PEER_BIND=0.0.0.0.
+      - "${QBT_PEER_BIND:-127.0.0.1}:${QBT_PORT:-6881}:${QBT_PORT:-6881}/tcp"
+      - "${QBT_PEER_BIND:-127.0.0.1}:${QBT_PORT:-6881}:${QBT_PORT:-6881}/udp"
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
+    volumes:
+      - ./data/qbt/config:/config:z
+      - ./data/qbt/downloads:/downloads:z
+    # s6-overlay needs a writable /run and /config; the root filesystem is therefore not read-only.
+    tmpfs: [/tmp]
+    pids_limit: 512
+    mem_limit: ${QBT_MEM:-512m}
+    cpus: 2.0
+    networks: [backend, egress]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:${QBT_WEBUI_PORT:-8085}/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

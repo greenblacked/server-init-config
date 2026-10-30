@@ -1,0 +1,11 @@
+[Unit]
+Description=Lampa stack cleanup every 3 days
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=3d
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
