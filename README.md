@@ -125,7 +125,7 @@ Stop a stack without deleting data: `sudo docker compose -f /opt/monitoring/dock
 | Symptom | Cause and fix |
 |---|---|
 | `Connection timed out` | The Hetzner Cloud Firewall has no inbound rule for TCP 22 from your current IP. Fix the rule in the Console; it applies at once. |
-| `Permission denied (publickey)` as `ops` | The key was not copied or you use another key. Log in as root and rerun the bootstrap; it copies root's keys again. |
+| `Permission denied (publickey)` as `ops` | The key was not copied or you use another key. Plain server: log in as root and rerun `server/bootstrap.sh`; it copies root's keys again. Runner host: rerunning `runner/bootstrap.sh` does not (the users step counts as installed and is skipped); as root run `bash /root/server-init-config/runner/install/users.sh` on the server, which merges root's keys into `ops`. If root is already locked, use the Hetzner web console. |
 | Connection refused right after many tries | fail2ban banned your IP (1 hour). Unban from the Hetzner web console: `fail2ban-client set sshd unbanip YOUR_IP`. The console asks for the root password, which Hetzner does not set when you add an SSH key: use Rescue, Reset root password in the Console first. Use `IdentitiesOnly yes` in `~/.ssh/config` to stop agents offering many keys. |
 | Cloud config pasted into a terminal gives errors | It is cloud-init user-data. Paste it into the Console field **Cloud config** when creating the server. |
 | `fatal: detected dubious ownership` | A git command ran as root in a directory owned by another user. The server copy has no `.git`; run git on your laptop. |
@@ -169,7 +169,7 @@ All on x86_64 and ARM64. Hetzner Apps images (Ubuntu 24.04 with Coolify, GitLab 
 
 ### Runner concurrency
 
-`concurrent = 2` on a CAX11 (2 vCPU, 4 GB): two jobs at once. Job containers have no CPU or memory limit by default, so two heavy jobs can starve the host and the monitoring. Add per-job limits under `[runners.docker]` (see [runner/README.md](runner/README.md#concurrent-jobs-and-limits)).
+`concurrent = 2` on a CAX11 (2 vCPU, 4 GB): two jobs at once. Registering the runner (or `setup.sh --job-limits`) sets per-job limits by default: 1536 MB memory, 1.5 CPUs, 256 MB shared memory, smaller limits for `services:` containers, and a ceiling on processes and memory for all jobs together. Change them as described in [runner/README.md](runner/README.md#concurrent-jobs-and-limits).
 
 ### Changing the repo
 
