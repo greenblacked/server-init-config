@@ -26,6 +26,7 @@ What a server built from this repo has:
 | `cloud-init/templates/` | sources for the cloud-init files |
 | `gitlab-runner/` | **start here for a Rocky runner**: base init, `setup.sh` and copy-paste blocks for every component, `update.sh`, everyday commands and troubleshooting (see its README) |
 | `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
+| `tools/bootstrap-server.sh` | laptop-side: waits for cloud-init, streams this repo to the new server over SSH and installs the safe components (see [Build a new server](#build-a-new-server)) |
 | `tools/render-paste-commands.py` | renders `gitlab-runner/COMMANDS.md` from the repo files; `--check` detects stale output |
 | `scripts/` | host scripts: `health`, weekly cleanup, disk guard, image prewarm |
 | `systemd/` | services and timers for the scripts |
@@ -38,7 +39,17 @@ What a server built from this repo has:
 
 1. **Hetzner Console**: create the server (CAX11, `nbg1`, Rocky Linux 10 or Debian 13), add your SSH key, and paste `cloud-init/rocky.yaml` or `cloud-init/debian.yaml` as Cloud config. For an x86 server (CX/CPX/CCX) you can paste `cloud-init/rocky-x86.yaml` or `cloud-init/debian-x86.yaml`; then set the runner's tag and the `tags:` in `ci/*.yml` to your x86 tag instead of `arm64`, and expect `x86_64` instead of `aarch64` in the smoke test.
 2. **Firewall**: inbound TCP 22 from your IP only, ICMP optional, outbound left empty (empty means allow all). Open 80/443 only if you publish Grafana.
-3. **Wait for cloud-init**, then copy the repo to the server. You log in as root with your key, as Hetzner sets it up; the init only switches off password logins. The repo is private, so either use `scp` from your laptop or a read-only deploy key:
+3. **Bootstrap from your laptop** (primary path). Create the runner in GitLab first (Settings → CI/CD → Runners → New runner), then, from a clean checkout of this repo:
+
+   ```bash
+   tools/bootstrap-server.sh SERVER_IP
+   ```
+
+   It waits for cloud-init (and stops with `/var/log/ci-bootstrap-failed.log` if it failed), streams `git archive HEAD` to `/root/server-init-config` over SSH (the repo is private and no credential goes to the server), installs users, admin tools, host tools, the runner registration, Docker Hub cache, monitoring, logging and the npm and shared caches via `gitlab-runner/setup.sh`, and ends with `health`. You type the `glrt-` token at the prompt on the server. Root SSH stays open: the script never runs `lock-root` or `selinux`. Options: `--no-register`, `--with-prewarm`, `--user`, `--port`, `--allow-dirty`, `--dry-run` (see `--help`); `DOMAIN` and `ACME_EMAIL` in the environment add Grafana on a domain. Rerunning is safe: the server copy is replaced and installed components are skipped.
+
+   Then go to step 6. Steps 4 and 5 below, and the copy in this paragraph, are the manual alternative to step 3.
+
+   **Manual alternative: wait for cloud-init**, then copy the repo to the server. You log in as root with your key, as Hetzner sets it up; the init only switches off password logins. The repo is private, so either use `scp` from your laptop or a read-only deploy key:
 
    ```bash
    ssh root@SERVER_IP cloud-init status --wait
@@ -46,7 +57,7 @@ What a server built from this repo has:
    ssh root@SERVER_IP
    ```
 
-4. **Install the host tools and register the runner.** Create the runner in GitLab first (Settings → CI/CD → Runners → New runner) and copy its `glrt-` token:
+4. **Manual: install the host tools and register the runner.** Create the runner in GitLab first (Settings → CI/CD → Runners → New runner) and copy its `glrt-` token:
 
    ```bash
    cd ~/server-init-config
@@ -54,7 +65,7 @@ What a server built from this repo has:
    sudo DESCRIPTION=hetzner-cax11 install/register-runner.sh
    ```
 
-5. **Optional components**, in this order:
+5. **Manual: optional components**, in this order:
 
    ```bash
    sudo install/monitoring.sh
@@ -73,7 +84,7 @@ What a server built from this repo has:
    sudo health
    ```
 
-   Then run `ci/smoke.yml` in a project. Its log must show `on <your runner description>` and `aarch64`.
+   Then run `ci/smoke.yml` in a project. Its log must show `on <your runner description>` and `aarch64` (`x86_64` on an x86 server). If you used the bootstrap script, test `ssh ops@SERVER_IP 'sudo -n true && echo ok'` from a second terminal, then close root SSH with `setup.sh --lock-root`.
 
 ## Local AI (separate server)
 
