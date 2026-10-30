@@ -1,7 +1,7 @@
 # General servers (not runners)
 
 Base setup for a fresh Hetzner server: SSH keys only, admin user `ops` with sudo, a firewall (firewalld on the
-Red Hat family, ufw on Ubuntu and Debian) with only SSH open,
+Red Hat family and openSUSE, ufw on Ubuntu and Debian) with only SSH open,
 fail2ban for SSH, daily automatic security updates (no auto-reboot), Docker Engine + Compose, swap when there is
 none, sysctl tuning, journald limit, weekly cleanup, time sync and admin tools (including `mc`, `fd`, `rg`, `fzf`). Root keeps key login on port 22, so the setup cannot
 lock you out. Every step is checked before it changes anything, so reruns are safe; a failed step is logged to
@@ -16,6 +16,7 @@ Shell: 100000-line history with timestamps, shared between sessions; `Ctrl+R` se
 | `server-init-fedora.sh` | Fedora 44 |
 | `server-init-el10.sh` | CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 |
 | `server-init-debian.sh` | Ubuntu 26.04, Ubuntu 24.04, Debian 13 (also the Hetzner Apps images, see [Hetzner Apps](#hetzner-apps-images)) |
+| `server-init-opensuse.sh` | openSUSE Leap 16.0 |
 
 All run on x86_64 and ARM64. The script refuses to run on an OS it is not written for.
 
@@ -35,7 +36,7 @@ Or paste it on the server as root, without a copy of the repo:
 
 ```bash
 cat > /usr/local/sbin/server-init.sh <<'SERVERINIT'
-# paste the content of server/server-init-el10.sh (or -fedora.sh, -debian.sh) here
+# paste the content of server/server-init-el10.sh (or -fedora.sh, -debian.sh, -opensuse.sh) here
 SERVERINIT
 chmod 0755 /usr/local/sbin/server-init.sh && /usr/local/sbin/server-init.sh
 ```
@@ -148,6 +149,7 @@ root can see it only inside the curl process's stdin during the call. A failed n
 | `cloud-init/server-fedora.yaml` | Fedora 44 |
 | `cloud-init/server-el10.yaml` | CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 |
 | `cloud-init/server-debian.yaml` | Ubuntu 26.04, Ubuntu 24.04, Debian 13 |
+| `cloud-init/server-opensuse.yaml` | openSUSE Leap 16.0 |
 
 Paste the file for the server's OS into Hetzner Console, **Cloud config**, when you create the server. It is
 user-data for cloud-init, not shell commands: never paste it into a terminal. If you need ports or other
@@ -218,7 +220,7 @@ cat /var/log/server-init-failed.log 2>/dev/null || echo no-failures
 ```
 
 ```bash
-systemctl is-active firewalld fail2ban chronyd docker; firewall-cmd --list-services; firewall-cmd --list-ports; fail2ban-client status sshd | tail -3; systemctl list-timers '*automatic*' --no-pager | head -3; swapon --show
+systemctl is-active firewalld fail2ban chronyd docker; firewall-cmd --list-services; firewall-cmd --list-ports; fail2ban-client status sshd | tail -3; systemctl list-timers '*automatic*' '*security-updates*' --no-pager | head -3; swapon --show
 ```
 
 On Ubuntu and Debian:
@@ -314,3 +316,15 @@ It is not embedded in the Cloud config files: it is about 30 KB and Hetzner's us
   `fail2ban-client set sshd unbanip YOUR_IP`.
 - Security updates are installed daily (`dnf-automatic`, or `server-update.timer` after `install-tools.sh`), but the server never reboots
   by itself unless `AUTO_REBOOT=1`; kernel updates apply after your next reboot.
+
+### openSUSE Leap 16
+
+- Packages come from the openSUSE repositories only (no repository is added). Docker CE has no openSUSE repository,
+  so Docker and Compose are the distribution's `docker` and `docker-compose` packages.
+- Security updates: the script installs a systemd timer `server-security-updates.timer` that runs
+  `zypper patch --category security` daily. Check it with `systemctl list-timers server-security-updates.timer`.
+- Swap on btrfs (the default root with snapper snapshots) lives in its own `/swap` subvolume, because a swap file
+  cannot be in a snapshotted subvolume. After a snapper rollback `/swap` comes back as an empty plain directory;
+  rerun the script and it replaces that empty directory with a new subvolume and swap file (a non-empty `/swap` that
+  is not a subvolume is left alone and the swap step fails with a logged message).
+- If `fail2ban` is not available in the repositories, that step is logged to `/var/log/server-init-failed.log` and skipped.
