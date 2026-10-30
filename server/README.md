@@ -3,7 +3,7 @@
 Base setup for a fresh Hetzner server: SSH keys only, admin user `ops` with sudo, a firewall (firewalld on the
 Red Hat family and openSUSE, ufw on Ubuntu and Debian) with only SSH open,
 fail2ban for SSH, daily automatic security updates (no auto-reboot), Docker Engine + Compose, swap when there is
-none, sysctl tuning, journald limit, weekly cleanup, time sync and admin tools (including `mc`, `fd`, `rg`, `fzf`). Root keeps key login on port 22, so the setup cannot
+none, sysctl tuning, journald limit, weekly cleanup (not on Ubuntu/Debian, see [Cleanup](#cleanup)), time sync and admin tools (including `mc`, `fd`, `rg`, `fzf`). Root keeps key login on port 22, so the setup cannot
 lock you out. Every step is checked before it changes anything, so reruns are safe; a failed step is logged to
 `/var/log/server-init-failed.log` and the next step still runs.
 
@@ -49,14 +49,18 @@ Settings are saved to `/etc/server-init.conf` on the first run (`ADMIN_USER`, `E
 
 The `cleanup` step installs `/usr/local/sbin/server-cleanup` and a weekly systemd timer (`server-cleanup.timer`,
 random delay up to 1 h, runs missed jobs after boot). It runs niced with idle IO priority and `ProtectHome=read-only`.
-The tool is `server/server-cleanup.sh`; the same text is embedded in both init scripts and in the Cloud config
-(`tools/test-cloud-init.py` checks the copies match).
+The tool is `server/server-cleanup.sh`; the same text is embedded in the Fedora, EL10 and openSUSE init scripts and in their Cloud configs
+(`tools/test-cloud-init.py` checks the copies match). The Ubuntu/Debian script has no cleanup step: with it the Cloud config
+would pass Hetzner's 32 KiB limit (28.1 KiB without it, about 38 KiB with it). There, copy `server/server-cleanup.sh`
+to the server and run it as root when needed (it knows `apt-get clean`); `install-tools.sh` is for Fedora and EL only (its update
+timer uses dnf).
 
 What it does (each part is skipped when its tool is missing):
 
 - journald: `journalctl --vacuum-time` and `--vacuum-size`.
-- packages: `dnf clean packages`; sets `installonly_limit=3` in `/etc/dnf/dnf.conf` if unset (dnf then drops old
-  kernels itself, never the running one); `dnf autoremove` only with `CLEAN_AUTOREMOVE=1`.
+- packages: `dnf clean packages` on Fedora and EL (and `installonly_limit=3` in `/etc/dnf/dnf.conf` if unset, so dnf drops old
+  kernels itself, never the running one), `zypper clean` on openSUSE, `apt-get clean` on Ubuntu/Debian; `dnf` and `apt-get
+  autoremove` only with `CLEAN_AUTOREMOVE=1`.
 - Docker (only if running): stopped containers and build cache older than 7 days, dangling images. Never volumes, never
   `docker system prune -a`. `CLEAN_DOCKER_UNUSED_IMAGES=1` also prunes unused images older than 30 days.
 - temp: `systemd-tmpfiles --clean` for `/tmp` and `/var/tmp`, so the system's own age rules apply (10 days for `/tmp`,

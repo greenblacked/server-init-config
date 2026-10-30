@@ -36,6 +36,7 @@ DEFAULT_FILES = ["gitlab-runner/cloud-init-rocky.yaml", "cloud-init/rocky.yaml",
 SHELL_HISTORY = ROOT / "scripts" / "shell-history.sh"
 SERVER_CLEANUP = ROOT / "server" / "server-cleanup.sh"
 SERVER_SCRIPTS = ["server/server-init-el10.sh", "server/server-init-fedora.sh"]
+CLEANUP_SCRIPTS = SERVER_SCRIPTS + ["server/server-init-opensuse.sh"]
 SHELL_SCRIPTS = SERVER_SCRIPTS + ["server/server-init-debian.sh", "server/server-init-opensuse.sh"]
 LIMIT = 32 * 1024
 LOCKOUT = ("permitrootlogin no", "allowusers", "allowgroups", "port ", "listenaddress")
@@ -171,7 +172,7 @@ def test_server_cleanup_copies() -> None:
     """server/*.sh embed server/server-cleanup.sh (they must stay self-contained): the copies must match."""
     print("== server-cleanup copies")
     want = SERVER_CLEANUP.read_text()
-    for rel in SERVER_SCRIPTS:
+    for rel in CLEANUP_SCRIPTS:
         text = (ROOT / rel).read_text()
         m = re.search(r"put /usr/local/sbin/server-cleanup 0755 <<'EOF'\n(.*?)\nEOF\n", text, re.S)
         check(bool(m) and m.group(1) + "\n" == want, f"{rel} embeds server/server-cleanup.sh unchanged")
