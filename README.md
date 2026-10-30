@@ -22,7 +22,7 @@ What a server built from this repo has:
 
 | Path | Purpose |
 |---|---|
-| `cloud-init/rocky.yaml`, `cloud-init/debian.yaml` | user-data for new servers (generated, do not edit) |
+| `cloud-init/rocky.yaml`, `cloud-init/debian.yaml`, `cloud-init/debian-x86.yaml` | user-data for new servers (generated, do not edit); `debian-x86.yaml` is the same as `debian.yaml`, labelled for x86 servers |
 | `cloud-init/templates/` | sources for the cloud-init files |
 | `gitlab-runner/` | **start here for a Rocky runner**: base init, `setup.sh` and copy-paste blocks for every component, `update.sh`, everyday commands and troubleshooting (see its README) |
 | `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
@@ -36,7 +36,7 @@ What a server built from this repo has:
 
 ## Build a new server
 
-1. **Hetzner Console**: create the server (CAX11, `nbg1`, Rocky Linux 10 or Debian 13), add your SSH key, and paste `cloud-init/rocky.yaml` or `cloud-init/debian.yaml` as Cloud config.
+1. **Hetzner Console**: create the server (CAX11, `nbg1`, Rocky Linux 10 or Debian 13), add your SSH key, and paste `cloud-init/rocky.yaml` or `cloud-init/debian.yaml` as Cloud config. For an x86 Debian server (CX/CPX/CCX) you can paste `cloud-init/debian-x86.yaml`; then set the runner's tag and the `tags:` in `ci/*.yml` to your x86 tag instead of `arm64`, and expect `x86_64` instead of `aarch64` in the smoke test.
 2. **Firewall**: inbound TCP 22 from your IP only, ICMP optional, outbound left empty (empty means allow all). Open 80/443 only if you publish Grafana.
 3. **Wait for cloud-init**, then copy the repo to the server. You log in as root with your key, as Hetzner sets it up; the init only switches off password logins. The repo is private, so either use `scp` from your laptop or a read-only deploy key:
 

@@ -24,6 +24,7 @@ TEMPLATES = ROOT / "cloud-init" / "templates"
 TARGETS = {
     "rocky.yaml.in": "cloud-init/rocky.yaml",
     "debian.yaml.in": "cloud-init/debian.yaml",
+    "debian-x86.yaml.in": "cloud-init/debian-x86.yaml",
     "runner-rocky.yaml.in": "gitlab-runner/cloud-init-rocky.yaml",
 }
 HETZNER_USER_DATA_LIMIT = 32 * 1024
