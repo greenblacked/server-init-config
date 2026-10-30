@@ -36,7 +36,7 @@ DEFAULT_FILES = ["gitlab-runner/cloud-init-rocky.yaml", "cloud-init/rocky.yaml",
 SHELL_HISTORY = ROOT / "scripts" / "shell-history.sh"
 SERVER_CLEANUP = ROOT / "server" / "server-cleanup.sh"
 SERVER_SCRIPTS = ["server/server-init-el10.sh", "server/server-init-fedora.sh"]
-SHELL_SCRIPTS = SERVER_SCRIPTS + ["server/server-init-debian.sh"]
+SHELL_SCRIPTS = SERVER_SCRIPTS + ["server/server-init-debian.sh", "server/server-init-opensuse.sh"]
 LIMIT = 32 * 1024
 LOCKOUT = ("permitrootlogin no", "allowusers", "allowgroups", "port ", "listenaddress")
 
