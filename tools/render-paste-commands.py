@@ -62,7 +62,7 @@ TOOLS = ["runner/install/host-tools.sh", "common/health", "runner/scripts/runner
          "runner/systemd/runner-weekly-cleanup.service", "runner/systemd/runner-weekly-cleanup.timer",
          "runner/systemd/runner-disk-guard.service", "runner/systemd/runner-disk-guard.timer",
          "runner/scripts/runner-engine-update.sh", "runner/scripts/ci-job-isolation.sh", "runner/systemd/runner-engine-update.service",
-         "runner/systemd/runner-engine-update.timer", "runner/systemd/ci-job-isolation.service"]
+         "runner/systemd/runner-engine-update.timer", "runner/systemd/ci-job-isolation.service", "common/sysctl-hardening.conf"]
 REGISTRY = ["runner/install/registry-cache.sh", "runner/stacks/registry-cache"]
 MONITORING = ["runner/install/monitoring.sh", "runner/stacks/monitoring/docker-compose.yml", "runner/stacks/monitoring/env.example",
               "runner/stacks/monitoring/prometheus", "runner/stacks/monitoring/grafana"]
@@ -93,7 +93,7 @@ BLOCKS = [
           "runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency "
           "cleanup every 30 minutes when the disk is 85% full. Also the job isolation (CI jobs cannot reach the cloud metadata "
           "address or services on the host) and the Sunday 04:30 upgrade of Docker CE and GitLab Runner, which runs only while no job runs. "
-          "Ends with a dry run of the cleanup.",
+          "Also the kernel hardening (sysctl) and no core dumps. Ends with a dry run of the cleanup.",
           TOOLS, run=["runner/install/host-tools.sh"]),
     Block("firewall", "Host firewall and fail2ban",
           "firewalld on Rocky, ufw on Debian, with SSH (22 and the port sshd listens on) allowed and everything else closed, plus the fail2ban sshd jail "
