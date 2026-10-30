@@ -338,6 +338,26 @@ check "ufw enabled, 22 and the sshd port allowed" '[[ $rc -eq 0 ]] && grep -qx "
 check "fail2ban sshd jail written for nftables" 'grep -q "^banaction = nftables" "$T/jail.local" && grep -q "^\[sshd\]" "$T/jail.local"'
 rm -f "$T/bin/ufw" "$T/bin/sshd" "$T/bin/apt-get" "$T/bin/fail2ban-client"; reset_calls
 
+section "runner host firewall (firewalld branch, Docker already running)"
+rm -f "$T/d0zone" "$T/zonedocker"
+stub firewall-cmd 'case "$*" in
+  *--get-zone-of-interface=docker0*) cat "'"$T"'/d0zone" 2>/dev/null || echo public ;;
+  *"--permanent --get-zones"*) echo "public block"; [ -f "'"$T"'/zonedocker" ] && echo docker ;;
+  *--new-zone=docker*) touch "'"$T"'/zonedocker" ;;
+  *"--zone=docker --change-interface=docker0"*) echo docker > "'"$T"'/d0zone" ;;
+  *--query-*) exit 0 ;;
+  *--list-*) echo ssh ;;
+esac
+exit 0'
+stub systemctl 'exit 0'
+stub sshd 'echo "port 22"'
+stub dnf 'exit 0'
+stub docker 'exit 0'
+stub ip 'exit 0'
+out=$(FIREWALL_BACKEND=firewalld JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin" bash "$ROOT/runner/install/host-firewall.sh" 2>&1); rc=$?
+check "docker0 is moved into the docker zone, no Docker restart" '[[ $rc -eq 0 ]] && grep -qx docker "$T/d0zone" && grep -q "^--permanent --zone=docker --add-interface=docker0" <<<"$(calls firewall-cmd)" && ! grep -q "restart docker" <<<"$(calls systemctl)"'
+rm -f "$T/bin/firewall-cmd" "$T/bin/systemctl" "$T/bin/sshd" "$T/bin/dnf" "$T/bin/docker" "$T/bin/ip" "$T/d0zone" "$T/zonedocker"; reset_calls
+
 section "ci-job-isolation rules (own network namespace)"
 if command -v iptables >/dev/null 2>&1 && unshare -n true 2>/dev/null; then
   stub logger 'exit 0'

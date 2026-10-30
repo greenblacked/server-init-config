@@ -8,7 +8,7 @@
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
 #
 # Docker keeps working: on Rocky firewalld puts docker0 into its own docker zone when Docker starts after firewalld;
-# if Docker was already running, this script says so and Docker needs a restart while no job runs. On Debian
+# if Docker was already running, this script moves docker0 into that zone (no Docker restart). On Debian
 # ufw does not touch the chains Docker manages. Jobs are kept away from the host by ci-job-isolation.sh.
 # fail2ban: sshd jail on the journal, 5 tries in 10 minutes, 1 hour ban.
 set -Eeuo pipefail
@@ -73,8 +73,24 @@ firewalld_setup() {
     fi
   done
   log "firewalld: active, public zone: $(firewall-cmd --zone=public --list-services) $(firewall-cmd --zone=public --list-ports)"
-  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && ! firewall-cmd --get-zones | tr ' ' '\n' | grep -qx docker; then
-    log "NOTE: Docker was running before firewalld; restart it while no CI job runs so it joins the firewalld docker zone: systemctl restart docker"
+  docker_zone
+}
+
+# Docker that was running before firewalld left docker0 in the default zone, where firewalld rejects job traffic to
+# the host (the npm cache on the docker0 address). Put docker0 into the docker zone (target ACCEPT, as Docker makes it),
+# permanently and now, without restarting Docker. iptables rules (ci-job-isolation.sh) still apply on top.
+docker_zone() {
+  command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker || return 0
+  ip link show docker0 >/dev/null 2>&1 || return 0
+  [[ "$(firewall-cmd --get-zone-of-interface=docker0 2>/dev/null)" == docker ]] && return 0
+  if ! firewall-cmd --permanent --get-zones | tr ' ' '\n' | grep -qx docker; then
+    firewall-cmd --permanent --new-zone=docker >/dev/null && firewall-cmd --permanent --zone=docker --set-target=ACCEPT >/dev/null \
+      && firewall-cmd --reload >/dev/null || { log "WARN: cannot create the firewalld docker zone; restart Docker while no CI job runs: systemctl restart docker"; return 0; }
+  fi
+  if firewall-cmd --permanent --zone=docker --add-interface=docker0 >/dev/null && firewall-cmd --zone=docker --change-interface=docker0 >/dev/null; then
+    log "firewalld: docker0 put into the docker zone"
+  else
+    log "WARN: docker0 is not in the docker zone; restart Docker while no CI job runs: systemctl restart docker"
   fi
 }
 
