@@ -405,7 +405,7 @@ cat > "$R/runner/install/users.sh" <<'__SIC_EOF__'
 #                  with access to Docker through the docker group (root-equivalent, needed by the executor)
 #   monitoring     service account: no shell, no password, no SSH; owns the monitoring and logging containers
 #
-# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22), no agent or X11 forwarding,
+# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22; remembered from the existing drop-in), no agent or X11 forwarding,
 # local port forwarding kept for tunnels.
 # Root keeps SSH by key until --lock-root, which refuses to run while the admin has no key. With another
 # SSH_PORT, sshd listens on 22 and SSH_PORT until --lock-root, which then closes 22. A locked server stays
@@ -416,8 +416,13 @@ ADMIN_USER="${ADMIN_USER:-ops}"
 MON_USER="${MON_USER:-monitoring}"
 RUNNER_USER=gitlab-runner
 SSH_GROUP="${SSH_GROUP:-ssh-users}"
-SSH_PORT="${SSH_PORT:-22}"
 DROPIN=/etc/ssh/sshd_config.d/00-ci-hardening.conf
+# SSH_PORT from the environment wins; otherwise the port written by the previous run is kept, so a rerun,
+# --lock-root and --unlock-root never fall back to 22 on a host that listens elsewhere.
+if [[ -z "${SSH_PORT:-}" ]]; then
+  SSH_PORT=$(awk 'tolower($1) == "port" && $2 != 22 { p = $2 } END { print p }' "$DROPIN" 2>/dev/null || true)
+fi
+SSH_PORT="${SSH_PORT:-22}"
 RUNNER_DROPIN=/etc/systemd/system/gitlab-runner.service.d/10-service-user.conf
 RUNNER_CFG=/etc/gitlab-runner/config.toml
 LOCK_ROOT=0
@@ -440,7 +445,8 @@ The admin gets the keys from /root/.ssh/authorized_keys.
   --unlock-root  undo --lock-root (root by key again)
   --no-reload    write the config but do not reload sshd or restart gitlab-runner
 
-Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users), SSH_PORT (default 22)
+Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users),
+     SSH_PORT (default 22, or the port already in ${DROPIN}; give it once, reruns keep it)
 Rollback: delete ${DROPIN} and ${RUNNER_DROPIN}, then: systemctl reload sshd; systemctl daemon-reload; systemctl restart gitlab-runner
 USAGE
 }
@@ -3038,7 +3044,7 @@ cat > "$R/common/security-tools.sh" <<'__SIC_EOF__'
 # No option = --audit --network --scan. Groups:
 #   --audit    lynis, OpenSCAP (EL/Fedora, evaluation only, never --remediate), auditd with a minimal ruleset, ssh-audit, testssl.sh, debsums (Debian)
 #   --network  nmap, tcpdump, tshark, iperf3, socat, ncat, whois, dig, lsof, mtr, traceroute, iftop, nethogs, bmon
-#   --scan     trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: official release binaries, pinned, SHA256 checked
+#   --scan     trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: official release binaries at pinned versions, checked against the checksums file of the same release
 # Opt-in (not part of the default, they use RAM, disk IO or are noisy): --aide --clamav --rkhunter --chkrootkit --arp-scan --grype --syft --k8s
 #   --kali     the `kali` helper (Kali in a Docker container; nothing offensive is installed on the host)
 #   --audit-timer  weekly systemd timer: lynis, oscap, aide --check, rkhunter (whatever is installed) into /var/log/security-audit
@@ -3049,7 +3055,9 @@ set -Eeuo pipefail
 source "$(dirname "$0")/lib.sh"
 
 # --- pinned versions of the release binaries (override with the same-named environment variable) -----------------
-# Each is downloaded from the project's GitHub release page and verified against the checksums file published with it.
+# Each is downloaded from the project's GitHub release page and compared with the checksums file published in the same
+# release. That catches corrupt or truncated downloads; it does not protect against a replaced release, because the
+# checksums come from the same place as the binary.
 : "${TRIVY_VERSION:=0.76.1}"
 : "${GRYPE_VERSION:=0.121.0}"
 : "${SYFT_VERSION:=1.55.0}"
@@ -7174,7 +7182,7 @@ cat > "$R/runner/install/users.sh" <<'__SIC_EOF__'
 #                  with access to Docker through the docker group (root-equivalent, needed by the executor)
 #   monitoring     service account: no shell, no password, no SSH; owns the monitoring and logging containers
 #
-# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22), no agent or X11 forwarding,
+# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22; remembered from the existing drop-in), no agent or X11 forwarding,
 # local port forwarding kept for tunnels.
 # Root keeps SSH by key until --lock-root, which refuses to run while the admin has no key. With another
 # SSH_PORT, sshd listens on 22 and SSH_PORT until --lock-root, which then closes 22. A locked server stays
@@ -7185,8 +7193,13 @@ ADMIN_USER="${ADMIN_USER:-ops}"
 MON_USER="${MON_USER:-monitoring}"
 RUNNER_USER=gitlab-runner
 SSH_GROUP="${SSH_GROUP:-ssh-users}"
-SSH_PORT="${SSH_PORT:-22}"
 DROPIN=/etc/ssh/sshd_config.d/00-ci-hardening.conf
+# SSH_PORT from the environment wins; otherwise the port written by the previous run is kept, so a rerun,
+# --lock-root and --unlock-root never fall back to 22 on a host that listens elsewhere.
+if [[ -z "${SSH_PORT:-}" ]]; then
+  SSH_PORT=$(awk 'tolower($1) == "port" && $2 != 22 { p = $2 } END { print p }' "$DROPIN" 2>/dev/null || true)
+fi
+SSH_PORT="${SSH_PORT:-22}"
 RUNNER_DROPIN=/etc/systemd/system/gitlab-runner.service.d/10-service-user.conf
 RUNNER_CFG=/etc/gitlab-runner/config.toml
 LOCK_ROOT=0
@@ -7209,7 +7222,8 @@ The admin gets the keys from /root/.ssh/authorized_keys.
   --unlock-root  undo --lock-root (root by key again)
   --no-reload    write the config but do not reload sshd or restart gitlab-runner
 
-Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users), SSH_PORT (default 22)
+Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users),
+     SSH_PORT (default 22, or the port already in ${DROPIN}; give it once, reruns keep it)
 Rollback: delete ${DROPIN} and ${RUNNER_DROPIN}, then: systemctl reload sshd; systemctl daemon-reload; systemctl restart gitlab-runner
 USAGE
 }
@@ -8931,7 +8945,7 @@ cat > "$R/runner/install/users.sh" <<'__SIC_EOF__'
 #                  with access to Docker through the docker group (root-equivalent, needed by the executor)
 #   monitoring     service account: no shell, no password, no SSH; owns the monitoring and logging containers
 #
-# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22), no agent or X11 forwarding,
+# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22; remembered from the existing drop-in), no agent or X11 forwarding,
 # local port forwarding kept for tunnels.
 # Root keeps SSH by key until --lock-root, which refuses to run while the admin has no key. With another
 # SSH_PORT, sshd listens on 22 and SSH_PORT until --lock-root, which then closes 22. A locked server stays
@@ -8942,8 +8956,13 @@ ADMIN_USER="${ADMIN_USER:-ops}"
 MON_USER="${MON_USER:-monitoring}"
 RUNNER_USER=gitlab-runner
 SSH_GROUP="${SSH_GROUP:-ssh-users}"
-SSH_PORT="${SSH_PORT:-22}"
 DROPIN=/etc/ssh/sshd_config.d/00-ci-hardening.conf
+# SSH_PORT from the environment wins; otherwise the port written by the previous run is kept, so a rerun,
+# --lock-root and --unlock-root never fall back to 22 on a host that listens elsewhere.
+if [[ -z "${SSH_PORT:-}" ]]; then
+  SSH_PORT=$(awk 'tolower($1) == "port" && $2 != 22 { p = $2 } END { print p }' "$DROPIN" 2>/dev/null || true)
+fi
+SSH_PORT="${SSH_PORT:-22}"
 RUNNER_DROPIN=/etc/systemd/system/gitlab-runner.service.d/10-service-user.conf
 RUNNER_CFG=/etc/gitlab-runner/config.toml
 LOCK_ROOT=0
@@ -8966,7 +8985,8 @@ The admin gets the keys from /root/.ssh/authorized_keys.
   --unlock-root  undo --lock-root (root by key again)
   --no-reload    write the config but do not reload sshd or restart gitlab-runner
 
-Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users), SSH_PORT (default 22)
+Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users),
+     SSH_PORT (default 22, or the port already in ${DROPIN}; give it once, reruns keep it)
 Rollback: delete ${DROPIN} and ${RUNNER_DROPIN}, then: systemctl reload sshd; systemctl daemon-reload; systemctl restart gitlab-runner
 USAGE
 }
@@ -13045,7 +13065,7 @@ cat > "$R/runner/install/users.sh" <<'__SIC_EOF__'
 #                  with access to Docker through the docker group (root-equivalent, needed by the executor)
 #   monitoring     service account: no shell, no password, no SSH; owns the monitoring and logging containers
 #
-# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22), no agent or X11 forwarding,
+# SSH: keys only, only members of ssh-users, port SSH_PORT (default 22; remembered from the existing drop-in), no agent or X11 forwarding,
 # local port forwarding kept for tunnels.
 # Root keeps SSH by key until --lock-root, which refuses to run while the admin has no key. With another
 # SSH_PORT, sshd listens on 22 and SSH_PORT until --lock-root, which then closes 22. A locked server stays
@@ -13056,8 +13076,13 @@ ADMIN_USER="${ADMIN_USER:-ops}"
 MON_USER="${MON_USER:-monitoring}"
 RUNNER_USER=gitlab-runner
 SSH_GROUP="${SSH_GROUP:-ssh-users}"
-SSH_PORT="${SSH_PORT:-22}"
 DROPIN=/etc/ssh/sshd_config.d/00-ci-hardening.conf
+# SSH_PORT from the environment wins; otherwise the port written by the previous run is kept, so a rerun,
+# --lock-root and --unlock-root never fall back to 22 on a host that listens elsewhere.
+if [[ -z "${SSH_PORT:-}" ]]; then
+  SSH_PORT=$(awk 'tolower($1) == "port" && $2 != 22 { p = $2 } END { print p }' "$DROPIN" 2>/dev/null || true)
+fi
+SSH_PORT="${SSH_PORT:-22}"
 RUNNER_DROPIN=/etc/systemd/system/gitlab-runner.service.d/10-service-user.conf
 RUNNER_CFG=/etc/gitlab-runner/config.toml
 LOCK_ROOT=0
@@ -13080,7 +13105,8 @@ The admin gets the keys from /root/.ssh/authorized_keys.
   --unlock-root  undo --lock-root (root by key again)
   --no-reload    write the config but do not reload sshd or restart gitlab-runner
 
-Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users), SSH_PORT (default 22)
+Env: ADMIN_USER, MON_USER (default monitoring), SSH_GROUP (default ssh-users),
+     SSH_PORT (default 22, or the port already in ${DROPIN}; give it once, reruns keep it)
 Rollback: delete ${DROPIN} and ${RUNNER_DROPIN}, then: systemctl reload sshd; systemctl daemon-reload; systemctl restart gitlab-runner
 USAGE
 }
