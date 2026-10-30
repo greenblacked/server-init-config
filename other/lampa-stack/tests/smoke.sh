@@ -54,10 +54,25 @@ expect "ts.* the token in a query string does not count" "$(req "ts.$D" "/echo?t
 expect "ts.* swagger docs blocked" "$(req "ts.$D" "/t/${TOK}/swagger/index.html")" '^404 '
 expect "ts.* with the device token works (Lampa on the TV)" "$(req "ts.$D" "/t/${TOK}/echo")" '^200'
 expect "ts.* CORS preflight with the token is answered" "$(req "ts.$D" "/t/${TOK}/torrents" -X OPTIONS -H "Origin: https://${D}:${PORT}" -H 'Access-Control-Request-Method: POST')" '^2[0-9][0-9] $'
-# a token must not reach the admin API (UseDisk / TorrentsSavePath / shutdown)
-for p in settings shutdown swagger/index.html ''; do
+# a token must not reach the admin API (shutdown) and must not WRITE settings (UseDisk / TorrentsSavePath)
+for p in shutdown swagger/index.html ''; do
   expect "ts.* the device token does not reach /${p:-<root>}" "$(req "ts.$D" "/t/${TOK}/${p}" -X POST -d '{"action":"get"}')" '^(403|404) '
 done
+expect "ts.* the device token cannot GET /settings" "$(req "ts.$D" "/t/${TOK}/settings")" '^403 '
+# Lampa starts every torrent with POST /settings {"action":"get"} and needs CacheSize in the reply
+got=$(body "ts.$D" "/t/${TOK}/settings" -X POST -d '{"action":"get"}' || true)
+if grep -q 'CacheSize' <<<"$got"; then ok "ts.* token: /settings get returns CacheSize (what Lampa checks before a torrent)"; else bad "ts.* token: /settings get has no CacheSize"; fi
+# the body is forced to a read, so action=set is answered as a get and changes nothing
+got=$(body "ts.$D" "/t/${TOK}/settings" -X POST -d '{"action":"set","sets":{"UseDisk":true,"TorrentsSavePath":"/tmp"}}' || true)
+if grep -q 'CacheSize' <<<"$got" && ! grep -Eq '"UseDisk" *: *true|"TorrentsSavePath" *: *"/tmp"' <<<"$got"; then ok "ts.* token: /settings set is turned into a read (UseDisk unchanged)"; else bad "ts.* token: /settings set was not neutralised"; fi
+got=$(body "ts.$D" "/t/${TOK}/settings" -X POST -d '{"action":"get"}' || true)
+if grep -Eq '"UseDisk" *: *true' <<<"$got"; then bad "ts.* UseDisk became true through a token"; else ok "ts.* UseDisk is still off after the set attempt"; fi
+# the same order Lampa uses: settings, then the torrent list, then the player endpoints
+expect "ts.* Lampa order: /settings get" "$(req "ts.$D" "/t/${TOK}/settings" -X POST -d '{"action":"get"}')" '^200'
+expect "ts.* Lampa order: /torrents list" "$(req "ts.$D" "/t/${TOK}/torrents" -X POST -d '{"action":"list"}')" '^200'
+expect "ts.* Lampa order: /stream is reached" "$(req "ts.$D" "/t/${TOK}/stream?link=0000000000000000000000000000000000000000&index=1&stat")" '^[2-5][0-9][0-9] '
+expect "ts.* token reaches /subs (subtitle list)" "$(req "ts.$D" "/t/${TOK}/subs/0000000000000000000000000000000000000000/1")" '^[2-5][0-9][0-9] '
+expect "ts.* token reaches /download (speed test)" "$(req "ts.$D" "/t/${TOK}/download/1" --max-time 5 || true)" '^(200|[45][0-9][0-9]) '
 # dot segments never get past Caddy (Lampac would remove them and route somewhere else)
 for p in "/t/${TOK}/echo/../settings" "/t/${TOK}/stream/%2e%2e/settings" "/t/${TOK}//settings"; do
   expect "ts.* dot / empty segment ${p#/t/${TOK}} is refused" "$(req "ts.$D" "$p" --path-as-is -X POST -d '{"action":"get"}')" '^400 '

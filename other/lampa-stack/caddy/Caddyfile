@@ -9,7 +9,7 @@
 #   ts.*    /t/<ts token>/...  a per-device token in the PATH (players cannot send headers, so the token rides in the
 #                              URL Lampa uses as its TorrServer address), or an Authelia session (browsers).
 #                              Caddy adds TorrServer's own Basic credential, so TorrServer authenticates it a second time.
-#                              A token opens only the player endpoints, not /settings or /shutdown (see the ts site).
+#                              A token opens only the player endpoints and a read-only /settings, not /shutdown (see the ts site).
 #           EVERY other path, including /settings, /subs and CORS preflights outside the token route, needs the Authelia session.
 #   qbt.*   Authelia session, then qBittorrent's own login
 #   main    Lampa app + Lampac API: a per-device key (query token / account_email / uid / box_mac, the Caddy cookie it
@@ -38,6 +38,12 @@
 	request_header -X-Client-IP
 	request_header -xhost
 	request_header -xscheme
+	# Identity headers that only forward_auth may set (Lampac does not read them today; defense in depth)
+	request_header -Remote-User
+	request_header -Remote-Groups
+	request_header -Remote-Name
+	request_header -Remote-Email
+	request_header -X-Real-IP
 }
 
 # State-changing requests from a sibling site (a script on the main host, e.g. a third-party Lampa plugin)
@@ -130,11 +136,27 @@ import /run/secrets/keymaps
 	# Lampa / players: the per-device token is the first path segment, /t/<32 hex>/... ; it is removed before the
 	# request reaches TorrServer. Because it is in the path, CORS preflights, <video> tags and external players
 	# need nothing else. Only tokens from the generated list match.
-	# A token opens only what Lampa and players use: /echo /torrents /stream /play /cache /viewed /playlist /ffp.
-	# /settings (UseDisk, TorrentsSavePath), /shutdown and the rest of the admin API need the Authelia session below.
+	# A token opens only what Lampa and players use: /echo /torrents /stream /play /cache /viewed /playlist /ffp
+	# /subs (subtitles) /download (Lampa's speed test), plus /settings in read-only form (below).
+	# Writing /settings (UseDisk, TorrentsSavePath), /shutdown and the rest of the admin API need the Authelia session.
 	@tstok expression {ts_ok} == "1"
-	@tsallowed path_regexp ^/t/[0-9a-f]{32}/(echo|torrents|stream|play|cache|viewed|playlist|ffp)(/|$)
+	@tsset {
+		method POST
+		path_regexp ^/t/[0-9a-f]{32}/settings$
+	}
+	@tsallowed path_regexp ^/t/[0-9a-f]{32}/(echo|torrents|stream|play|cache|viewed|playlist|ffp|subs|download)(/|$)
 	handle @tstok {
+		# Lampa starts every torrent with POST /settings {"action":"get"} and fails unless the reply holds CacheSize.
+		# The body is replaced, so a token can read the settings but never send action=set.
+		handle @tsset {
+			request_body {
+				set `{"action":"get"}`
+			}
+			uri path_regexp ^/t/[0-9a-f]{32}/settings$ /settings
+			reverse_proxy torrserver:8090 {
+				header_up Authorization "Basic {file./run/secrets/ts_basic}"
+			}
+		}
 		handle @tsallowed {
 			uri path_regexp ^/t/[0-9a-f]{32}(/|$) /
 			reverse_proxy torrserver:8090 {
