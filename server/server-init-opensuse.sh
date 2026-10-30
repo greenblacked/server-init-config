@@ -264,6 +264,11 @@ swap() {
     # subvolume: use a dedicated subvolume (snapshots do not descend into nested subvolumes).
     swapfile=/swap/swapfile
     if [[ ! -f $swapfile ]]; then
+      # After a snapper rollback /swap is an empty plain directory (snapshots keep nested subvolumes
+      # only as placeholders): replace such a leftover with a real subvolume.
+      if [[ -d /swap ]] && ! btrfs subvolume show /swap >/dev/null 2>&1 && [[ -z "$(ls -A /swap)" ]]; then
+        rmdir /swap || return 1
+      fi
       [[ -e /swap ]] || btrfs subvolume create /swap >/dev/null || return 1
       btrfs subvolume show /swap >/dev/null 2>&1 || { fail "/swap exists but is not a btrfs subvolume; no swap file created"; return 1; }
       chattr +C /swap 2>/dev/null || true

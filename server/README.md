@@ -89,6 +89,7 @@ ssh ops@SERVER_IP 'sudo -n true && echo sudo-ok'
 - Security updates: the script installs a systemd timer `server-security-updates.timer` that runs
   `zypper patch --category security` daily. Check it with `systemctl list-timers server-security-updates.timer`.
 - Swap on btrfs (the default root with snapper snapshots) lives in its own `/swap` subvolume, because a swap file
-  cannot be in a snapshotted subvolume. After a snapper rollback the subvolume is not part of the restored root;
-  rerun the script to recreate it.
+  cannot be in a snapshotted subvolume. After a snapper rollback `/swap` comes back as an empty plain directory;
+  rerun the script and it replaces that empty directory with a new subvolume and swap file (a non-empty `/swap` that
+  is not a subvolume is left alone and the swap step fails with a logged message).
 - If `fail2ban` is not available in the repositories, that step is logged to `/var/log/server-init-failed.log` and skipped.
