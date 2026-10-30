@@ -77,7 +77,7 @@ write_files:
     content: |
       alias runner-logs='journalctl -u gitlab-runner -f'
       alias runner-errors='journalctl -u gitlab-runner --since "-30min" --no-pager | grep -Ei "error|warn|bottleneck"'
-      alias runner-jobs='docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
+      alias runner-jobs='sudo docker ps --filter label=com.gitlab.gitlab-runner.managed=true --format "{{.Names}}  {{.Status}}"'
       alias runner-metrics='curl -s 127.0.0.1:9252/metrics | grep "^gitlab_runner_"'
       alias dfd='df -h / ; docker system df'
       alias dstats='docker stats --no-stream'
