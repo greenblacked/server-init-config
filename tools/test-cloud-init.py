@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -31,6 +32,8 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FILES = ["gitlab-runner/cloud-init-rocky.yaml", "cloud-init/rocky.yaml", "cloud-init/rocky-x86.yaml", "cloud-init/debian.yaml",
                  "cloud-init/debian-x86.yaml", "cloud-init/server-fedora.yaml", "cloud-init/server-el10.yaml"]
+SHELL_HISTORY = ROOT / "scripts" / "shell-history.sh"
+SERVER_SCRIPTS = ["server/server-init-el10.sh", "server/server-init-fedora.sh"]
 LIMIT = 32 * 1024
 LOCKOUT = ("permitrootlogin no", "allowusers", "allowgroups", "port ", "listenaddress")
 
@@ -131,6 +134,12 @@ def test_file(rel: str) -> None:
         elif p.endswith(".sh") or content.startswith(("#!/usr/bin/env bash", "#!/bin/bash")):
             r = run(["bash", "-n"], input=content)
             check(r.returncode == 0, f"{p} passes bash -n", r.stderr.strip())
+        if p == "/etc/profile.d/90-shell-history.sh":
+            check(content == SHELL_HISTORY.read_text(), f"{p} equals scripts/shell-history.sh")
+        if p == "/usr/local/sbin/server-init.sh":
+            src = {"cloud-init/server-el10.yaml": "server-init-el10.sh", "cloud-init/server-fedora.yaml": "server-init-fedora.sh"}.get(rel)
+            if src:
+                check(content == (ROOT / "server" / src).read_text(), f"{p} equals server/{src}")
         if p.startswith("/etc/ssh/sshd_config.d/"):
             lower = [line.strip().lower() for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
             bad = [line for line in lower if line.startswith(LOCKOUT)]
@@ -143,10 +152,24 @@ def test_file(rel: str) -> None:
             check(word not in text, f"clean init does not contain '{word}'")
 
 
+def test_shell_history_copies() -> None:
+    """server/*.sh must stay self-contained, so they embed scripts/shell-history.sh: the copies must match."""
+    print("== shell history copies")
+    want = SHELL_HISTORY.read_text()
+    for rel in SERVER_SCRIPTS:
+        text = (ROOT / rel).read_text()
+        m = re.search(r"put /etc/profile\.d/90-server-shell\.sh 0644 <<'EOF'\n(.*?)\nEOF\n", text, re.S)
+        check(bool(m) and m.group(1) + "\n" == want, f"{rel} embeds scripts/shell-history.sh unchanged")
+    r = run(["bash", "-n", str(SHELL_HISTORY)])
+    check(r.returncode == 0, "scripts/shell-history.sh passes bash -n", r.stderr.strip())
+
+
 def main() -> int:
     files = sys.argv[1:] or DEFAULT_FILES
     for rel in files:
         test_file(rel)
+    if not sys.argv[1:]:
+        test_shell_history_copies()
     print()
     if failures:
         print(f"FAILED: {len(failures)} check(s)")

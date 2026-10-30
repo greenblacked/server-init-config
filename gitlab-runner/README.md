@@ -94,8 +94,8 @@ What the init installs:
 - The SSH drop-in `00-ci-hardening.conf`: no password or keyboard-interactive logins, root by key only, no X11. sshd checks it first (`sshd -t`); if it is rejected, the file is removed and the defaults stay, so login keeps working.
 - Automatic security updates, journal size limit, timezone.
 - Docker Engine and GitLab Runner (docker executor).
-- Tools: `htop`, `btop`, `ncdu`, `iotop`, `mtr`, `nano`, `vim`, `rsync`, `wget`, `unzip`, `bash-completion`, `skopeo`, `restic`, `dnf-utils`, `dig`, `lsof`, `sysstat`, `tcpdump`, `traceroute`, `nc`, `tmux`, `jq`, `git`. Tools outside the base repositories come from EPEL. A missing one is logged and doesn't stop the boot.
-- Aliases: `runner-logs`, `runner-errors`, `runner-jobs`, `runner-metrics`, `dfd`, `dstats`. tmux: mouse on, 50000 lines of history.
+- Tools: `htop`, `btop`, `ncdu`, `iotop`, `mtr`, `nano`, `vim`, `rsync`, `wget`, `unzip`, `bash-completion`, `skopeo`, `restic`, `dnf-utils`, `dig`, `lsof`, `sysstat`, `tcpdump`, `traceroute`, `nc`, `tmux`, `jq`, `git`, `mc` (file manager), `fd`, `rg`, `fzf`. Tools outside the base repositories come from EPEL. A missing one is logged and doesn't stop the boot.
+- Aliases: `runner-logs`, `runner-errors`, `runner-jobs`, `runner-metrics`, `dfd`, `dstats`. tmux: mouse on, 50000 lines of history. Shell: 100000-line history with timestamps shared between sessions, `Ctrl+R` searches it with fzf, `Ctrl+T` finds files (`/etc/profile.d/90-shell-history.sh`, from `scripts/shell-history.sh`).
 
 Not in the init, on purpose: users, closing root SSH, another SSH port, SELinux enforcing, running services as other users. They are separate steps in the plan above, so a mistake there never costs you the login.
 

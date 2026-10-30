@@ -78,9 +78,9 @@ BLOCKS = [
           ["install/users.sh"], run=["install/users.sh"]),
     Block("packages", "Admin tools: htop, btop, ncdu, iotop and others",
           "htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, "
-          "sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, plus the shell aliases and tmux config. "
+          "sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, mc, fd, rg, fzf, plus the shell aliases, shell history with fzf Ctrl+R and tmux config. "
           "For a server created with an older init; safe to rerun.",
-          ["install/admin-tools.sh"], run=["install/admin-tools.sh"]),
+          ["install/admin-tools.sh", "scripts/shell-history.sh"], run=["install/admin-tools.sh"]),
     Block("tools", "Health + cleanup: health, weekly cleanup, disk guard",
           "Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, "
           "runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency "

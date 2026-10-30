@@ -92,9 +92,86 @@ alias dstats='docker stats --no-stream'
 __SIC_EOF__
 chmod 644 /etc/profile.d/ci-runner.sh
 
+install -d "$(dirname /etc/profile.d/90-shell-history.sh)"
+cat > /etc/profile.d/90-shell-history.sh <<'__SIC_EOF__'
+# shellcheck shell=bash
+# Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
+# Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+# and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
+# tools/test-cloud-init.py checks that.
+[ -n "${BASH_VERSION-}" ] || return 0
+[[ $- == *i* ]] || return 0
+
+__shell_history_vars() {
+  HISTSIZE=100000
+  HISTFILESIZE=200000
+  HISTTIMEFORMAT='%F %T  '
+  HISTCONTROL=ignoreboth:erasedups
+}
+__shell_history_vars
+shopt -s histappend cmdhist
+
+# Run before each prompt: append the last command to the history file so parallel sessions share history.
+# On Debian and Ubuntu the user's ~/.bashrc runs after this file and lowers the limits, so the first
+# prompt applies them again (a later change by hand in a session is kept).
+__shell_history_prompt() {
+  history -a
+  if [[ -z "${__shell_history_done-}" ]]; then
+    __shell_history_done=1
+    __shell_history_vars
+  fi
+}
+# Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
+  "declare -a"*)
+    [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
+    ;;
+  *)
+    if [[ "${PROMPT_COMMAND-}" != *__shell_history_prompt* ]]; then
+      __pc="${PROMPT_COMMAND-}"
+      while [[ "$__pc" == *[[:space:]\;] ]]; do __pc="${__pc%?}"; done
+      # shellcheck disable=SC2178
+      PROMPT_COMMAND="${__pc:+$__pc;}__shell_history_prompt"
+      unset __pc
+    fi
+    ;;
+esac
+
+# Debian and Ubuntu install fd as fdfind.
+if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
+  alias fd=fdfind
+  __fd=fdfind
+elif command -v fd >/dev/null 2>&1; then
+  __fd=fd
+fi
+if [[ -n "${__fd-}" ]]; then
+  export FZF_DEFAULT_COMMAND="${FZF_DEFAULT_COMMAND:-$__fd --type f --hidden --follow --exclude .git}"
+  export FZF_CTRL_T_COMMAND="${FZF_CTRL_T_COMMAND:-$FZF_DEFAULT_COMMAND}"
+  export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
+fi
+unset __fd
+
+if command -v fzf >/dev/null 2>&1; then
+  for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
+    if [[ -r "$__f" ]]; then
+      # shellcheck source=/dev/null
+      . "$__f"
+      __fzf_done=1
+      break
+    fi
+  done
+  # fzf 0.48+ can print its own bindings when the package ships no file.
+  if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
+    eval "$(fzf --bash)"
+  fi
+  unset __f __fzf_done
+fi
+__SIC_EOF__
+chmod 644 /etc/profile.d/90-shell-history.sh
+
 restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d
 sh -c 'if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi'
-sh -c 'dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done'
+sh -c 'dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done'
 sh -c 'if [ -f /etc/dnf/automatic.conf ]; then sed -i -E '"'"'s/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/'"'"' /etc/dnf/automatic.conf && systemctl enable --now dnf-automatic.timer; else echo dnf-automatic-config-not-found >> /var/log/ci-bootstrap-failed.log; fi'
 systemctl restart systemd-journald
 timedatectl set-timezone Europe/Kyiv
@@ -584,7 +661,7 @@ INSTALL
 <a id="packages"></a>
 ## Admin tools: htop, btop, ncdu, iotop and others
 
-htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, plus the shell aliases and tmux config. For a server created with an older init; safe to rerun.
+htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, mc, fd, rg, fzf, plus the shell aliases, shell history with fzf Ctrl+R and tmux config. For a server created with an older init; safe to rerun.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -757,15 +834,15 @@ chmod 755 "$R/install/lib.sh"
 install -d "$R/install"
 cat > "$R/install/admin-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo.
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo, mc, fd, rg, fzf.
 # Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
-# Also installs the shell aliases and, if there is none yet, the tmux config from the init. Safe to rerun.
+# Also installs the shell aliases, shell history and fzf key bindings (Ctrl+R, Ctrl+T) and, if there is none yet, the tmux config from the init. Safe to rerun.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, ...), aliases and tmux config"
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
   exit 0
 fi
 require_root
@@ -773,12 +850,12 @@ require_root
 if command -v dnf >/dev/null 2>&1; then
   dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
   PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
-        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl)
+        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update -q >/dev/null
   PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
-        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl)
+        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
 else
   die "no supported package manager"
@@ -813,6 +890,14 @@ EOF
 chmod 644 /etc/profile.d/ci-runner.sh
 restorecon_if /etc/profile.d/ci-runner.sh
 
+# Shell history, Ctrl+R / Ctrl+T with fzf: one source file, also embedded in server/server-init-*.sh
+install -m 0644 "$REPO_ROOT/scripts/shell-history.sh" /etc/profile.d/90-shell-history.sh
+restorecon_if /etc/profile.d/90-shell-history.sh
+# Debian and Ubuntu name the fd binary fdfind
+if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+  ln -s "$(command -v fdfind)" /usr/local/bin/fd
+fi
+
 # root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none
 homes=(/root)
 while IFS= read -r u; do
@@ -838,14 +923,91 @@ log "installed or already present (${#installed[@]}): ${installed[*]}"
 if (( ${#missing[@]} )); then
   log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
 fi
-for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar; do
+for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar mc fd rg fzf; do
   if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
 done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"
 __SIC_EOF__
 chmod 755 "$R/install/admin-tools.sh"
 
-echo "files written to $R: 2"
+install -d "$R/scripts"
+cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
+# shellcheck shell=bash
+# Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
+# Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+# and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
+# tools/test-cloud-init.py checks that.
+[ -n "${BASH_VERSION-}" ] || return 0
+[[ $- == *i* ]] || return 0
+
+__shell_history_vars() {
+  HISTSIZE=100000
+  HISTFILESIZE=200000
+  HISTTIMEFORMAT='%F %T  '
+  HISTCONTROL=ignoreboth:erasedups
+}
+__shell_history_vars
+shopt -s histappend cmdhist
+
+# Run before each prompt: append the last command to the history file so parallel sessions share history.
+# On Debian and Ubuntu the user's ~/.bashrc runs after this file and lowers the limits, so the first
+# prompt applies them again (a later change by hand in a session is kept).
+__shell_history_prompt() {
+  history -a
+  if [[ -z "${__shell_history_done-}" ]]; then
+    __shell_history_done=1
+    __shell_history_vars
+  fi
+}
+# Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
+  "declare -a"*)
+    [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
+    ;;
+  *)
+    if [[ "${PROMPT_COMMAND-}" != *__shell_history_prompt* ]]; then
+      __pc="${PROMPT_COMMAND-}"
+      while [[ "$__pc" == *[[:space:]\;] ]]; do __pc="${__pc%?}"; done
+      # shellcheck disable=SC2178
+      PROMPT_COMMAND="${__pc:+$__pc;}__shell_history_prompt"
+      unset __pc
+    fi
+    ;;
+esac
+
+# Debian and Ubuntu install fd as fdfind.
+if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
+  alias fd=fdfind
+  __fd=fdfind
+elif command -v fd >/dev/null 2>&1; then
+  __fd=fd
+fi
+if [[ -n "${__fd-}" ]]; then
+  export FZF_DEFAULT_COMMAND="${FZF_DEFAULT_COMMAND:-$__fd --type f --hidden --follow --exclude .git}"
+  export FZF_CTRL_T_COMMAND="${FZF_CTRL_T_COMMAND:-$FZF_DEFAULT_COMMAND}"
+  export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
+fi
+unset __fd
+
+if command -v fzf >/dev/null 2>&1; then
+  for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
+    if [[ -r "$__f" ]]; then
+      # shellcheck source=/dev/null
+      . "$__f"
+      __fzf_done=1
+      break
+    fi
+  done
+  # fzf 0.48+ can print its own bindings when the package ships no file.
+  if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
+    eval "$(fzf --bash)"
+  fi
+  unset __f __fzf_done
+fi
+__SIC_EOF__
+chmod 755 "$R/scripts/shell-history.sh"
+
+echo "files written to $R: 3"
 bash "$R/install/admin-tools.sh" </dev/null
 INSTALL
 ````
@@ -5624,15 +5786,15 @@ chmod 755 "$R/install/lib.sh"
 install -d "$R/install"
 cat > "$R/install/admin-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo.
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo, mc, fd, rg, fzf.
 # Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
-# Also installs the shell aliases and, if there is none yet, the tmux config from the init. Safe to rerun.
+# Also installs the shell aliases, shell history and fzf key bindings (Ctrl+R, Ctrl+T) and, if there is none yet, the tmux config from the init. Safe to rerun.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, ...), aliases and tmux config"
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
   exit 0
 fi
 require_root
@@ -5640,12 +5802,12 @@ require_root
 if command -v dnf >/dev/null 2>&1; then
   dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
   PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
-        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl)
+        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update -q >/dev/null
   PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
-        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl)
+        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
 else
   die "no supported package manager"
@@ -5680,6 +5842,14 @@ EOF
 chmod 644 /etc/profile.d/ci-runner.sh
 restorecon_if /etc/profile.d/ci-runner.sh
 
+# Shell history, Ctrl+R / Ctrl+T with fzf: one source file, also embedded in server/server-init-*.sh
+install -m 0644 "$REPO_ROOT/scripts/shell-history.sh" /etc/profile.d/90-shell-history.sh
+restorecon_if /etc/profile.d/90-shell-history.sh
+# Debian and Ubuntu name the fd binary fdfind
+if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+  ln -s "$(command -v fdfind)" /usr/local/bin/fd
+fi
+
 # root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none
 homes=(/root)
 while IFS= read -r u; do
@@ -5705,7 +5875,7 @@ log "installed or already present (${#installed[@]}): ${installed[*]}"
 if (( ${#missing[@]} )); then
   log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
 fi
-for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar; do
+for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar mc fd rg fzf; do
   if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
 done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"
@@ -8255,6 +8425,83 @@ log "done, disk after: $(disk)"
 __SIC_EOF__
 chmod 755 "$R/scripts/runner-weekly-cleanup.sh"
 
+install -d "$R/scripts"
+cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
+# shellcheck shell=bash
+# Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
+# Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+# and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
+# tools/test-cloud-init.py checks that.
+[ -n "${BASH_VERSION-}" ] || return 0
+[[ $- == *i* ]] || return 0
+
+__shell_history_vars() {
+  HISTSIZE=100000
+  HISTFILESIZE=200000
+  HISTTIMEFORMAT='%F %T  '
+  HISTCONTROL=ignoreboth:erasedups
+}
+__shell_history_vars
+shopt -s histappend cmdhist
+
+# Run before each prompt: append the last command to the history file so parallel sessions share history.
+# On Debian and Ubuntu the user's ~/.bashrc runs after this file and lowers the limits, so the first
+# prompt applies them again (a later change by hand in a session is kept).
+__shell_history_prompt() {
+  history -a
+  if [[ -z "${__shell_history_done-}" ]]; then
+    __shell_history_done=1
+    __shell_history_vars
+  fi
+}
+# Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
+  "declare -a"*)
+    [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
+    ;;
+  *)
+    if [[ "${PROMPT_COMMAND-}" != *__shell_history_prompt* ]]; then
+      __pc="${PROMPT_COMMAND-}"
+      while [[ "$__pc" == *[[:space:]\;] ]]; do __pc="${__pc%?}"; done
+      # shellcheck disable=SC2178
+      PROMPT_COMMAND="${__pc:+$__pc;}__shell_history_prompt"
+      unset __pc
+    fi
+    ;;
+esac
+
+# Debian and Ubuntu install fd as fdfind.
+if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
+  alias fd=fdfind
+  __fd=fdfind
+elif command -v fd >/dev/null 2>&1; then
+  __fd=fd
+fi
+if [[ -n "${__fd-}" ]]; then
+  export FZF_DEFAULT_COMMAND="${FZF_DEFAULT_COMMAND:-$__fd --type f --hidden --follow --exclude .git}"
+  export FZF_CTRL_T_COMMAND="${FZF_CTRL_T_COMMAND:-$FZF_DEFAULT_COMMAND}"
+  export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
+fi
+unset __fd
+
+if command -v fzf >/dev/null 2>&1; then
+  for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
+    if [[ -r "$__f" ]]; then
+      # shellcheck source=/dev/null
+      . "$__f"
+      __fzf_done=1
+      break
+    fi
+  done
+  # fzf 0.48+ can print its own bindings when the package ships no file.
+  if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
+    eval "$(fzf --bash)"
+  fi
+  unset __f __fzf_done
+fi
+__SIC_EOF__
+chmod 755 "$R/scripts/shell-history.sh"
+
 install -d "$R/systemd"
 cat > "$R/systemd/ci-image-prewarm.service" <<'__SIC_EOF__'
 [Unit]
@@ -8924,7 +9171,7 @@ volumes:
 __SIC_EOF__
 chmod 644 "$R/npm-cache/docker-compose.yml"
 
-echo "files written to $R: 41"
+echo "files written to $R: 42"
 INSTALL
 sudo bash /root/server-init-config/install/update.sh
 ````
@@ -9105,15 +9352,15 @@ chmod 755 "$R/install/lib.sh"
 install -d "$R/install"
 cat > "$R/install/admin-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo.
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo, mc, fd, rg, fzf.
 # Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
-# Also installs the shell aliases and, if there is none yet, the tmux config from the init. Safe to rerun.
+# Also installs the shell aliases, shell history and fzf key bindings (Ctrl+R, Ctrl+T) and, if there is none yet, the tmux config from the init. Safe to rerun.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, ...), aliases and tmux config"
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
   exit 0
 fi
 require_root
@@ -9121,12 +9368,12 @@ require_root
 if command -v dnf >/dev/null 2>&1; then
   dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
   PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
-        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl)
+        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update -q >/dev/null
   PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
-        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl)
+        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
 else
   die "no supported package manager"
@@ -9161,6 +9408,14 @@ EOF
 chmod 644 /etc/profile.d/ci-runner.sh
 restorecon_if /etc/profile.d/ci-runner.sh
 
+# Shell history, Ctrl+R / Ctrl+T with fzf: one source file, also embedded in server/server-init-*.sh
+install -m 0644 "$REPO_ROOT/scripts/shell-history.sh" /etc/profile.d/90-shell-history.sh
+restorecon_if /etc/profile.d/90-shell-history.sh
+# Debian and Ubuntu name the fd binary fdfind
+if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+  ln -s "$(command -v fdfind)" /usr/local/bin/fd
+fi
+
 # root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none
 homes=(/root)
 while IFS= read -r u; do
@@ -9186,7 +9441,7 @@ log "installed or already present (${#installed[@]}): ${installed[*]}"
 if (( ${#missing[@]} )); then
   log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
 fi
-for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar; do
+for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar mc fd rg fzf; do
   if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
 done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"
@@ -11736,6 +11991,83 @@ log "done, disk after: $(disk)"
 __SIC_EOF__
 chmod 755 "$R/scripts/runner-weekly-cleanup.sh"
 
+install -d "$R/scripts"
+cat > "$R/scripts/shell-history.sh" <<'__SIC_EOF__'
+# shellcheck shell=bash
+# Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
+# Installed as /etc/profile.d/90-shell-history.sh. The same text is embedded in server/server-init-el10.sh
+# and server/server-init-fedora.sh (they must stay self-contained): keep all copies identical,
+# tools/test-cloud-init.py checks that.
+[ -n "${BASH_VERSION-}" ] || return 0
+[[ $- == *i* ]] || return 0
+
+__shell_history_vars() {
+  HISTSIZE=100000
+  HISTFILESIZE=200000
+  HISTTIMEFORMAT='%F %T  '
+  HISTCONTROL=ignoreboth:erasedups
+}
+__shell_history_vars
+shopt -s histappend cmdhist
+
+# Run before each prompt: append the last command to the history file so parallel sessions share history.
+# On Debian and Ubuntu the user's ~/.bashrc runs after this file and lowers the limits, so the first
+# prompt applies them again (a later change by hand in a session is kept).
+__shell_history_prompt() {
+  history -a
+  if [[ -z "${__shell_history_done-}" ]]; then
+    __shell_history_done=1
+    __shell_history_vars
+  fi
+}
+# Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
+case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
+  "declare -a"*)
+    [[ " ${PROMPT_COMMAND[*]} " == *" __shell_history_prompt "* ]] || PROMPT_COMMAND+=('__shell_history_prompt')
+    ;;
+  *)
+    if [[ "${PROMPT_COMMAND-}" != *__shell_history_prompt* ]]; then
+      __pc="${PROMPT_COMMAND-}"
+      while [[ "$__pc" == *[[:space:]\;] ]]; do __pc="${__pc%?}"; done
+      # shellcheck disable=SC2178
+      PROMPT_COMMAND="${__pc:+$__pc;}__shell_history_prompt"
+      unset __pc
+    fi
+    ;;
+esac
+
+# Debian and Ubuntu install fd as fdfind.
+if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
+  alias fd=fdfind
+  __fd=fdfind
+elif command -v fd >/dev/null 2>&1; then
+  __fd=fd
+fi
+if [[ -n "${__fd-}" ]]; then
+  export FZF_DEFAULT_COMMAND="${FZF_DEFAULT_COMMAND:-$__fd --type f --hidden --follow --exclude .git}"
+  export FZF_CTRL_T_COMMAND="${FZF_CTRL_T_COMMAND:-$FZF_DEFAULT_COMMAND}"
+  export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
+fi
+unset __fd
+
+if command -v fzf >/dev/null 2>&1; then
+  for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
+    if [[ -r "$__f" ]]; then
+      # shellcheck source=/dev/null
+      . "$__f"
+      __fzf_done=1
+      break
+    fi
+  done
+  # fzf 0.48+ can print its own bindings when the package ships no file.
+  if [[ -z "${__fzf_done-}" ]] && fzf --bash >/dev/null 2>&1; then
+    eval "$(fzf --bash)"
+  fi
+  unset __f __fzf_done
+fi
+__SIC_EOF__
+chmod 755 "$R/scripts/shell-history.sh"
+
 install -d "$R/systemd"
 cat > "$R/systemd/ci-image-prewarm.service" <<'__SIC_EOF__'
 [Unit]
@@ -12405,7 +12737,7 @@ volumes:
 __SIC_EOF__
 chmod 644 "$R/npm-cache/docker-compose.yml"
 
-echo "files written to $R: 41"
+echo "files written to $R: 42"
 bash "$R/install/users.sh" </dev/null
 bash "$R/install/admin-tools.sh" </dev/null
 bash "$R/install/host-tools.sh" </dev/null

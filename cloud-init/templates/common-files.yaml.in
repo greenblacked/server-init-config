@@ -73,3 +73,8 @@
     permissions: '0644'
     content: |
 @@FILE systemd/runner-disk-guard.timer@@
+
+  - path: /etc/profile.d/90-shell-history.sh
+    permissions: '0644'
+    content: |
+@@FILE scripts/shell-history.sh@@

@@ -5,7 +5,7 @@
 # Login stays as Hetzner sets it up: root with your SSH key on port 22. Only password logins are switched off.
 # Nothing here changes users, the SSH port, SELinux mode or the user the services run as; install those
 # (and everything else) later with gitlab-runner/setup.sh or COMMANDS.md.
-# Admin tools from EPEL (htop and others) are installed one by one in runcmd: a missing one is logged to
+# Admin tools from EPEL (htop, mc, fzf, ripgrep, fd-find and others) are installed one by one in runcmd: a missing one is logged to
 # /var/log/ci-bootstrap-failed.log and does not stop the boot.
 package_update: true
 package_upgrade: true
@@ -82,10 +82,15 @@ write_files:
       alias dfd='df -h / ; docker system df'
       alias dstats='docker stats --no-stream'
 
+  - path: /etc/profile.d/90-shell-history.sh
+    permissions: '0644'
+    content: |
+@@FILE scripts/shell-history.sh@@
+
 runcmd:
   - restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d
   - [sh, -c, "if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi"]
-  - [sh, -c, "dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done"]
+  - [sh, -c, "dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done"]
   - [sh, -c, "if [ -f /etc/dnf/automatic.conf ]; then sed -i -E 's/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/' /etc/dnf/automatic.conf && systemctl enable --now dnf-automatic.timer; else echo dnf-automatic-config-not-found >> /var/log/ci-bootstrap-failed.log; fi"]
   - [systemctl, restart, systemd-journald]
   - [timedatectl, set-timezone, Europe/Kyiv]
