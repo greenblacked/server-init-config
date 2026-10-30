@@ -26,6 +26,19 @@ log "server ip: $server_ip, dns ip: ${dns_ip:-<none>}"
 [[ "$dns_ip" == "$server_ip" ]] || die "$DOMAIN points to $dns_ip, expected $server_ip (DNS proxy enabled?)"
 if ss -ltn | awk '$4 ~ /:(80|443)$/' | grep -q .; then die "ports 80/443 already in use"; fi
 
+# Let's Encrypt (HTTP-01, TLS-ALPN) and visitors reach Caddy on the host network: open 80/443 in the host firewall if
+# one runs. Only added, never removed, and SSH rules are not touched.
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  for svc in http https; do
+    firewall-cmd --permanent --zone=public --add-service="$svc" >/dev/null && firewall-cmd --zone=public --add-service="$svc" >/dev/null \
+      || die "cannot open ${svc} in firewalld"
+  done
+  log "firewalld: http and https opened in the public zone"
+elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null || die "cannot open 80/443 in ufw"
+  log "ufw: 80/tcp and 443/tcp opened"
+fi
+
 backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi

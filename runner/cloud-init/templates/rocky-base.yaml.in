@@ -1,4 +1,4 @@
-# Admin tools (htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dnf-utils, mc, fd-find, ripgrep, fzf)
+# Admin tools (htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, dnf-utils, mc, fd-find, ripgrep, fzf)
 # are installed in runcmd after EPEL is enabled, one by one: htop and several others come from EPEL,
 # so listing it under packages: would break the whole package step. Missing ones go to /var/log/ci-bootstrap-failed.log.
 package_update: true
@@ -53,7 +53,7 @@ write_files:
 runcmd:
   - restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /usr/local/bin /usr/local/sbin /etc/systemd/system /etc/yum.repos.d /etc/sysctl.d
   - [sh, -c, "if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi"]
-  - [sh, -c, "dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done"]
+  - [sh, -c, "dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done"]
   - sed -i -E 's/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/' /etc/dnf/automatic.conf
   - [systemctl, enable, --now, dnf-automatic.timer]
   - [systemctl, restart, systemd-journald]

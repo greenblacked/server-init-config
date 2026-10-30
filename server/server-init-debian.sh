@@ -136,13 +136,16 @@ ProcessSizeMax=0
 EOF
   # The journal backend is needed because Debian 13 has no /var/log/auth.log. Bans go through nftables,
   # which works whether or not ufw is active (ufw uses its own chains). Both are also the package defaults.
-  put /etc/fail2ban/jail.d/50-sshd.local 0644 <<'EOF'
+  # The jail must watch the port sshd really listens on (bootstrap --port), not only the default 22.
+  sshd_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -un | paste -sd, -) || true
+  put /etc/fail2ban/jail.d/50-sshd.local 0644 <<EOF
 [DEFAULT]
 banaction = nftables
 banaction_allports = nftables[type=allports]
 
 [sshd]
 enabled  = true
+port     = ${sshd_ports:-ssh}
 backend  = systemd
 maxretry = 5
 findtime = 10m

@@ -16,7 +16,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 describe() {
   case "$1" in
     users)          echo "admin user ops (sudo), service users gitlab-runner and monitoring, SSH hardening" ;;
-    packages)       echo "admin tools: htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, aliases" ;;
+    packages)       echo "admin tools: htop, btop, ncdu, iotop, mtr, dig, tcpdump, skopeo, aliases" ;;
     tools)          echo "health, weekly cleanup, disk guard, job isolation (metadata and host services blocked), weekly Docker and runner update, kernel hardening and no core dumps" ;;
     firewall)       echo "host firewall (firewalld or ufw) with SSH allowed, plus the fail2ban sshd jail" ;;
     security)       echo "security tools: lynis, oscap, auditd, ssh-audit, nmap, trivy, gitleaks, ... (not in --base/--all)" ;;

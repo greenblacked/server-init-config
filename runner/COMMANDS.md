@@ -272,7 +272,7 @@ chmod 644 /etc/profile.d/90-shell-history.sh
 restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d /usr/local/sbin /etc/yum.repos.d /etc/sysctl.d
 sysctl --system
 sh -c 'if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi'
-sh -c 'dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done'
+sh -c 'dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done'
 sh -c 'if [ -f /etc/dnf/automatic.conf ]; then sed -i -E '"'"'s/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/'"'"' /etc/dnf/automatic.conf && systemctl enable --now dnf-automatic.timer; else echo dnf-automatic-config-not-found >> /var/log/ci-bootstrap-failed.log; fi'
 systemctl restart systemd-journald
 timedatectl set-timezone Europe/Kyiv
@@ -807,7 +807,7 @@ INSTALL
 <a id="packages"></a>
 ## Admin tools: htop, btop, ncdu, iotop and others
 
-htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, mc, fd, rg, fzf, plus the shell aliases, shell history with fzf Ctrl+R and tmux config. For a server created with an older init; safe to rerun.
+htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, dig, lsof, sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, mc, fd, rg, fzf, plus the shell aliases, shell history with fzf Ctrl+R and tmux config. For a server created with an older init; safe to rerun.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -1003,7 +1003,7 @@ chmod 755 "$R/common/lib.sh"
 install -d "$R/common"
 cat > "$R/common/admin-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo, mc, fd, rg, fzf.
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, skopeo, mc, fd, rg, fzf.
 # Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
 # Also installs the shell aliases, shell history and fzf key bindings (Ctrl+R, Ctrl+T) and, if there is none yet, the tmux config from the init. Safe to rerun.
 set -Eeuo pipefail
@@ -1011,19 +1011,19 @@ set -Eeuo pipefail
 source "$(dirname "$0")/lib.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
   exit 0
 fi
 require_root
 
 if command -v dnf >/dev/null 2>&1; then
   dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
-  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
+  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils
         bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update -q >/dev/null
-  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
+  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo
         dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
 else
@@ -1098,7 +1098,7 @@ log "installed or already present (${#installed[@]}): ${installed[*]}"
 if (( ${#missing[@]} )); then
   log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
 fi
-for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar mc fd rg fzf; do
+for c in htop btop ncdu iotop mtr dig tcpdump skopeo sar mc fd rg fzf; do
   if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
 done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"
@@ -2989,9 +2989,10 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
 # without this they would never be updated. No job is started or killed by the upgrade: the runner is first stopped
 # gracefully (it takes no new job and lets a job that is already running finish; the unit gets KillSignal=SIGQUIT),
-# the job list is checked again, and only then are the packages upgraded. gitlab-runner is masked until the end, so
-# a package scriptlet cannot start it in between. Docker is restarted, then gitlab-runner is started; both must be
-# active afterwards. If a job is still there after the stop, the runner is started again and nothing is changed.
+# the job list is checked again, and only then are the packages upgraded. A package scriptlet may start the runner
+# again, so the runner and the job list are checked once more right before Docker is restarted. Docker is restarted,
+# then gitlab-runner is started; both must be active afterwards. If a job is still there, the runner is started again
+# and nothing is changed (or, after the package upgrade, only the Docker restart is left out).
 # The result is one line in /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
@@ -3049,48 +3050,67 @@ fi
 
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
 
-# From here the runner may be stopped; whatever happens, leave it running again.
+# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
+# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
 runner_stopped=0
-runner_back() {
-  systemctl unmask --runtime gitlab-runner >/dev/null 2>&1 || true
-  systemctl start gitlab-runner >/dev/null 2>&1 || true
-}
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
 
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. The default SIGTERM ends them.
-if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null; then
+# `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
+runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
+# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+stop_runner_wait() {
+  local waited=0 st
+  systemctl stop --no-block gitlab-runner
+  while :; do
+    st=$(runner_state)
+    [[ "$st" == inactive || "$st" == failed ]] && return 0
+    (( waited >= STOP_WAIT )) && return 1
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
+
+# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
+# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
-  printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=%s\n' "$STOP_WAIT" > "$DROPIN"
+  printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
-systemctl stop --no-block gitlab-runner
-waited=0
-while systemctl is-active --quiet gitlab-runner; do
-  if (( waited >= STOP_WAIT )); then
-    note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
-    runner_stopped=0   # still stopping on its own: systemd restarts it when it exits
-    exit 0
-  fi
-  sleep 5
-  waited=$((waited + 5))
-done
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) || [[ -n "$jobs" ]]; then
+if ! stop_runner_wait; then
+  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
+  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
+  exit 0
+fi
+if ! no_jobs; then
   note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
   exit 0
 fi
-systemctl mask --runtime gitlab-runner >/dev/null 2>&1 || true
 
 if ! upgrade >>"$LOG" 2>&1; then
   note "FAIL package upgrade failed, see ${LOG}"
   exit 1
+fi
+# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
+# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+if [[ "$(runner_state)" != inactive ]]; then
+  if ! stop_runner_wait; then
+    note "SKIP packages upgraded, but gitlab-runner is busy again; Docker not restarted (new version active after its next restart or reboot)"
+    exit 0
+  fi
+fi
+if ! no_jobs; then
+  note "SKIP packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (new version active after its next restart or reboot)"
+  exit 0
 fi
 systemctl restart docker
 sleep 5
 # The isolation rules live in iptables; reapply them after the Docker restart.
 bad=""
 if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
-systemctl unmask --runtime gitlab-runner >/dev/null 2>&1 || true
 systemctl start gitlab-runner || true
 runner_stopped=0
 sleep 5
@@ -3434,7 +3454,8 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 # Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
 # Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
 #
-# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T). Services of the host
+# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T); runner/install/grafana-domain.sh
+# adds 80/443 when it publishes Grafana, and a rerun of this script keeps them. Services of the host
 # (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
 # server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
@@ -3461,13 +3482,14 @@ ssh_ports() {
 }
 
 put_jail() {
-  local banaction="$1" tmp
+  local banaction="$1" tmp ports
+  ports=$(ssh_ports | paste -sd, -)   # the jail must watch every port sshd listens on, not only 22
   tmp=$(mktemp)
   {
     if [[ -n "$banaction" ]]; then
       printf '[DEFAULT]\nbanaction = %s\nbanaction_allports = %s[type=allports]\n\n' "$banaction" "$banaction"
     fi
-    printf '[sshd]\nenabled  = true\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n'
+    printf '[sshd]\nenabled  = true\nport     = %s\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n' "$ports"
   } > "$tmp"
   install -D -m 0644 "$tmp" "$JAIL_FILE"
   rm -f "$tmp"
@@ -3475,9 +3497,15 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p
+  local running=0 p zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
+  # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
+  if (( running )); then zone=$(firewall-cmd --get-default-zone) || die "cannot read the default zone"; else zone=$(firewall-offline-cmd --get-default-zone) || die "cannot read the default zone"; fi
+  if [[ "$zone" != public ]]; then
+    log "firewalld: default zone was ${zone}, set to public"
+    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
+  fi
   # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
   fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
   fw --zone=public --query-service=ssh >/dev/null 2>&1 || fw --zone=public --add-service=ssh >/dev/null || die "cannot add ssh to the public zone"
@@ -4900,7 +4928,7 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 #
 # GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
 # together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
-# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+# exhausting the host. JOBS_MEMORY_MAX (default 3G) is a ceiling for all job containers together; "" or "infinity" turns it off.
 #
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
@@ -4911,7 +4939,7 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
 #      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
 #      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
-#      JOBS_MEMORY_MAX (default 3g)
+#      JOBS_MEMORY_MAX (default 3G)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -4941,8 +4969,11 @@ scpus_default="${JOB_SERVICE_CPUS:-0.5}"
 [[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
 tasks_max="${JOBS_TASKS_MAX:-4096}"
 [[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
-mem_max="${JOBS_MEMORY_MAX-3g}"
-[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
+mem_max="${JOBS_MEMORY_MAX-3G}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3G)"
+# systemd only accepts upper-case K/M/G suffixes; a lower-case value would be ignored with a warning.
+mem_max="${mem_max^^}"
+[[ "$mem_max" == "INFINITY" ]] && mem_max="infinity"
 
 # The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
 slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"
@@ -5230,7 +5261,7 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 #
 # GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
 # together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
-# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+# exhausting the host. JOBS_MEMORY_MAX (default 3G) is a ceiling for all job containers together; "" or "infinity" turns it off.
 #
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
@@ -5241,7 +5272,7 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
 #      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
 #      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
-#      JOBS_MEMORY_MAX (default 3g)
+#      JOBS_MEMORY_MAX (default 3G)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -5271,8 +5302,11 @@ scpus_default="${JOB_SERVICE_CPUS:-0.5}"
 [[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
 tasks_max="${JOBS_TASKS_MAX:-4096}"
 [[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
-mem_max="${JOBS_MEMORY_MAX-3g}"
-[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
+mem_max="${JOBS_MEMORY_MAX-3G}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3G)"
+# systemd only accepts upper-case K/M/G suffixes; a lower-case value would be ignored with a warning.
+mem_max="${mem_max^^}"
+[[ "$mem_max" == "INFINITY" ]] && mem_max="infinity"
 
 # The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
 slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"
@@ -7857,6 +7891,19 @@ log "server ip: $server_ip, dns ip: ${dns_ip:-<none>}"
 [[ "$dns_ip" == "$server_ip" ]] || die "$DOMAIN points to $dns_ip, expected $server_ip (DNS proxy enabled?)"
 if ss -ltn | awk '$4 ~ /:(80|443)$/' | grep -q .; then die "ports 80/443 already in use"; fi
 
+# Let's Encrypt (HTTP-01, TLS-ALPN) and visitors reach Caddy on the host network: open 80/443 in the host firewall if
+# one runs. Only added, never removed, and SSH rules are not touched.
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  for svc in http https; do
+    firewall-cmd --permanent --zone=public --add-service="$svc" >/dev/null && firewall-cmd --zone=public --add-service="$svc" >/dev/null \
+      || die "cannot open ${svc} in firewalld"
+  done
+  log "firewalld: http and https opened in the public zone"
+elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null || die "cannot open 80/443 in ufw"
+  log "ufw: 80/tcp and 443/tcp opened"
+fi
+
 backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
@@ -8941,6 +8988,19 @@ log "server ip: $server_ip, dns ip: ${dns_ip:-<none>}"
 [[ "$dns_ip" == "$server_ip" ]] || die "$DOMAIN points to $dns_ip, expected $server_ip (DNS proxy enabled?)"
 if ss -ltn | awk '$4 ~ /:(80|443)$/' | grep -q .; then die "ports 80/443 already in use"; fi
 
+# Let's Encrypt (HTTP-01, TLS-ALPN) and visitors reach Caddy on the host network: open 80/443 in the host firewall if
+# one runs. Only added, never removed, and SSH rules are not touched.
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  for svc in http https; do
+    firewall-cmd --permanent --zone=public --add-service="$svc" >/dev/null && firewall-cmd --zone=public --add-service="$svc" >/dev/null \
+      || die "cannot open ${svc} in firewalld"
+  done
+  log "firewalld: http and https opened in the public zone"
+elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null || die "cannot open 80/443 in ufw"
+  log "ufw: 80/tcp and 443/tcp opened"
+fi
+
 backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
@@ -9009,7 +9069,8 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 # Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
 # Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
 #
-# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T). Services of the host
+# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T); runner/install/grafana-domain.sh
+# adds 80/443 when it publishes Grafana, and a rerun of this script keeps them. Services of the host
 # (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
 # server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
@@ -9036,13 +9097,14 @@ ssh_ports() {
 }
 
 put_jail() {
-  local banaction="$1" tmp
+  local banaction="$1" tmp ports
+  ports=$(ssh_ports | paste -sd, -)   # the jail must watch every port sshd listens on, not only 22
   tmp=$(mktemp)
   {
     if [[ -n "$banaction" ]]; then
       printf '[DEFAULT]\nbanaction = %s\nbanaction_allports = %s[type=allports]\n\n' "$banaction" "$banaction"
     fi
-    printf '[sshd]\nenabled  = true\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n'
+    printf '[sshd]\nenabled  = true\nport     = %s\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n' "$ports"
   } > "$tmp"
   install -D -m 0644 "$tmp" "$JAIL_FILE"
   rm -f "$tmp"
@@ -9050,9 +9112,15 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p
+  local running=0 p zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
+  # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
+  if (( running )); then zone=$(firewall-cmd --get-default-zone) || die "cannot read the default zone"; else zone=$(firewall-offline-cmd --get-default-zone) || die "cannot read the default zone"; fi
+  if [[ "$zone" != public ]]; then
+    log "firewalld: default zone was ${zone}, set to public"
+    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
+  fi
   # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
   fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
   fw --zone=public --query-service=ssh >/dev/null 2>&1 || fw --zone=public --add-service=ssh >/dev/null || die "cannot add ssh to the public zone"
@@ -9310,7 +9378,7 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 #
 # GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
 # together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
-# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+# exhausting the host. JOBS_MEMORY_MAX (default 3G) is a ceiling for all job containers together; "" or "infinity" turns it off.
 #
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
@@ -9321,7 +9389,7 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
 #      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
 #      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
-#      JOBS_MEMORY_MAX (default 3g)
+#      JOBS_MEMORY_MAX (default 3G)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -9351,8 +9419,11 @@ scpus_default="${JOB_SERVICE_CPUS:-0.5}"
 [[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
 tasks_max="${JOBS_TASKS_MAX:-4096}"
 [[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
-mem_max="${JOBS_MEMORY_MAX-3g}"
-[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
+mem_max="${JOBS_MEMORY_MAX-3G}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3G)"
+# systemd only accepts upper-case K/M/G suffixes; a lower-case value would be ignored with a warning.
+mem_max="${mem_max^^}"
+[[ "$mem_max" == "INFINITY" ]] && mem_max="infinity"
 
 # The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
 slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"
@@ -10950,9 +11021,10 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
 # without this they would never be updated. No job is started or killed by the upgrade: the runner is first stopped
 # gracefully (it takes no new job and lets a job that is already running finish; the unit gets KillSignal=SIGQUIT),
-# the job list is checked again, and only then are the packages upgraded. gitlab-runner is masked until the end, so
-# a package scriptlet cannot start it in between. Docker is restarted, then gitlab-runner is started; both must be
-# active afterwards. If a job is still there after the stop, the runner is started again and nothing is changed.
+# the job list is checked again, and only then are the packages upgraded. A package scriptlet may start the runner
+# again, so the runner and the job list are checked once more right before Docker is restarted. Docker is restarted,
+# then gitlab-runner is started; both must be active afterwards. If a job is still there, the runner is started again
+# and nothing is changed (or, after the package upgrade, only the Docker restart is left out).
 # The result is one line in /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
@@ -11010,48 +11082,67 @@ fi
 
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
 
-# From here the runner may be stopped; whatever happens, leave it running again.
+# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
+# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
 runner_stopped=0
-runner_back() {
-  systemctl unmask --runtime gitlab-runner >/dev/null 2>&1 || true
-  systemctl start gitlab-runner >/dev/null 2>&1 || true
-}
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
 
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. The default SIGTERM ends them.
-if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null; then
+# `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
+runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
+# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+stop_runner_wait() {
+  local waited=0 st
+  systemctl stop --no-block gitlab-runner
+  while :; do
+    st=$(runner_state)
+    [[ "$st" == inactive || "$st" == failed ]] && return 0
+    (( waited >= STOP_WAIT )) && return 1
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
+
+# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
+# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
-  printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=%s\n' "$STOP_WAIT" > "$DROPIN"
+  printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
-systemctl stop --no-block gitlab-runner
-waited=0
-while systemctl is-active --quiet gitlab-runner; do
-  if (( waited >= STOP_WAIT )); then
-    note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
-    runner_stopped=0   # still stopping on its own: systemd restarts it when it exits
-    exit 0
-  fi
-  sleep 5
-  waited=$((waited + 5))
-done
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) || [[ -n "$jobs" ]]; then
+if ! stop_runner_wait; then
+  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
+  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
+  exit 0
+fi
+if ! no_jobs; then
   note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
   exit 0
 fi
-systemctl mask --runtime gitlab-runner >/dev/null 2>&1 || true
 
 if ! upgrade >>"$LOG" 2>&1; then
   note "FAIL package upgrade failed, see ${LOG}"
   exit 1
+fi
+# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
+# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+if [[ "$(runner_state)" != inactive ]]; then
+  if ! stop_runner_wait; then
+    note "SKIP packages upgraded, but gitlab-runner is busy again; Docker not restarted (new version active after its next restart or reboot)"
+    exit 0
+  fi
+fi
+if ! no_jobs; then
+  note "SKIP packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (new version active after its next restart or reboot)"
+  exit 0
 fi
 systemctl restart docker
 sleep 5
 # The isolation rules live in iptables; reapply them after the Docker restart.
 bad=""
 if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
-systemctl unmask --runtime gitlab-runner >/dev/null 2>&1 || true
 systemctl start gitlab-runner || true
 runner_stopped=0
 sleep 5
@@ -11905,7 +11996,7 @@ chmod 644 "$R/runner/stacks/registry-cache/docker-compose.yml"
 install -d "$R/common"
 cat > "$R/common/admin-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo, mc, fd, rg, fzf.
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, skopeo, mc, fd, rg, fzf.
 # Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
 # Also installs the shell aliases, shell history and fzf key bindings (Ctrl+R, Ctrl+T) and, if there is none yet, the tmux config from the init. Safe to rerun.
 set -Eeuo pipefail
@@ -11913,19 +12004,19 @@ set -Eeuo pipefail
 source "$(dirname "$0")/lib.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
   exit 0
 fi
 require_root
 
 if command -v dnf >/dev/null 2>&1; then
   dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
-  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
+  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils
         bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update -q >/dev/null
-  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
+  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo
         dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
 else
@@ -12000,7 +12091,7 @@ log "installed or already present (${#installed[@]}): ${installed[*]}"
 if (( ${#missing[@]} )); then
   log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
 fi
-for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar mc fd rg fzf; do
+for c in htop btop ncdu iotop mtr dig tcpdump skopeo sar mc fd rg fzf; do
   if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
 done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"
@@ -13713,6 +13804,19 @@ log "server ip: $server_ip, dns ip: ${dns_ip:-<none>}"
 [[ "$dns_ip" == "$server_ip" ]] || die "$DOMAIN points to $dns_ip, expected $server_ip (DNS proxy enabled?)"
 if ss -ltn | awk '$4 ~ /:(80|443)$/' | grep -q .; then die "ports 80/443 already in use"; fi
 
+# Let's Encrypt (HTTP-01, TLS-ALPN) and visitors reach Caddy on the host network: open 80/443 in the host firewall if
+# one runs. Only added, never removed, and SSH rules are not touched.
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  for svc in http https; do
+    firewall-cmd --permanent --zone=public --add-service="$svc" >/dev/null && firewall-cmd --zone=public --add-service="$svc" >/dev/null \
+      || die "cannot open ${svc} in firewalld"
+  done
+  log "firewalld: http and https opened in the public zone"
+elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null || die "cannot open 80/443 in ufw"
+  log "ufw: 80/tcp and 443/tcp opened"
+fi
+
 backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
@@ -13781,7 +13885,8 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 # Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
 # Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
 #
-# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T). Services of the host
+# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T); runner/install/grafana-domain.sh
+# adds 80/443 when it publishes Grafana, and a rerun of this script keeps them. Services of the host
 # (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
 # server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
@@ -13808,13 +13913,14 @@ ssh_ports() {
 }
 
 put_jail() {
-  local banaction="$1" tmp
+  local banaction="$1" tmp ports
+  ports=$(ssh_ports | paste -sd, -)   # the jail must watch every port sshd listens on, not only 22
   tmp=$(mktemp)
   {
     if [[ -n "$banaction" ]]; then
       printf '[DEFAULT]\nbanaction = %s\nbanaction_allports = %s[type=allports]\n\n' "$banaction" "$banaction"
     fi
-    printf '[sshd]\nenabled  = true\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n'
+    printf '[sshd]\nenabled  = true\nport     = %s\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n' "$ports"
   } > "$tmp"
   install -D -m 0644 "$tmp" "$JAIL_FILE"
   rm -f "$tmp"
@@ -13822,9 +13928,15 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p
+  local running=0 p zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
+  # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
+  if (( running )); then zone=$(firewall-cmd --get-default-zone) || die "cannot read the default zone"; else zone=$(firewall-offline-cmd --get-default-zone) || die "cannot read the default zone"; fi
+  if [[ "$zone" != public ]]; then
+    log "firewalld: default zone was ${zone}, set to public"
+    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
+  fi
   # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
   fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
   fw --zone=public --query-service=ssh >/dev/null 2>&1 || fw --zone=public --add-service=ssh >/dev/null || die "cannot add ssh to the public zone"
@@ -14082,7 +14194,7 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 #
 # GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
 # together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
-# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+# exhausting the host. JOBS_MEMORY_MAX (default 3G) is a ceiling for all job containers together; "" or "infinity" turns it off.
 #
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
@@ -14093,7 +14205,7 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
 #      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
 #      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
-#      JOBS_MEMORY_MAX (default 3g)
+#      JOBS_MEMORY_MAX (default 3G)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -14123,8 +14235,11 @@ scpus_default="${JOB_SERVICE_CPUS:-0.5}"
 [[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
 tasks_max="${JOBS_TASKS_MAX:-4096}"
 [[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
-mem_max="${JOBS_MEMORY_MAX-3g}"
-[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
+mem_max="${JOBS_MEMORY_MAX-3G}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3G)"
+# systemd only accepts upper-case K/M/G suffixes; a lower-case value would be ignored with a warning.
+mem_max="${mem_max^^}"
+[[ "$mem_max" == "INFINITY" ]] && mem_max="infinity"
 
 # The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
 slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"
@@ -15722,9 +15837,10 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
 # without this they would never be updated. No job is started or killed by the upgrade: the runner is first stopped
 # gracefully (it takes no new job and lets a job that is already running finish; the unit gets KillSignal=SIGQUIT),
-# the job list is checked again, and only then are the packages upgraded. gitlab-runner is masked until the end, so
-# a package scriptlet cannot start it in between. Docker is restarted, then gitlab-runner is started; both must be
-# active afterwards. If a job is still there after the stop, the runner is started again and nothing is changed.
+# the job list is checked again, and only then are the packages upgraded. A package scriptlet may start the runner
+# again, so the runner and the job list are checked once more right before Docker is restarted. Docker is restarted,
+# then gitlab-runner is started; both must be active afterwards. If a job is still there, the runner is started again
+# and nothing is changed (or, after the package upgrade, only the Docker restart is left out).
 # The result is one line in /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
@@ -15782,48 +15898,67 @@ fi
 
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
 
-# From here the runner may be stopped; whatever happens, leave it running again.
+# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
+# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
 runner_stopped=0
-runner_back() {
-  systemctl unmask --runtime gitlab-runner >/dev/null 2>&1 || true
-  systemctl start gitlab-runner >/dev/null 2>&1 || true
-}
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
 
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. The default SIGTERM ends them.
-if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null; then
+# `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
+runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
+# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+stop_runner_wait() {
+  local waited=0 st
+  systemctl stop --no-block gitlab-runner
+  while :; do
+    st=$(runner_state)
+    [[ "$st" == inactive || "$st" == failed ]] && return 0
+    (( waited >= STOP_WAIT )) && return 1
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
+
+# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
+# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
-  printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=%s\n' "$STOP_WAIT" > "$DROPIN"
+  printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
-systemctl stop --no-block gitlab-runner
-waited=0
-while systemctl is-active --quiet gitlab-runner; do
-  if (( waited >= STOP_WAIT )); then
-    note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
-    runner_stopped=0   # still stopping on its own: systemd restarts it when it exits
-    exit 0
-  fi
-  sleep 5
-  waited=$((waited + 5))
-done
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) || [[ -n "$jobs" ]]; then
+if ! stop_runner_wait; then
+  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
+  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
+  exit 0
+fi
+if ! no_jobs; then
   note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
   exit 0
 fi
-systemctl mask --runtime gitlab-runner >/dev/null 2>&1 || true
 
 if ! upgrade >>"$LOG" 2>&1; then
   note "FAIL package upgrade failed, see ${LOG}"
   exit 1
+fi
+# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
+# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+if [[ "$(runner_state)" != inactive ]]; then
+  if ! stop_runner_wait; then
+    note "SKIP packages upgraded, but gitlab-runner is busy again; Docker not restarted (new version active after its next restart or reboot)"
+    exit 0
+  fi
+fi
+if ! no_jobs; then
+  note "SKIP packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (new version active after its next restart or reboot)"
+  exit 0
 fi
 systemctl restart docker
 sleep 5
 # The isolation rules live in iptables; reapply them after the Docker restart.
 bad=""
 if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
-systemctl unmask --runtime gitlab-runner >/dev/null 2>&1 || true
 systemctl start gitlab-runner || true
 runner_stopped=0
 sleep 5
@@ -16677,7 +16812,7 @@ chmod 644 "$R/runner/stacks/registry-cache/docker-compose.yml"
 install -d "$R/common"
 cat > "$R/common/admin-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo, mc, fd, rg, fzf.
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, skopeo, mc, fd, rg, fzf.
 # Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
 # Also installs the shell aliases, shell history and fzf key bindings (Ctrl+R, Ctrl+T) and, if there is none yet, the tmux config from the init. Safe to rerun.
 set -Eeuo pipefail
@@ -16685,19 +16820,19 @@ set -Eeuo pipefail
 source "$(dirname "$0")/lib.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
   exit 0
 fi
 require_root
 
 if command -v dnf >/dev/null 2>&1; then
   dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
-  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
+  PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils
         bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update -q >/dev/null
-  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
+  PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo
         dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
 else
@@ -16772,7 +16907,7 @@ log "installed or already present (${#installed[@]}): ${installed[*]}"
 if (( ${#missing[@]} )); then
   log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
 fi
-for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar mc fd rg fzf; do
+for c in htop btop ncdu iotop mtr dig tcpdump skopeo sar mc fd rg fzf; do
   if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
 done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"

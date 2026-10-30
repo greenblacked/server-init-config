@@ -207,6 +207,12 @@ def test_server_cleanup_copies() -> None:
         check(r.returncode == 0, "server/server-login.sh passes dash -n", r.stderr.strip())
 
 
+def test_no_restic() -> None:
+    """The owner removed restic: it must not be installed or documented anywhere in the tracked files."""
+    r = run(["git", "grep", "-il", "restic", "--", ".", ":!tools/test-cloud-init.py"], cwd=ROOT)
+    check(r.returncode == 1, "restic appears nowhere in the tracked files", r.stdout.strip())
+
+
 def main() -> int:
     files = sys.argv[1:] or DEFAULT_FILES
     for rel in files:
@@ -214,6 +220,7 @@ def main() -> int:
     if not sys.argv[1:]:
         test_shell_history_copies()
         test_server_cleanup_copies()
+        test_no_restic()
     print()
     if failures:
         print(f"FAILED: {len(failures)} check(s)")

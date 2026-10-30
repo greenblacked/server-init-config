@@ -70,7 +70,7 @@ sudo bash -c 'cd /root/server-init-config && runner/setup.sh --list'
 sudo bash -c 'cd /root/server-init-config && DOMAIN=grafana.example.com ACME_EMAIL=you@example.com runner/setup.sh --grafana-domain'
 ```
 
-The domain needs monitoring, an A record and TCP 80 and 443 in the Cloud Firewall.
+The domain needs monitoring, an A record and TCP 80 and 443 in the Cloud Firewall. The step also opens 80/443 in the host firewall (firewalld or ufw) so the certificate can be issued; the SSH rules are not touched.
 
 ### Without a repo copy
 
@@ -186,7 +186,7 @@ service_cpus = "0.5"
 service_cgroup_parent = "ci-jobs.slice"
 ```
 
-The `service_*` keys give the same kind of limit to the `services:` containers of a job (postgres, redis, ...). GitLab Runner has no per-container process limit, so processes are capped for all jobs together: the step writes `/etc/systemd/system/ci-jobs.slice` with `TasksMax=4096` and `MemoryMax=3g`, and every job and service container runs inside that slice (`cgroup_parent`). A fork bomb in a job stops at that ceiling instead of exhausting the host.
+The `service_*` keys give the same kind of limit to the `services:` containers of a job (postgres, redis, ...). GitLab Runner has no per-container process limit, so processes are capped for all jobs together: the step writes `/etc/systemd/system/ci-jobs.slice` with `TasksMax=4096` and `MemoryMax=3G`, and every job and service container runs inside that slice (`cgroup_parent`). A fork bomb in a job stops at that ceiling instead of exhausting the host.
 Two jobs at 1.5 GB and 1.5 CPUs leave about 1 GB and one CPU's worth for the host on a CAX11. A job over its memory limit is killed (exit code 137) instead of freezing the server. Values you set yourself in `config.toml` are kept; to change them, pass the new values and rerun the step (a backup is made; the runner reloads the file by itself, new jobs get the new limits). Server, as `ops`, any directory:
 
 ```bash
@@ -268,7 +268,7 @@ Runner-specific; the general table is in the [main README](../README.md#troubles
 - SSH drop-in `00-ci-hardening.conf`: no password or keyboard-interactive logins, root by key, no X11. sshd checks it first (`sshd -t`); if it is rejected the file is removed and the defaults stay.
 - Security updates, journal limit (500 MB, 14 days), timezone, kernel hardening (`kptr_restrict`, `dmesg_restrict`, `ptrace_scope`, protected fifos and regular files, `log_martians`) and core dumps off.
 - Docker Engine and GitLab Runner from repo files written by the init. The signing keys are installed only if their fingerprints match (`pin-repo-key`): Docker `9DC8 5822 9FC7 DD38 854A  E2D8 8D81 803C 0EBF CD88` (checked against the key download), GitLab Runner `F640 3F65 44A3 8863 DAA0  B6E0 3F01 618A 5131 2F3F` (from GitLab's install docs, **not verified here**: compare it with https://docs.gitlab.com/runner/install/linux-repository/ before relying on it; a mismatch stops the install instead of trusting the key).
-- Tools: htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dnf-utils, dig, lsof, sysstat, tcpdump, traceroute, nc, tmux, jq, git, mc, fd, rg, fzf. EPEL ones that are missing are logged to `ci-bootstrap-failed.log` and do not stop the boot.
+- Tools: htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, dnf-utils, dig, lsof, sysstat, tcpdump, traceroute, nc, tmux, jq, git, mc, fd, rg, fzf. EPEL ones that are missing are logged to `ci-bootstrap-failed.log` and do not stop the boot.
 - Not in the init, on purpose: users, closing root SSH, another SSH port, SELinux enforcing (`rocky-clean.yaml`), service users.
 
 ### Check the first boot
