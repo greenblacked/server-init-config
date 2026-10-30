@@ -429,6 +429,25 @@ auto_updates() {
   systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
 }
 
+# pin_repo_key URL FINGERPRINT DEST: download an armored key, install only the key with that primary
+# fingerprint (anything else in the file is dropped). Needs gpg.
+pin_repo_key() {
+  local url="$1" want="$2" dest="$3" tmp home ok=1
+  command -v gpg >/dev/null || apt_get install gnupg >/dev/null || return 1
+  tmp=$(mktemp) && home=$(mktemp -d) || return 1
+  if curl -fsSL "$url" -o "$tmp" \
+     && GNUPGHOME="$home" gpg --batch --quiet --import "$tmp" 2>/dev/null \
+     && GNUPGHOME="$home" gpg --batch --with-colons --list-keys 2>/dev/null \
+        | awk -F: '$1 == "pub" { g = 1; next } $1 == "fpr" && g { print $10; g = 0 }' | grep -qx "$want" \
+     && GNUPGHOME="$home" gpg --batch --export --armor "$want" > "$tmp.out" 2>/dev/null && [[ -s "$tmp.out" ]]; then
+    install -D -m 0644 "$tmp.out" "$dest" && ok=0
+  else
+    fail "key from ${url} does not have the expected fingerprint ${want}; not installed"
+  fi
+  rm -rf "$tmp" "$tmp.out" "$home"
+  return "$ok"
+}
+
 docker_engine() {
   (( INSTALL_DOCKER == 1 )) || { log "Docker disabled in /etc/server-init.conf"; return 0; }
   if command -v docker >/dev/null; then
@@ -444,11 +463,24 @@ docker_engine() {
   arch=$(dpkg --print-architecture)
   src="https://download.docker.com/linux/${DOCKER_DISTRO}"
   # Docker publishes a repo per codename; use it only when the index exists for this architecture.
-  if [[ -n "$CODENAME" ]] && curl -fsSI "${src}/dists/${CODENAME}/stable/binary-${arch}/Packages" >/dev/null 2>&1; then repo_ok=1; fi
+  # Only a definite 404 means "no repo"; a DNS or network error must not downgrade the host to docker.io for good.
+  if [[ -n "$CODENAME" ]]; then
+    local code=""
+    for _ in 1 2 3; do
+      code=$(curl -sSI -o /dev/null -w '%{http_code}' --max-time 20 "${src}/dists/${CODENAME}/stable/binary-${arch}/Packages" 2>/dev/null || true)
+      [[ "$code" == 200 || "$code" == 404 ]] && break
+      sleep 5
+    done
+    case "$code" in
+      200) repo_ok=1 ;;
+      404) ;;
+      *) log "cannot reach download.docker.com (HTTP ${code:-none}); Docker not installed now, rerun later"; return 1 ;;
+    esac
+  fi
   if (( repo_ok )); then
     install -m 0755 -d /etc/apt/keyrings || return 1
-    curl -fsSL "${src}/gpg" -o /etc/apt/keyrings/docker.asc || return 1
-    chmod 0644 /etc/apt/keyrings/docker.asc
+    # Trust the key only if it is Docker's: fingerprint of "Docker Release (CE deb)", checked before it is installed.
+    pin_repo_key "${src}/gpg" 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 /etc/apt/keyrings/docker.asc || return 1
     put /etc/apt/sources.list.d/docker.sources 0644 <<EOF
 Types: deb
 URIs: ${src}
