@@ -173,9 +173,12 @@ def test_server_cleanup_copies() -> None:
         text = (ROOT / rel).read_text()
         m = re.search(r"put /usr/local/sbin/server-cleanup 0755 <<'EOF'\n(.*?)\nEOF\n", text, re.S)
         check(bool(m) and m.group(1) + "\n" == want, f"{rel} embeds server/server-cleanup.sh unchanged")
-    for name in ("server-cleanup",):
+    for name in ("server-cleanup", "server-update", "server-notify", "server-disk-guard", "srv", "install-tools"):
         r = run(["bash", "-n", str(ROOT / "server" / f"{name}.sh")])
         check(r.returncode == 0, f"server/{name}.sh passes bash -n", r.stderr.strip())
+    if shutil.which("dash"):
+        r = run(["dash", "-n", str(ROOT / "server" / "server-login.sh")])
+        check(r.returncode == 0, "server/server-login.sh passes dash -n", r.stderr.strip())
 
 
 def main() -> int:
