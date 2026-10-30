@@ -10,6 +10,26 @@ server:
         implementation: 'ForwardAuth'
         authn_strategies:
           - name: 'CookieSession'
+    # Throttles the second-factor and password-reset endpoints per client address (first-factor attempts are
+    # limited by `regulation` below).
+    rate_limits:
+      reset_password_start:
+        enable: true
+        buckets:
+          - period: '10 minutes'
+            requests: 5
+      reset_password_finish:
+        enable: true
+        buckets:
+          - period: '10 minutes'
+            requests: 5
+      second_factor_totp:
+        enable: true
+        buckets:
+          - period: '1 minute'
+            requests: 6
+          - period: '1 hour'
+            requests: 40
 log:
   level: 'info'
   format: 'text'
@@ -43,7 +63,9 @@ totp:
 access_control:
   default_policy: 'deny'
   rules:
+    # the Lampa host (browser sessions get their own Lampac key added by Caddy), TorrServer and qBittorrent
     - domain:
+        - '@@DOMAIN@@'
         - 'ts.@@DOMAIN@@'
         - 'qbt.@@DOMAIN@@'
       policy: '@@POLICY@@'
@@ -58,9 +80,14 @@ session:
       inactivity: '1 hour'
       remember_me: '30 days'
 regulation:
-  max_retries: 5
-  find_time: '2 minutes'
-  ban_time: '10 minutes'
+  # Built-in brute-force protection (the fail2ban of this stack): 3 failed logins within 5 minutes ban that user
+  # name AND the client address for 30 minutes; the ban time is the same for the one-time-password step.
+  modes:
+    - 'user'
+    - 'ip'
+  max_retries: 3
+  find_time: '5 minutes'
+  ban_time: '30 minutes'
 storage:
   # encryption_key is read from AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE
   local:
