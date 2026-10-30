@@ -3,7 +3,7 @@
 # No option = --audit --network --scan. Groups:
 #   --audit    lynis, OpenSCAP (EL/Fedora, evaluation only, never --remediate), auditd with a minimal ruleset, ssh-audit, testssl.sh, debsums (Debian)
 #   --network  nmap, tcpdump, tshark, iperf3, socat, ncat, whois, dig, lsof, mtr, traceroute, iftop, nethogs, bmon
-#   --scan     trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: official release binaries, pinned, SHA256 checked
+#   --scan     trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: official release binaries at pinned versions, checked against the checksums file of the same release
 # Opt-in (not part of the default, they use RAM, disk IO or are noisy): --aide --clamav --rkhunter --chkrootkit --arp-scan --grype --syft --k8s
 #   --kali     the `kali` helper (Kali in a Docker container; nothing offensive is installed on the host)
 #   --audit-timer  weekly systemd timer: lynis, oscap, aide --check, rkhunter (whatever is installed) into /var/log/security-audit
@@ -14,7 +14,9 @@ set -Eeuo pipefail
 source "$(dirname "$0")/lib.sh"
 
 # --- pinned versions of the release binaries (override with the same-named environment variable) -----------------
-# Each is downloaded from the project's GitHub release page and verified against the checksums file published with it.
+# Each is downloaded from the project's GitHub release page and compared with the checksums file published in the same
+# release. That catches corrupt or truncated downloads; it does not protect against a replaced release, because the
+# checksums come from the same place as the binary.
 : "${TRIVY_VERSION:=0.76.1}"
 : "${GRYPE_VERSION:=0.121.0}"
 : "${SYFT_VERSION:=1.55.0}"
