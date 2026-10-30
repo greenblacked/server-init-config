@@ -1325,6 +1325,8 @@ MEM_FAIL=5
 LOAD_WARN=1.5
 LOAD_FAIL=3
 QUICK=0
+BRIEF=0
+WRITE=0
 ONLY_CONTAINERS=0
 COLOR=1
 PROFILE=auto
@@ -1348,6 +1350,10 @@ Options:
   -q, --quick       skip slow checks (runner verify, network, pending updates, needs-restarting)
   -c, --containers  only show health of running containers
   --profile P       server|runner (default: auto = server; runner only when a runner is registered)
+  --brief           compact summary (7 lines) of the state the server timers cached, plus live disk, memory,
+                    firewall and fail2ban; this is what the admin sees on login
+  --write           with --brief, as root: save it to /var/lib/server-health/brief.txt (done by server-health-brief.timer;
+                    also runs a full report at most every 6 hours and notifies when it has failures)
   --no-color        plain output without colors
   -h, --help        show this help
 
@@ -1363,12 +1369,15 @@ while [[ $# -gt 0 ]]; do
     --profile) [[ $# -ge 2 ]] || { echo "--profile needs a value: runner or server" >&2; exit 2; }; shift; PROFILE="$1" ;;
     --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
+    --brief) BRIEF=1 ;;
+    --write) WRITE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
+if (( WRITE == 1 && BRIEF == 0 )); then echo "--write needs --brief" >&2; exit 2; fi
 case "$PROFILE" in
   auto|runner|server) ;;
   *) echo "invalid --profile '${PROFILE}': use runner or server" >&2; exit 2 ;;
@@ -1778,7 +1787,7 @@ check_firewall() {
 check_updates() {
   section "Updates and reboot"
   local t found="" n pending="" applies=0 conf
-  for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
+  for t in server-update.timer dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
     unit_exists "$t" || continue
     systemctl is-enabled --quiet "$t" 2>/dev/null || systemctl is-active --quiet "$t" 2>/dev/null || continue
     found="$t"; break
@@ -1791,6 +1800,13 @@ check_updates() {
 
   if [[ -z "$found" ]]; then
     warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
+  elif [[ "$found" == server-update.timer ]]; then
+    local dup=""
+    for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer; do
+      if unit_exists "$t" && systemctl is-enabled --quiet "$t" 2>/dev/null; then dup="$t"; fi
+    done
+    if [[ -n "$dup" ]]; then warn "server-update.timer and ${dup} are both enabled: two updaters race on the dnf lock (rerun server/install-tools.sh)"
+    else ok "automatic updates: server-update.timer ($(systemctl show "$found" -p NextElapseUSecRealtime --value 2>/dev/null || true))"; fi
   elif [[ "$found" == apt-daily-upgrade.timer ]]; then
     if grep -qsE '^[^/]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/20auto-upgrades; then
       ok "unattended-upgrades enabled (${found})"
@@ -1875,6 +1891,17 @@ check_serverinit() {
     fi
     if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
       info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
+    fi
+  fi
+  local ct=server-cleanup.timer res last
+  if unit_exists "$ct"; then
+    if systemctl is-active --quiet "$ct" 2>/dev/null; then
+      last=$(systemctl show server-cleanup.service -p ExecMainExitTimestamp --value 2>/dev/null || true)
+      res=$(systemctl show server-cleanup.service -p Result --value 2>/dev/null || true)
+      if [[ -n "$res" && "$res" != success ]]; then warn "${ct} active, last run ${last:-unknown}: ${res} (journalctl -u server-cleanup.service)"
+      else ok "${ct} active, last run ${last:-not yet}"; fi
+    else
+      warn "${ct} installed but not active"
     fi
   fi
   if [[ -s "$failed" && ! -r "$failed" ]]; then
@@ -2421,6 +2448,102 @@ check_trends() {
   fi
   return 0
 }
+
+# ---- brief mode: a short summary for the login screen and `srv status` -------------------------------------------
+BRIEF_DIR="${HEALTH_BRIEF_DIR:-/var/lib/server-health}"
+UPDATE_STATE="${SERVER_UPDATE_STATE:-/var/lib/server-update}/state"
+CLEANUP_STATE="${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}"
+
+# kv FILE KEY: value of key=value in a one-line state file (empty when missing)
+kv() { sed -nE "s/(^|.* )$2=([^ ]*).*/\2/p" "$1" 2>/dev/null | head -n1 || true; }
+# lvl VALUE WARN FAIL: marker for a value where higher is worse
+lvl() {
+  if (( $1 >= $3 )); then printf ' %sFAIL%s' "$C_FAIL" "$C_N"; elif (( $1 >= $2 )); then printf ' %sWARN%s' "$C_WARN" "$C_N"; fi
+  return 0
+}
+ago() { # ago EPOCH: "3d4h ago" or "never"
+  if [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]]; then echo "$(human_age $(( $(date +%s) - $1 ))) ago"; else echo never; fi
+}
+
+brief_full() { # run the full report when the last one is older than 6 hours; keep its counts for the summary
+  local f="$BRIEF_DIR/full" t=0 out w fl rc=0
+  [[ -r "$f" ]] && t=$(kv "$f" time)
+  [[ "$t" =~ ^[0-9]+$ ]] || t=0
+  (( $(date +%s) - t >= 21600 )) || return 0
+  out=$(HEALTH_REEXEC=1 "$(readlink -f "$0")" --no-color 2>&1) || rc=$?
+  ( umask 077; printf '%s\n' "$out" > "$BRIEF_DIR/last-full.log" )
+  w=$(sed -nE 's/^ +[0-9]+ OK +([0-9]+) WARN +([0-9]+) FAIL.*/\1/p' <<<"$out" | tail -n1 || true)
+  fl=$(sed -nE 's/^ +[0-9]+ OK +([0-9]+) WARN +([0-9]+) FAIL.*/\2/p' <<<"$out" | tail -n1 || true)
+  printf 'time=%s warn=%s fail=%s\n' "$(date +%s)" "${w:-0}" "${fl:-0}" > "$f.tmp" && mv -f "$f.tmp" "$f"
+  if (( ${fl:-0} > 0 )) && [[ -x "${SERVER_SBIN:-/usr/local/sbin}/server-notify" ]]; then
+    "${SERVER_SBIN:-/usr/local/sbin}/server-notify" health "health: ${fl} FAIL, ${w:-0} WARN; $(grep -E '^ +FAIL' <<<"$out" | head -n2 | tr -s ' ' | tr '\n' ';' | cut -c1-300)" || true
+  fi
+  return 0
+}
+
+brief_render() {
+  local up_s d h load dp mp mem_total mem_avail fw="" f2b="" s u r w fl st
+  up_s=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0); d=$(( up_s / 86400 )); h=$(( up_s % 86400 / 3600 ))
+  load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "?")
+  printf '%shost%s  %s  up %sd%sh  load %s  (as of %s)\n' "$C_B" "$C_N" "$(uname -n)" "$d" "$h" "$load" "$(date +%H:%M)"
+  dp=$(df -P / | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }')
+  mem_total=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo); mem_avail=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  mp=$(( mem_total > 0 ? 100 * mem_avail / mem_total : 100 ))
+  printf '%sdisk%s  / %s%% used%s   mem %s%% free%s\n' "$C_B" "$C_N" "$dp" "$(lvl "$dp" "$DISK_WARN" "$DISK_FAIL")" "$mp" \
+    "$( if (( mp <= MEM_FAIL )); then lvl 1 2 1; elif (( mp <= MEM_WARN )); then lvl 1 1 2; fi )"
+  if (( LIMITED )); then
+    printf '%sfw%s    unknown (needs root)\n' "$C_B" "$C_N"
+  else
+    detect_firewall
+    case "$FW_KIND:$FW_STATE" in
+      firewalld:active) fw="firewalld active, open: $(firewall-cmd --list-services --list-ports 2>/dev/null | tr -s ' \n' ' ' | sed 's/ $//')" ;;
+      ufw:active) fw="ufw active" ;;
+      none:*) fw="none installed $(lvl 1 1 2)" ;;
+      *) fw="$FW_KIND $FW_STATE $(lvl 1 2 1)" ;;
+    esac
+    printf '%sfw%s    %s\n' "$C_B" "$C_N" "$fw"
+    if have fail2ban-client && st=$(fail2ban-client status sshd 2>/dev/null); then
+      f2b=$(sed -nE 's/^[^C]*Currently banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -n1 || true)
+      printf '%sf2b%s   %s banned now (sshd jail)\n' "$C_B" "$C_N" "${f2b:-0}"
+    elif have fail2ban-client || unit_exists fail2ban.service; then
+      printf '%sf2b%s   not running %s\n' "$C_B" "$C_N" "$(lvl 1 1 2)"
+    fi
+  fi
+  if [[ -r "$UPDATE_STATE" ]]; then
+    u=$(kv "$UPDATE_STATE" updates); r=$(kv "$UPDATE_STATE" reboot)
+    printf '%supd%s   %s update(s) pending, reboot needed: %s%s  (checked %s)\n' "$C_B" "$C_N" "${u:-?}" "$( [[ "$r" == 1 ]] && echo yes || echo no )" \
+      "$( [[ "$r" == 1 ]] && lvl 1 1 2 )" "$(ago "$(kv "$UPDATE_STATE" time)")"
+    s="update $(ago "$(kv "$UPDATE_STATE" updated)") ($(kv "$UPDATE_STATE" uresult || true))"
+  else
+    printf '%supd%s   unknown: run `srv update --check`\n' "$C_B" "$C_N"
+    s="update never"
+  fi
+  printf '%slast%s  %s, cleanup %s (%s)\n' "$C_B" "$C_N" "$s" "$(ago "$(cat "$CLEANUP_STATE/last-run" 2>/dev/null || true)")" "$(cat "$CLEANUP_STATE/last-result" 2>/dev/null || echo none)"
+  if [[ -r "$BRIEF_DIR/full" ]]; then
+    w=$(kv "$BRIEF_DIR/full" warn); fl=$(kv "$BRIEF_DIR/full" fail)
+    printf '%scheck%s full report %s: %s FAIL, %s WARN%s\n' "$C_B" "$C_N" "$(ago "$(kv "$BRIEF_DIR/full" time)")" "${fl:-0}" "${w:-0}" \
+      "$( if (( ${fl:-0} > 0 )); then printf ' %s-> run: srv health%s' "$C_FAIL" "$C_N"; elif (( ${w:-0} > 0 )); then printf ' %s-> run: srv health%s' "$C_WARN" "$C_N"; fi )"
+  else
+    printf '%scheck%s no full report yet (health, or wait for the timer)\n' "$C_B" "$C_N"
+  fi
+}
+
+brief_main() {
+  if (( WRITE )); then
+    (( LIMITED == 0 )) || { echo "health --brief --write needs root" >&2; exit 1; }
+    C_OK=""; C_WARN=""; C_FAIL=""; C_B=""; C_D=""; C_N=""
+    mkdir -p "$BRIEF_DIR" && chmod 0755 "$BRIEF_DIR"
+    brief_full
+    local tmp; tmp=$(mktemp "$BRIEF_DIR/.brief.XXXXXX")
+    brief_render > "$tmp"
+    chmod 0644 "$tmp"; mv -f "$tmp" "$BRIEF_DIR/brief.txt"
+  else
+    brief_render
+  fi
+  exit 0
+}
+
+if (( BRIEF == 1 )); then brief_main; fi
 
 detect_profile
 detect_firewall
@@ -8154,6 +8277,8 @@ MEM_FAIL=5
 LOAD_WARN=1.5
 LOAD_FAIL=3
 QUICK=0
+BRIEF=0
+WRITE=0
 ONLY_CONTAINERS=0
 COLOR=1
 PROFILE=auto
@@ -8177,6 +8302,10 @@ Options:
   -q, --quick       skip slow checks (runner verify, network, pending updates, needs-restarting)
   -c, --containers  only show health of running containers
   --profile P       server|runner (default: auto = server; runner only when a runner is registered)
+  --brief           compact summary (7 lines) of the state the server timers cached, plus live disk, memory,
+                    firewall and fail2ban; this is what the admin sees on login
+  --write           with --brief, as root: save it to /var/lib/server-health/brief.txt (done by server-health-brief.timer;
+                    also runs a full report at most every 6 hours and notifies when it has failures)
   --no-color        plain output without colors
   -h, --help        show this help
 
@@ -8192,12 +8321,15 @@ while [[ $# -gt 0 ]]; do
     --profile) [[ $# -ge 2 ]] || { echo "--profile needs a value: runner or server" >&2; exit 2; }; shift; PROFILE="$1" ;;
     --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
+    --brief) BRIEF=1 ;;
+    --write) WRITE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
+if (( WRITE == 1 && BRIEF == 0 )); then echo "--write needs --brief" >&2; exit 2; fi
 case "$PROFILE" in
   auto|runner|server) ;;
   *) echo "invalid --profile '${PROFILE}': use runner or server" >&2; exit 2 ;;
@@ -8607,7 +8739,7 @@ check_firewall() {
 check_updates() {
   section "Updates and reboot"
   local t found="" n pending="" applies=0 conf
-  for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
+  for t in server-update.timer dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
     unit_exists "$t" || continue
     systemctl is-enabled --quiet "$t" 2>/dev/null || systemctl is-active --quiet "$t" 2>/dev/null || continue
     found="$t"; break
@@ -8620,6 +8752,13 @@ check_updates() {
 
   if [[ -z "$found" ]]; then
     warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
+  elif [[ "$found" == server-update.timer ]]; then
+    local dup=""
+    for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer; do
+      if unit_exists "$t" && systemctl is-enabled --quiet "$t" 2>/dev/null; then dup="$t"; fi
+    done
+    if [[ -n "$dup" ]]; then warn "server-update.timer and ${dup} are both enabled: two updaters race on the dnf lock (rerun server/install-tools.sh)"
+    else ok "automatic updates: server-update.timer ($(systemctl show "$found" -p NextElapseUSecRealtime --value 2>/dev/null || true))"; fi
   elif [[ "$found" == apt-daily-upgrade.timer ]]; then
     if grep -qsE '^[^/]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/20auto-upgrades; then
       ok "unattended-upgrades enabled (${found})"
@@ -8704,6 +8843,17 @@ check_serverinit() {
     fi
     if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
       info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
+    fi
+  fi
+  local ct=server-cleanup.timer res last
+  if unit_exists "$ct"; then
+    if systemctl is-active --quiet "$ct" 2>/dev/null; then
+      last=$(systemctl show server-cleanup.service -p ExecMainExitTimestamp --value 2>/dev/null || true)
+      res=$(systemctl show server-cleanup.service -p Result --value 2>/dev/null || true)
+      if [[ -n "$res" && "$res" != success ]]; then warn "${ct} active, last run ${last:-unknown}: ${res} (journalctl -u server-cleanup.service)"
+      else ok "${ct} active, last run ${last:-not yet}"; fi
+    else
+      warn "${ct} installed but not active"
     fi
   fi
   if [[ -s "$failed" && ! -r "$failed" ]]; then
@@ -9250,6 +9400,102 @@ check_trends() {
   fi
   return 0
 }
+
+# ---- brief mode: a short summary for the login screen and `srv status` -------------------------------------------
+BRIEF_DIR="${HEALTH_BRIEF_DIR:-/var/lib/server-health}"
+UPDATE_STATE="${SERVER_UPDATE_STATE:-/var/lib/server-update}/state"
+CLEANUP_STATE="${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}"
+
+# kv FILE KEY: value of key=value in a one-line state file (empty when missing)
+kv() { sed -nE "s/(^|.* )$2=([^ ]*).*/\2/p" "$1" 2>/dev/null | head -n1 || true; }
+# lvl VALUE WARN FAIL: marker for a value where higher is worse
+lvl() {
+  if (( $1 >= $3 )); then printf ' %sFAIL%s' "$C_FAIL" "$C_N"; elif (( $1 >= $2 )); then printf ' %sWARN%s' "$C_WARN" "$C_N"; fi
+  return 0
+}
+ago() { # ago EPOCH: "3d4h ago" or "never"
+  if [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]]; then echo "$(human_age $(( $(date +%s) - $1 ))) ago"; else echo never; fi
+}
+
+brief_full() { # run the full report when the last one is older than 6 hours; keep its counts for the summary
+  local f="$BRIEF_DIR/full" t=0 out w fl rc=0
+  [[ -r "$f" ]] && t=$(kv "$f" time)
+  [[ "$t" =~ ^[0-9]+$ ]] || t=0
+  (( $(date +%s) - t >= 21600 )) || return 0
+  out=$(HEALTH_REEXEC=1 "$(readlink -f "$0")" --no-color 2>&1) || rc=$?
+  ( umask 077; printf '%s\n' "$out" > "$BRIEF_DIR/last-full.log" )
+  w=$(sed -nE 's/^ +[0-9]+ OK +([0-9]+) WARN +([0-9]+) FAIL.*/\1/p' <<<"$out" | tail -n1 || true)
+  fl=$(sed -nE 's/^ +[0-9]+ OK +([0-9]+) WARN +([0-9]+) FAIL.*/\2/p' <<<"$out" | tail -n1 || true)
+  printf 'time=%s warn=%s fail=%s\n' "$(date +%s)" "${w:-0}" "${fl:-0}" > "$f.tmp" && mv -f "$f.tmp" "$f"
+  if (( ${fl:-0} > 0 )) && [[ -x "${SERVER_SBIN:-/usr/local/sbin}/server-notify" ]]; then
+    "${SERVER_SBIN:-/usr/local/sbin}/server-notify" health "health: ${fl} FAIL, ${w:-0} WARN; $(grep -E '^ +FAIL' <<<"$out" | head -n2 | tr -s ' ' | tr '\n' ';' | cut -c1-300)" || true
+  fi
+  return 0
+}
+
+brief_render() {
+  local up_s d h load dp mp mem_total mem_avail fw="" f2b="" s u r w fl st
+  up_s=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0); d=$(( up_s / 86400 )); h=$(( up_s % 86400 / 3600 ))
+  load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "?")
+  printf '%shost%s  %s  up %sd%sh  load %s  (as of %s)\n' "$C_B" "$C_N" "$(uname -n)" "$d" "$h" "$load" "$(date +%H:%M)"
+  dp=$(df -P / | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }')
+  mem_total=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo); mem_avail=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  mp=$(( mem_total > 0 ? 100 * mem_avail / mem_total : 100 ))
+  printf '%sdisk%s  / %s%% used%s   mem %s%% free%s\n' "$C_B" "$C_N" "$dp" "$(lvl "$dp" "$DISK_WARN" "$DISK_FAIL")" "$mp" \
+    "$( if (( mp <= MEM_FAIL )); then lvl 1 2 1; elif (( mp <= MEM_WARN )); then lvl 1 1 2; fi )"
+  if (( LIMITED )); then
+    printf '%sfw%s    unknown (needs root)\n' "$C_B" "$C_N"
+  else
+    detect_firewall
+    case "$FW_KIND:$FW_STATE" in
+      firewalld:active) fw="firewalld active, open: $(firewall-cmd --list-services --list-ports 2>/dev/null | tr -s ' \n' ' ' | sed 's/ $//')" ;;
+      ufw:active) fw="ufw active" ;;
+      none:*) fw="none installed $(lvl 1 1 2)" ;;
+      *) fw="$FW_KIND $FW_STATE $(lvl 1 2 1)" ;;
+    esac
+    printf '%sfw%s    %s\n' "$C_B" "$C_N" "$fw"
+    if have fail2ban-client && st=$(fail2ban-client status sshd 2>/dev/null); then
+      f2b=$(sed -nE 's/^[^C]*Currently banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -n1 || true)
+      printf '%sf2b%s   %s banned now (sshd jail)\n' "$C_B" "$C_N" "${f2b:-0}"
+    elif have fail2ban-client || unit_exists fail2ban.service; then
+      printf '%sf2b%s   not running %s\n' "$C_B" "$C_N" "$(lvl 1 1 2)"
+    fi
+  fi
+  if [[ -r "$UPDATE_STATE" ]]; then
+    u=$(kv "$UPDATE_STATE" updates); r=$(kv "$UPDATE_STATE" reboot)
+    printf '%supd%s   %s update(s) pending, reboot needed: %s%s  (checked %s)\n' "$C_B" "$C_N" "${u:-?}" "$( [[ "$r" == 1 ]] && echo yes || echo no )" \
+      "$( [[ "$r" == 1 ]] && lvl 1 1 2 )" "$(ago "$(kv "$UPDATE_STATE" time)")"
+    s="update $(ago "$(kv "$UPDATE_STATE" updated)") ($(kv "$UPDATE_STATE" uresult || true))"
+  else
+    printf '%supd%s   unknown: run `srv update --check`\n' "$C_B" "$C_N"
+    s="update never"
+  fi
+  printf '%slast%s  %s, cleanup %s (%s)\n' "$C_B" "$C_N" "$s" "$(ago "$(cat "$CLEANUP_STATE/last-run" 2>/dev/null || true)")" "$(cat "$CLEANUP_STATE/last-result" 2>/dev/null || echo none)"
+  if [[ -r "$BRIEF_DIR/full" ]]; then
+    w=$(kv "$BRIEF_DIR/full" warn); fl=$(kv "$BRIEF_DIR/full" fail)
+    printf '%scheck%s full report %s: %s FAIL, %s WARN%s\n' "$C_B" "$C_N" "$(ago "$(kv "$BRIEF_DIR/full" time)")" "${fl:-0}" "${w:-0}" \
+      "$( if (( ${fl:-0} > 0 )); then printf ' %s-> run: srv health%s' "$C_FAIL" "$C_N"; elif (( ${w:-0} > 0 )); then printf ' %s-> run: srv health%s' "$C_WARN" "$C_N"; fi )"
+  else
+    printf '%scheck%s no full report yet (health, or wait for the timer)\n' "$C_B" "$C_N"
+  fi
+}
+
+brief_main() {
+  if (( WRITE )); then
+    (( LIMITED == 0 )) || { echo "health --brief --write needs root" >&2; exit 1; }
+    C_OK=""; C_WARN=""; C_FAIL=""; C_B=""; C_D=""; C_N=""
+    mkdir -p "$BRIEF_DIR" && chmod 0755 "$BRIEF_DIR"
+    brief_full
+    local tmp; tmp=$(mktemp "$BRIEF_DIR/.brief.XXXXXX")
+    brief_render > "$tmp"
+    chmod 0644 "$tmp"; mv -f "$tmp" "$BRIEF_DIR/brief.txt"
+  else
+    brief_render
+  fi
+  exit 0
+}
+
+if (( BRIEF == 1 )); then brief_main; fi
 
 detect_profile
 detect_firewall
@@ -12077,6 +12323,8 @@ MEM_FAIL=5
 LOAD_WARN=1.5
 LOAD_FAIL=3
 QUICK=0
+BRIEF=0
+WRITE=0
 ONLY_CONTAINERS=0
 COLOR=1
 PROFILE=auto
@@ -12100,6 +12348,10 @@ Options:
   -q, --quick       skip slow checks (runner verify, network, pending updates, needs-restarting)
   -c, --containers  only show health of running containers
   --profile P       server|runner (default: auto = server; runner only when a runner is registered)
+  --brief           compact summary (7 lines) of the state the server timers cached, plus live disk, memory,
+                    firewall and fail2ban; this is what the admin sees on login
+  --write           with --brief, as root: save it to /var/lib/server-health/brief.txt (done by server-health-brief.timer;
+                    also runs a full report at most every 6 hours and notifies when it has failures)
   --no-color        plain output without colors
   -h, --help        show this help
 
@@ -12115,12 +12367,15 @@ while [[ $# -gt 0 ]]; do
     --profile) [[ $# -ge 2 ]] || { echo "--profile needs a value: runner or server" >&2; exit 2; }; shift; PROFILE="$1" ;;
     --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
+    --brief) BRIEF=1 ;;
+    --write) WRITE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
+if (( WRITE == 1 && BRIEF == 0 )); then echo "--write needs --brief" >&2; exit 2; fi
 case "$PROFILE" in
   auto|runner|server) ;;
   *) echo "invalid --profile '${PROFILE}': use runner or server" >&2; exit 2 ;;
@@ -12530,7 +12785,7 @@ check_firewall() {
 check_updates() {
   section "Updates and reboot"
   local t found="" n pending="" applies=0 conf
-  for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
+  for t in server-update.timer dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
     unit_exists "$t" || continue
     systemctl is-enabled --quiet "$t" 2>/dev/null || systemctl is-active --quiet "$t" 2>/dev/null || continue
     found="$t"; break
@@ -12543,6 +12798,13 @@ check_updates() {
 
   if [[ -z "$found" ]]; then
     warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
+  elif [[ "$found" == server-update.timer ]]; then
+    local dup=""
+    for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer; do
+      if unit_exists "$t" && systemctl is-enabled --quiet "$t" 2>/dev/null; then dup="$t"; fi
+    done
+    if [[ -n "$dup" ]]; then warn "server-update.timer and ${dup} are both enabled: two updaters race on the dnf lock (rerun server/install-tools.sh)"
+    else ok "automatic updates: server-update.timer ($(systemctl show "$found" -p NextElapseUSecRealtime --value 2>/dev/null || true))"; fi
   elif [[ "$found" == apt-daily-upgrade.timer ]]; then
     if grep -qsE '^[^/]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/20auto-upgrades; then
       ok "unattended-upgrades enabled (${found})"
@@ -12627,6 +12889,17 @@ check_serverinit() {
     fi
     if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
       info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
+    fi
+  fi
+  local ct=server-cleanup.timer res last
+  if unit_exists "$ct"; then
+    if systemctl is-active --quiet "$ct" 2>/dev/null; then
+      last=$(systemctl show server-cleanup.service -p ExecMainExitTimestamp --value 2>/dev/null || true)
+      res=$(systemctl show server-cleanup.service -p Result --value 2>/dev/null || true)
+      if [[ -n "$res" && "$res" != success ]]; then warn "${ct} active, last run ${last:-unknown}: ${res} (journalctl -u server-cleanup.service)"
+      else ok "${ct} active, last run ${last:-not yet}"; fi
+    else
+      warn "${ct} installed but not active"
     fi
   fi
   if [[ -s "$failed" && ! -r "$failed" ]]; then
@@ -13173,6 +13446,102 @@ check_trends() {
   fi
   return 0
 }
+
+# ---- brief mode: a short summary for the login screen and `srv status` -------------------------------------------
+BRIEF_DIR="${HEALTH_BRIEF_DIR:-/var/lib/server-health}"
+UPDATE_STATE="${SERVER_UPDATE_STATE:-/var/lib/server-update}/state"
+CLEANUP_STATE="${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}"
+
+# kv FILE KEY: value of key=value in a one-line state file (empty when missing)
+kv() { sed -nE "s/(^|.* )$2=([^ ]*).*/\2/p" "$1" 2>/dev/null | head -n1 || true; }
+# lvl VALUE WARN FAIL: marker for a value where higher is worse
+lvl() {
+  if (( $1 >= $3 )); then printf ' %sFAIL%s' "$C_FAIL" "$C_N"; elif (( $1 >= $2 )); then printf ' %sWARN%s' "$C_WARN" "$C_N"; fi
+  return 0
+}
+ago() { # ago EPOCH: "3d4h ago" or "never"
+  if [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]]; then echo "$(human_age $(( $(date +%s) - $1 ))) ago"; else echo never; fi
+}
+
+brief_full() { # run the full report when the last one is older than 6 hours; keep its counts for the summary
+  local f="$BRIEF_DIR/full" t=0 out w fl rc=0
+  [[ -r "$f" ]] && t=$(kv "$f" time)
+  [[ "$t" =~ ^[0-9]+$ ]] || t=0
+  (( $(date +%s) - t >= 21600 )) || return 0
+  out=$(HEALTH_REEXEC=1 "$(readlink -f "$0")" --no-color 2>&1) || rc=$?
+  ( umask 077; printf '%s\n' "$out" > "$BRIEF_DIR/last-full.log" )
+  w=$(sed -nE 's/^ +[0-9]+ OK +([0-9]+) WARN +([0-9]+) FAIL.*/\1/p' <<<"$out" | tail -n1 || true)
+  fl=$(sed -nE 's/^ +[0-9]+ OK +([0-9]+) WARN +([0-9]+) FAIL.*/\2/p' <<<"$out" | tail -n1 || true)
+  printf 'time=%s warn=%s fail=%s\n' "$(date +%s)" "${w:-0}" "${fl:-0}" > "$f.tmp" && mv -f "$f.tmp" "$f"
+  if (( ${fl:-0} > 0 )) && [[ -x "${SERVER_SBIN:-/usr/local/sbin}/server-notify" ]]; then
+    "${SERVER_SBIN:-/usr/local/sbin}/server-notify" health "health: ${fl} FAIL, ${w:-0} WARN; $(grep -E '^ +FAIL' <<<"$out" | head -n2 | tr -s ' ' | tr '\n' ';' | cut -c1-300)" || true
+  fi
+  return 0
+}
+
+brief_render() {
+  local up_s d h load dp mp mem_total mem_avail fw="" f2b="" s u r w fl st
+  up_s=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0); d=$(( up_s / 86400 )); h=$(( up_s % 86400 / 3600 ))
+  load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "?")
+  printf '%shost%s  %s  up %sd%sh  load %s  (as of %s)\n' "$C_B" "$C_N" "$(uname -n)" "$d" "$h" "$load" "$(date +%H:%M)"
+  dp=$(df -P / | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }')
+  mem_total=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo); mem_avail=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  mp=$(( mem_total > 0 ? 100 * mem_avail / mem_total : 100 ))
+  printf '%sdisk%s  / %s%% used%s   mem %s%% free%s\n' "$C_B" "$C_N" "$dp" "$(lvl "$dp" "$DISK_WARN" "$DISK_FAIL")" "$mp" \
+    "$( if (( mp <= MEM_FAIL )); then lvl 1 2 1; elif (( mp <= MEM_WARN )); then lvl 1 1 2; fi )"
+  if (( LIMITED )); then
+    printf '%sfw%s    unknown (needs root)\n' "$C_B" "$C_N"
+  else
+    detect_firewall
+    case "$FW_KIND:$FW_STATE" in
+      firewalld:active) fw="firewalld active, open: $(firewall-cmd --list-services --list-ports 2>/dev/null | tr -s ' \n' ' ' | sed 's/ $//')" ;;
+      ufw:active) fw="ufw active" ;;
+      none:*) fw="none installed $(lvl 1 1 2)" ;;
+      *) fw="$FW_KIND $FW_STATE $(lvl 1 2 1)" ;;
+    esac
+    printf '%sfw%s    %s\n' "$C_B" "$C_N" "$fw"
+    if have fail2ban-client && st=$(fail2ban-client status sshd 2>/dev/null); then
+      f2b=$(sed -nE 's/^[^C]*Currently banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -n1 || true)
+      printf '%sf2b%s   %s banned now (sshd jail)\n' "$C_B" "$C_N" "${f2b:-0}"
+    elif have fail2ban-client || unit_exists fail2ban.service; then
+      printf '%sf2b%s   not running %s\n' "$C_B" "$C_N" "$(lvl 1 1 2)"
+    fi
+  fi
+  if [[ -r "$UPDATE_STATE" ]]; then
+    u=$(kv "$UPDATE_STATE" updates); r=$(kv "$UPDATE_STATE" reboot)
+    printf '%supd%s   %s update(s) pending, reboot needed: %s%s  (checked %s)\n' "$C_B" "$C_N" "${u:-?}" "$( [[ "$r" == 1 ]] && echo yes || echo no )" \
+      "$( [[ "$r" == 1 ]] && lvl 1 1 2 )" "$(ago "$(kv "$UPDATE_STATE" time)")"
+    s="update $(ago "$(kv "$UPDATE_STATE" updated)") ($(kv "$UPDATE_STATE" uresult || true))"
+  else
+    printf '%supd%s   unknown: run `srv update --check`\n' "$C_B" "$C_N"
+    s="update never"
+  fi
+  printf '%slast%s  %s, cleanup %s (%s)\n' "$C_B" "$C_N" "$s" "$(ago "$(cat "$CLEANUP_STATE/last-run" 2>/dev/null || true)")" "$(cat "$CLEANUP_STATE/last-result" 2>/dev/null || echo none)"
+  if [[ -r "$BRIEF_DIR/full" ]]; then
+    w=$(kv "$BRIEF_DIR/full" warn); fl=$(kv "$BRIEF_DIR/full" fail)
+    printf '%scheck%s full report %s: %s FAIL, %s WARN%s\n' "$C_B" "$C_N" "$(ago "$(kv "$BRIEF_DIR/full" time)")" "${fl:-0}" "${w:-0}" \
+      "$( if (( ${fl:-0} > 0 )); then printf ' %s-> run: srv health%s' "$C_FAIL" "$C_N"; elif (( ${w:-0} > 0 )); then printf ' %s-> run: srv health%s' "$C_WARN" "$C_N"; fi )"
+  else
+    printf '%scheck%s no full report yet (health, or wait for the timer)\n' "$C_B" "$C_N"
+  fi
+}
+
+brief_main() {
+  if (( WRITE )); then
+    (( LIMITED == 0 )) || { echo "health --brief --write needs root" >&2; exit 1; }
+    C_OK=""; C_WARN=""; C_FAIL=""; C_B=""; C_D=""; C_N=""
+    mkdir -p "$BRIEF_DIR" && chmod 0755 "$BRIEF_DIR"
+    brief_full
+    local tmp; tmp=$(mktemp "$BRIEF_DIR/.brief.XXXXXX")
+    brief_render > "$tmp"
+    chmod 0644 "$tmp"; mv -f "$tmp" "$BRIEF_DIR/brief.txt"
+  else
+    brief_render
+  fi
+  exit 0
+}
+
+if (( BRIEF == 1 )); then brief_main; fi
 
 detect_profile
 detect_firewall
