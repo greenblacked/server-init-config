@@ -114,8 +114,8 @@ name=GitLab Runner
 baseurl=https://packages.gitlab.com/runner/gitlab-runner/el/$releasever/$basearch
 enabled=1
 gpgcheck=1
-repo_gpgcheck=0
-gpgkey=file:///etc/pki/rpm-gpg/gitlab-runner.asc
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/gitlab-runner.asc file:///etc/pki/rpm-gpg/gitlab-runner-pkg.asc
 metadata_expire=300
 __SIC_EOF__
 chmod 644 /etc/yum.repos.d/gitlab-runner.repo
@@ -276,10 +276,11 @@ sh -c 'dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var
 sh -c 'if [ -f /etc/dnf/automatic.conf ]; then sed -i -E '"'"'s/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/'"'"' /etc/dnf/automatic.conf && systemctl enable --now dnf-automatic.timer; else echo dnf-automatic-config-not-found >> /var/log/ci-bootstrap-failed.log; fi'
 systemctl restart systemd-journald
 timedatectl set-timezone Europe/Kyiv
-pin-repo-key https://download.docker.com/linux/rhel/gpg 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 /etc/pki/rpm-gpg/docker-ce.asc
+pin-repo-key https://download.docker.com/linux/rhel/gpg 060A61C51B558A7F742B77AAC52FEB6B621E9F35 /etc/pki/rpm-gpg/docker-ce.asc
 dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
 pin-repo-key https://packages.gitlab.com/runner/gitlab-runner/gpgkey F6403F6544A38863DAA0B6E03F01618A51312F3F /etc/pki/rpm-gpg/gitlab-runner.asc
+pin-repo-key https://packages.gitlab.com/gpgkey/runner/49F16C5CC3A0F81F.pub.gpg 931DA69CFA3AFEBBC97DAA8C6C57C29C6BA75A4E /etc/pki/rpm-gpg/gitlab-runner-pkg.asc
 dnf -y -q install gitlab-runner
 usermod -aG docker gitlab-runner
 chmod 600 /etc/gitlab-runner/config.toml

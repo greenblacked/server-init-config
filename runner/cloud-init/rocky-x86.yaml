@@ -658,8 +658,8 @@ write_files:
       baseurl=https://packages.gitlab.com/runner/gitlab-runner/el/$releasever/$basearch
       enabled=1
       gpgcheck=1
-      repo_gpgcheck=0
-      gpgkey=file:///etc/pki/rpm-gpg/gitlab-runner.asc
+      repo_gpgcheck=1
+      gpgkey=file:///etc/pki/rpm-gpg/gitlab-runner.asc file:///etc/pki/rpm-gpg/gitlab-runner-pkg.asc
       metadata_expire=300
 
 runcmd:
@@ -671,14 +671,17 @@ runcmd:
   - [systemctl, restart, systemd-journald]
   - [timedatectl, set-timezone, Europe/Kyiv]
   - [sysctl, --system]
-  - [pin-repo-key, "https://download.docker.com/linux/rhel/gpg", "9DC858229FC7DD38854AE2D88D81803C0EBFCD88", /etc/pki/rpm-gpg/docker-ce.asc]
+  - [pin-repo-key, "https://download.docker.com/linux/rhel/gpg", "060A61C51B558A7F742B77AAC52FEB6B621E9F35", /etc/pki/rpm-gpg/docker-ce.asc]
   - dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   - [systemctl, enable, --now, docker]
   - semanage fcontext -a -t container_file_t '/opt/registry-cache(/.*)?'
   - restorecon -R /opt/registry-cache
   - docker compose -f /opt/registry-cache/docker-compose.yml up -d
-  # UNVERIFIED offline: this fingerprint is from GitLab's Runner install docs; check it against https://docs.gitlab.com/runner/install/linux-repository/
+  # UNVERIFIED offline (packages.gitlab.com was unreachable): both fingerprints come from GitLab's Runner install docs
+  # (https://docs.gitlab.com/runner/install/linux-repository/). F640... signs the repository metadata (repo_gpgcheck),
+  # 931D... signs the RPM packages (gpgcheck). Check them and the package key's expiry before relying on this on a new image.
   - [pin-repo-key, "https://packages.gitlab.com/runner/gitlab-runner/gpgkey", "F6403F6544A38863DAA0B6E03F01618A51312F3F", /etc/pki/rpm-gpg/gitlab-runner.asc]
+  - [pin-repo-key, "https://packages.gitlab.com/gpgkey/runner/49F16C5CC3A0F81F.pub.gpg", "931DA69CFA3AFEBBC97DAA8C6C57C29C6BA75A4E", /etc/pki/rpm-gpg/gitlab-runner-pkg.asc]
   - dnf -y -q install gitlab-runner
   - usermod -aG docker gitlab-runner
   - chmod 600 /etc/gitlab-runner/config.toml

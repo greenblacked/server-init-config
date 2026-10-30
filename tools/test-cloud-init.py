@@ -41,6 +41,19 @@ SHELL_SCRIPTS = SERVER_SCRIPTS + ["server/server-init-debian.sh", "server/server
 LIMIT = 32 * 1024
 LOCKOUT = ("permitrootlogin no", "allowusers", "allowgroups", "port ", "listenaddress")
 
+# Vendor repo keys are pinned by fingerprint. Docker signs deb and rpm repositories with different keys, so a URL
+# must never be paired with the other family's fingerprint.
+PINNED_KEYS = {
+    "download.docker.com/linux/rhel/gpg": "060A61C51B558A7F742B77AAC52FEB6B621E9F35",
+    "download.docker.com/linux/centos/gpg": "060A61C51B558A7F742B77AAC52FEB6B621E9F35",
+    "download.docker.com/linux/fedora/gpg": "060A61C51B558A7F742B77AAC52FEB6B621E9F35",
+    "download.docker.com/linux/debian/gpg": "9DC858229FC7DD38854AE2D88D81803C0EBFCD88",
+    "download.docker.com/linux/ubuntu/gpg": "9DC858229FC7DD38854AE2D88D81803C0EBFCD88",
+    "packages.gitlab.com/runner/gitlab-runner/gpgkey": "F6403F6544A38863DAA0B6E03F01618A51312F3F",
+    "packages.gitlab.com/gpgkey/runner/49F16C5CC3A0F81F.pub.gpg": "931DA69CFA3AFEBBC97DAA8C6C57C29C6BA75A4E",
+}
+PIN_CALL = re.compile(r"pin[-_]repo[-_]key[\"',\s]+\"?(https://[^\s\"',]+)(?:/gpg\"?)?[\"',\s]+\"?([0-9A-Fa-f]{40})\b")
+
 failures: list[str] = []
 
 
@@ -103,6 +116,15 @@ def live_ssh_test(dropin: str, tag: str) -> None:
             proc.wait(timeout=10)
 
 
+def check_pinned_keys(label: str, text: str) -> None:
+    """Every pin-repo-key call must pair a known URL with the fingerprint that URL serves."""
+    for url, fp in re.findall(PIN_CALL, text):
+        key = url.removeprefix("https://")
+        want = PINNED_KEYS.get(key)
+        check(want is not None and want == fp.upper(), f"{label}: key {key} pinned to its own fingerprint",
+              f"got {fp}, expected {want}")
+
+
 def test_file(rel: str) -> None:
     path = ROOT / rel
     print(f"== {rel}")
@@ -151,6 +173,7 @@ def test_file(rel: str) -> None:
             live_ssh_test(content, p)
 
     text = raw.decode()
+    check_pinned_keys(rel, text)
     for word in ("--lock-root", "setenforce 1", "server-users"):
         if rel == "runner/cloud-init/rocky-clean.yaml":
             check(word not in text, f"clean init does not contain '{word}'")
