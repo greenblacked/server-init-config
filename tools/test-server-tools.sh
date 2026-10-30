@@ -318,6 +318,10 @@ stub systemctl 'exit 0'
 stub sshd 'echo "port 22"; echo "port 2222"'
 out=$(bash -c 'source "$1"; firewall' _ "$T/fw-funcs.sh" 2>&1); rc=$?
 check "ufw is enabled with both 22 and the sshd port allowed" '[[ $rc -eq 0 ]] && grep -qx "22/tcp" "$T/ufw.rules" && grep -qx "2222/tcp" "$T/ufw.rules" && [[ -f "$T/ufw.active" ]]'
+# a mistyped APP in the config: ufw must stay off (a deny-all firewall would block the app's public ports)
+: > "$T/ufw.rules"; rm -f "$T/ufw.active"
+out=$(bash -c 'source "$1"; detect_app() { APP_BAD=1; }; APP=wordpres; firewall' _ "$T/fw-funcs.sh" 2>&1); rc=$?
+check "unknown APP: firewall fails, ufw is not enabled and no rule is added" '[[ $rc -ne 0 ]] && grep -q "unknown APP=wordpres" <<<"$out" && [[ ! -f "$T/ufw.active" ]] && [[ ! -s "$T/ufw.rules" ]]'
 rm -f "$T/bin/ufw" "$T/bin/sshd"
 
 section "runner host firewall (ufw branch)"

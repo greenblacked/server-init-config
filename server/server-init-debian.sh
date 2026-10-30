@@ -317,6 +317,7 @@ APP_NAME=""
 APP_PORTS=""
 # Set to 1 for an app whose image owns the firewall (ufw must not be enabled).
 APP_OWN_FW=0
+APP_BAD=0   # 1 when APP in the config names no known app (a typo): firewall() then leaves ufw alone
 app_ports() {
   case "$1" in
     # coolify/test.sh checks the dashboard on http://localhost:8000; the rest is set up by Coolify's
@@ -347,12 +348,12 @@ app_ports() {
 }
 
 detect_app() {
-  APP_NAME=""; APP_PORTS=""; APP_OWN_FW=0
+  APP_NAME=""; APP_PORTS=""; APP_OWN_FW=0; APP_BAD=0
   case "$APP" in
     none) return 0 ;;
     auto) ;;
     *) if app_ports "$APP"; then APP_NAME="$APP"; return 0; fi
-       fail "unknown APP in $CONF_FILE: $APP (ignored)"; APP_PORTS=""; return 0 ;;
+       fail "unknown APP in $CONF_FILE: $APP"; APP_PORTS=""; APP_BAD=1; return 0 ;;
   esac
   local a
   # Markers: the compose project the image copies to /opt/containers/<app>, the first-login script
@@ -396,6 +397,10 @@ unknown_hetzner_app() {
 firewall() {
   local was_active=0 p ssh_ports=""
   detect_app
+  if (( APP_BAD )); then
+    fail "unknown APP=${APP}: the app's ports are unknown, so ufw was not enabled (fix APP in $CONF_FILE, or use APP=none and EXTRA_PORTS, then rerun)"
+    return 1
+  fi
   if [[ "$APP" == auto && -z "$APP_NAME" ]] && unknown_hetzner_app; then
     fail "unrecognised Hetzner Apps image: its ports are unknown, so ufw was not enabled (set APP=<name> or APP=none and EXTRA_PORTS in $CONF_FILE, then rerun)"
     return 1
