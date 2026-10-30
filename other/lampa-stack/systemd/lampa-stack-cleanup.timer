@@ -1,9 +1,9 @@
 [Unit]
-Description=Lampa stack cleanup every 3 days
+Description=Lampa stack cleanup about every 3 days
 
 [Timer]
-OnBootSec=30min
-OnUnitActiveSec=3d
+# on days 1, 4, 7 ... 28 of each month (3 days apart, 4 at month ends); Persistent catches up a run missed while the host was down
+OnCalendar=*-*-01,04,07,10,13,16,19,22,25,28 04:00
 RandomizedDelaySec=30min
 Persistent=true
 
