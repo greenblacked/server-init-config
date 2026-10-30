@@ -45,7 +45,7 @@ runs health. No GitLab Runner is installed or registered; use runner/bootstrap.s
 Env (first run only, saved to /etc/server-init.conf on the server; none of them is a secret):
   ADMIN_USER, EXTRA_PORTS, TIMEZONE, INSTALL_DOCKER, INSTALL_SWAP, INSTALL_CLEANUP, APP
 
-Root keeps SSH login by key on port 22 throughout; nothing here closes it. Every step is safe to rerun.
+Root keeps SSH login by key throughout; nothing here closes it (optional afterwards: server/lock-root.sh). Every step is safe to rerun.
 USAGE
 }
 
@@ -314,7 +314,8 @@ main() {
 [done] Next steps
   1. Test the admin login from a second terminal (ADMIN_USER is ops unless you changed it):
        ssh${PORT_OPT} ops@${SERVER} 'sudo -n true && echo ok'
-  2. Root SSH by key is still open; nothing here closes it.
+  2. Root SSH by key is still open. To close it once step 1 works, on the server as ops (or your ADMIN_USER):
+       sudo bash ${REMOTE_DIR}/server/lock-root.sh
   3. Daily use on the server:  ${DAILY}
   4. Later updates: rerun this script (it replaces the copy in ${REMOTE_DIR} and reruns the steps).
 NEXT
