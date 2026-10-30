@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FILES = ["gitlab-runner/cloud-init-rocky.yaml", "cloud-init/rocky.yaml", "cloud-init/rocky-x86.yaml", "cloud-init/debian.yaml",
                  "cloud-init/debian-x86.yaml", "cloud-init/server-fedora.yaml", "cloud-init/server-el10.yaml"]
 SHELL_HISTORY = ROOT / "scripts" / "shell-history.sh"
+SERVER_CLEANUP = ROOT / "server" / "server-cleanup.sh"
 SERVER_SCRIPTS = ["server/server-init-el10.sh", "server/server-init-fedora.sh"]
 LIMIT = 32 * 1024
 LOCKOUT = ("permitrootlogin no", "allowusers", "allowgroups", "port ", "listenaddress")
@@ -164,12 +165,26 @@ def test_shell_history_copies() -> None:
     check(r.returncode == 0, "scripts/shell-history.sh passes bash -n", r.stderr.strip())
 
 
+def test_server_cleanup_copies() -> None:
+    """server/*.sh embed server/server-cleanup.sh (they must stay self-contained): the copies must match."""
+    print("== server-cleanup copies")
+    want = SERVER_CLEANUP.read_text()
+    for rel in SERVER_SCRIPTS:
+        text = (ROOT / rel).read_text()
+        m = re.search(r"put /usr/local/sbin/server-cleanup 0755 <<'EOF'\n(.*?)\nEOF\n", text, re.S)
+        check(bool(m) and m.group(1) + "\n" == want, f"{rel} embeds server/server-cleanup.sh unchanged")
+    for name in ("server-cleanup",):
+        r = run(["bash", "-n", str(ROOT / "server" / f"{name}.sh")])
+        check(r.returncode == 0, f"server/{name}.sh passes bash -n", r.stderr.strip())
+
+
 def main() -> int:
     files = sys.argv[1:] or DEFAULT_FILES
     for rel in files:
         test_file(rel)
     if not sys.argv[1:]:
         test_shell_history_copies()
+        test_server_cleanup_copies()
     print()
     if failures:
         print(f"FAILED: {len(failures)} check(s)")
