@@ -3209,7 +3209,7 @@ INSTALL
 <a id="firewall"></a>
 ## Host firewall and fail2ban
 
-firewalld on Rocky, ufw on Debian, with SSH (22 and the port sshd listens on) allowed and everything else closed, plus the fail2ban sshd jail (5 tries in 10 minutes, 1 hour ban). The firewall starts only after SSH is in the saved rules and stops again if SSH is not allowed. Open the same ports in the Hetzner Cloud Firewall. If Docker was already running on Rocky, restart it afterwards while no job runs.
+firewalld on Rocky, ufw on Debian, with SSH (22 and the port sshd listens on) allowed and everything else closed, plus the fail2ban sshd jail (5 tries in 10 minutes, 1 hour ban). The firewall starts only after SSH is in the saved rules and stops again if SSH is not allowed. Open the same ports in the Hetzner Cloud Firewall. If Docker was already running on Rocky, docker0 is moved into the firewalld docker zone, so Docker needs no restart.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -3566,7 +3566,7 @@ INSTALL
 <a id="security"></a>
 ## Security tools: audit, network, scan
 
-Optional. Tools to test and audit your own server; use them only on systems you own or are authorized to test. Default: lynis, OpenSCAP, auditd (small ruleset), ssh-audit, testssl.sh, nmap and other network tools, and trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle as release binaries at pinned versions, checked against the checksums file of the same release. Options for the installer (`bash /root/server-init-config/common/security-tools.sh --help`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, `--grype`, `--syft`, `--k8s`, `--kali`, `--audit-timer`.
+Optional. Tools to test and audit your own server; use them only on systems you own or are authorized to test. Default: lynis, OpenSCAP, auditd (small ruleset), ssh-audit, testssl.sh, nmap and other network tools, and trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle as release binaries at pinned versions, checked against the checksums file of the same release. Options for the installer (`sudo bash /root/server-init-config/common/security-tools.sh --help`; `/root` is not readable by `ops`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, `--grype`, `--syft`, `--k8s`, `--kali`, `--audit-timer`.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -5650,7 +5650,7 @@ INSTALL
 <a id="monitoring"></a>
 ## Monitoring: Prometheus, node_exporter, Grafana
 
-All on `127.0.0.1`. Grafana password: `grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env`.
+All on `127.0.0.1`. Grafana password: `sudo grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env`.
 
 ````bash
 sudo bash <<'INSTALL'
@@ -5908,7 +5908,7 @@ ss -ltn | awk 'NR==1 || /:(9090|9100|3000|9252) /'
 
 exposed=$(ss -ltn | awk '/:(9090|9100|3000) / && $4 !~ /^127\.0\.0\.1:/' | wc -l)
 [[ "$exposed" == "0" ]] || die "a monitoring port is not bound to 127.0.0.1"
-log "OK: monitoring up. Grafana password: grep GF_SECURITY_ADMIN_PASSWORD $DIR/.env"
+log "OK: monitoring up. Grafana password: sudo grep GF_SECURITY_ADMIN_PASSWORD $DIR/.env"
 __SIC_EOF__
 chmod 755 "$R/runner/install/monitoring.sh"
 
@@ -9578,7 +9578,7 @@ ss -ltn | awk 'NR==1 || /:(9090|9100|3000|9252) /'
 
 exposed=$(ss -ltn | awk '/:(9090|9100|3000) / && $4 !~ /^127\.0\.0\.1:/' | wc -l)
 [[ "$exposed" == "0" ]] || die "a monitoring port is not bound to 127.0.0.1"
-log "OK: monitoring up. Grafana password: grep GF_SECURITY_ADMIN_PASSWORD $DIR/.env"
+log "OK: monitoring up. Grafana password: sudo grep GF_SECURITY_ADMIN_PASSWORD $DIR/.env"
 __SIC_EOF__
 chmod 755 "$R/runner/install/monitoring.sh"
 
@@ -14323,7 +14323,7 @@ ss -ltn | awk 'NR==1 || /:(9090|9100|3000|9252) /'
 
 exposed=$(ss -ltn | awk '/:(9090|9100|3000) / && $4 !~ /^127\.0\.0\.1:/' | wc -l)
 [[ "$exposed" == "0" ]] || die "a monitoring port is not bound to 127.0.0.1"
-log "OK: monitoring up. Grafana password: grep GF_SECURITY_ADMIN_PASSWORD $DIR/.env"
+log "OK: monitoring up. Grafana password: sudo grep GF_SECURITY_ADMIN_PASSWORD $DIR/.env"
 __SIC_EOF__
 chmod 755 "$R/runner/install/monitoring.sh"
 

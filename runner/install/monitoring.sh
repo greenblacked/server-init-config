@@ -61,4 +61,4 @@ ss -ltn | awk 'NR==1 || /:(9090|9100|3000|9252) /'
 
 exposed=$(ss -ltn | awk '/:(9090|9100|3000) / && $4 !~ /^127\.0\.0\.1:/' | wc -l)
 [[ "$exposed" == "0" ]] || die "a monitoring port is not bound to 127.0.0.1"
-log "OK: monitoring up. Grafana password: grep GF_SECURITY_ADMIN_PASSWORD $DIR/.env"
+log "OK: monitoring up. Grafana password: sudo grep GF_SECURITY_ADMIN_PASSWORD $DIR/.env"
