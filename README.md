@@ -35,7 +35,7 @@ What a server built from this repo has:
 | `monitoring/`, `logging/`, `registry-cache/`, `npm-cache/` | Docker Compose stacks and their configs |
 | `ai/` | Ollama + Open WebUI for a separate small server, installed by `install/ai.sh` (see [Local AI](#local-ai-separate-server)) |
 | `server/` | **general servers (not runners)**: base setup scripts for Fedora 44 and CentOS Stream / Rocky / AlmaLinux 10 (see its README) |
-| `other/` | standalone extras; `other/torrserver/` installs TorrServer in Docker with login, localhost port, no seeding and 3-day cleanup (see its README) |
+| `other/` | standalone extras; `other/torrserver/` installs TorrServer in Docker for streaming only: HTTPS with login on a random port (sslip.io, no domain needed), or localhost, or optional WireGuard (see its README) |
 | `ci/` | `.gitlab-ci.yml` snippets: smoke test, defaults, arm64 check, multi-arch mirroring |
 
 ## Build a new server

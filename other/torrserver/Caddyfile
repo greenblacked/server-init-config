@@ -1,6 +1,8 @@
-# TLS front for TorrServer, used only with install.sh --public. DOMAIN and ACME_EMAIL come from .env.
+# TLS front for TorrServer in public mode (install.sh default). Values come from .env:
+#   TS_HOSTNAME     <ip-with-dashes>.sslip.io, or your DOMAIN
+#   TS_PUBLIC_PORT  the random high port clients use, for example 43817
+# tls.caddy (written by install.sh) holds the certificate issuer; caddy-auth.caddy the bcrypt login.
 {
-	email {$ACME_EMAIL}
 	admin off
 	servers {
 		protocols h1 h2
@@ -13,7 +15,11 @@
 	}
 }
 
-{$DOMAIN} {
+# HTTPS on the random port. Plain HTTP on port 80 is only the automatic redirect and the ACME challenge:
+# the login is never accepted or served there.
+{$TS_HOSTNAME}:{$TS_PUBLIC_PORT} {
+	import /etc/caddy/tls.caddy
+
 	encode zstd gzip
 
 	header {
@@ -21,6 +27,7 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		-Server
 	}
 
@@ -36,8 +43,13 @@
 		import torrserver_proxy
 	}
 
+	# JSON access log for fail2ban (jail torrserver-caddy bans repeated 401s). Authorization and Cookie
+	# headers are redacted by Caddy. Rotated by Caddy itself.
 	log {
-		output stdout
-		format console
+		output file /var/log/caddy/access.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+		format json
 	}
 }
