@@ -16,8 +16,8 @@ CONF_FILE=/etc/server-init.conf
 # shellcheck source=/dev/null
 . /etc/os-release
 case "${ID:-}:${VERSION_ID%%.*}" in
-  centos:10) DOCKER_REPO=https://download.docker.com/linux/centos/docker-ce.repo ;;
-  rocky:10 | almalinux:10) DOCKER_REPO=https://download.docker.com/linux/rhel/docker-ce.repo ;;
+  centos:10) DOCKER_DIST=centos ;;
+  rocky:10 | almalinux:10) DOCKER_DIST=rhel ;;
   # return when sourced into an interactive shell by mistake, so the shell is not closed
   *) echo "this script is for CentOS Stream 10 / Rocky Linux 10 / AlmaLinux 10, found ${PRETTY_NAME:-unknown}" >&2; return 1 2>/dev/null || exit 1 ;;
 esac
@@ -334,12 +334,43 @@ CONF
   systemctl enable --now dnf-automatic.timer
 }
 
+# pin_repo_key URL FINGERPRINT DEST: download an armored key, install only the key with that primary
+# fingerprint (anything else in the file is dropped). Needs gpg.
+pin_repo_key() {
+  local url="$1" want="$2" dest="$3" tmp home ok=1
+  command -v gpg >/dev/null || dnf -y -q install gnupg2 >/dev/null || return 1
+  tmp=$(mktemp) && home=$(mktemp -d) || return 1
+  if curl -fsSL "$url" -o "$tmp" \
+     && GNUPGHOME="$home" gpg --batch --quiet --import "$tmp" 2>/dev/null \
+     && GNUPGHOME="$home" gpg --batch --with-colons --list-keys 2>/dev/null \
+        | awk -F: '$1 == "pub" { g = 1; next } $1 == "fpr" && g { print $10; g = 0 }' | grep -qx "$want" \
+     && GNUPGHOME="$home" gpg --batch --export --armor "$want" > "$tmp.out" 2>/dev/null && [[ -s "$tmp.out" ]]; then
+    install -D -m 0644 "$tmp.out" "$dest" && ok=0
+  else
+    fail "key from ${url} does not have the expected fingerprint ${want}; not installed"
+  fi
+  rm -rf "$tmp" "$tmp.out" "$home"
+  return "$ok"
+}
+
+# The repo file is written here and trusts only the pinned Docker rpm key (no vendor .repo file, no key fetched by dnf).
+docker_repo() {
+  pin_repo_key "https://download.docker.com/linux/${DOCKER_DIST}/gpg" 060A61C51B558A7F742B77AAC52FEB6B621E9F35 /etc/pki/rpm-gpg/docker-ce.asc || return 1
+  cat > /etc/yum.repos.d/docker-ce.repo <<REPO
+[docker-ce-stable]
+name=Docker CE Stable
+baseurl=https://download.docker.com/linux/${DOCKER_DIST}/\$releasever/\$basearch/stable
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/docker-ce.asc
+REPO
+}
+
 docker_engine() {
   (( INSTALL_DOCKER == 1 )) || { log "Docker disabled in /etc/server-init.conf"; return 0; }
   if ! command -v docker >/dev/null; then
-    rpm -q dnf-plugins-core >/dev/null 2>&1 || dnf -y -q install dnf-plugins-core || true
     if ! dnf repolist --enabled 2>/dev/null | grep -q '^docker-ce-stable'; then
-      dnf config-manager --add-repo "$DOCKER_REPO" || return 1
+      docker_repo || return 1
     fi
     dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
   fi

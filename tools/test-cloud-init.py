@@ -119,7 +119,7 @@ def live_ssh_test(dropin: str, tag: str) -> None:
 def check_pinned_keys(label: str, text: str) -> None:
     """Every pin-repo-key call must pair a known URL with the fingerprint that URL serves."""
     for url, fp in re.findall(PIN_CALL, text):
-        key = url.removeprefix("https://")
+        key = url.removeprefix("https://").replace("${DOCKER_DIST}", "rhel")   # centos serves the same rpm key
         want = PINNED_KEYS.get(key)
         check(want is not None and want == fp.upper(), f"{label}: key {key} pinned to its own fingerprint",
               f"got {fp}, expected {want}")
