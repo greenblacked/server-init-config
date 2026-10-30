@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo.
+# Admin tools for the runner host: htop, btop, ncdu, iotop, mtr, network and disk tools, editors, restic, skopeo, mc, fd, rg, fzf.
 # Each package is installed on its own, so one that is missing on this release doesn't stop the rest.
-# Also installs the shell aliases and, if there is none yet, the tmux config from the init. Safe to rerun.
+# Also installs the shell aliases, shell history and fzf key bindings (Ctrl+R, Ctrl+T) and, if there is none yet, the tmux config from the init. Safe to rerun.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, ...), aliases and tmux config"
+  echo "Usage: $0  installs admin tools (htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, mc, fd, rg, fzf, ...), aliases, shell history and tmux config"
   exit 0
 fi
 require_root
@@ -15,12 +15,12 @@ require_root
 if command -v dnf >/dev/null 2>&1; then
   dnf -y -q install epel-release >/dev/null 2>&1 || log "WARN: epel-release not available, EPEL tools will be missing"
   PKGS=(htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo restic dnf-utils
-        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl)
+        bind-utils lsof sysstat tcpdump traceroute nmap-ncat jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { dnf -y -q install "$1" >/dev/null 2>&1; }
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update -q >/dev/null
   PKGS=(htop btop ncdu iotop mtr-tiny nano vim rsync wget unzip tar bash-completion skopeo restic
-        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl)
+        dnsutils lsof sysstat tcpdump traceroute netcat-openbsd jq git tmux curl mc fd-find ripgrep fzf)
   pkg_one() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$1" >/dev/null 2>&1; }
 else
   die "no supported package manager"
@@ -55,6 +55,14 @@ EOF
 chmod 644 /etc/profile.d/ci-runner.sh
 restorecon_if /etc/profile.d/ci-runner.sh
 
+# Shell history, Ctrl+R / Ctrl+T with fzf: one source file, also embedded in server/server-init-*.sh
+install -m 0644 "$REPO_ROOT/scripts/shell-history.sh" /etc/profile.d/90-shell-history.sh
+restorecon_if /etc/profile.d/90-shell-history.sh
+# Debian and Ubuntu name the fd binary fdfind
+if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+  ln -s "$(command -v fdfind)" /usr/local/bin/fd
+fi
+
 # root and every admin in the ssh-users group (install/users.sh) get the tmux config if they have none
 homes=(/root)
 while IFS= read -r u; do
@@ -80,7 +88,7 @@ log "installed or already present (${#installed[@]}): ${installed[*]}"
 if (( ${#missing[@]} )); then
   log "WARN: not available on this release (${#missing[@]}): ${missing[*]}"
 fi
-for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar; do
+for c in htop btop ncdu iotop mtr dig tcpdump restic skopeo sar mc fd rg fzf; do
   if command -v "$c" >/dev/null 2>&1; then printf '  %-8s ok\n' "$c"; else printf '  %-8s missing\n' "$c"; fi
 done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"

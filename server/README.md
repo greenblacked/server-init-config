@@ -2,9 +2,13 @@
 
 Base setup for a fresh Hetzner server: SSH keys only, admin user `ops` with sudo, firewalld with only SSH open,
 fail2ban for SSH, daily automatic security updates (no auto-reboot), Docker Engine + Compose, swap when there is
-none, sysctl tuning, journald limit, chrony and admin tools. Root keeps key login on port 22, so the setup cannot
+none, sysctl tuning, journald limit, chrony and admin tools (including `mc`, `fd`, `rg`, `fzf`). Root keeps key login on port 22, so the setup cannot
 lock you out. Every step is checked before it changes anything, so reruns are safe; a failed step is logged to
 `/var/log/server-init-failed.log` and the next step still runs.
+
+Shell: 100000-line history with timestamps, shared between sessions; `Ctrl+R` searches it with fzf and `Ctrl+T` finds files
+(`/etc/profile.d/90-server-shell.sh`, interactive bash only; log in again to get it). The text is the same as
+`scripts/shell-history.sh`; `tools/test-cloud-init.py` checks that they match.
 
 | Script | OS |
 |---|---|

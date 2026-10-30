@@ -28,6 +28,7 @@ write_files:
 runcmd:
   - [sh, -c, "if sshd -t; then systemctl reload ssh; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi"]
   - [systemctl, enable, --now, unattended-upgrades]
+  - [sh, -c, "for p in mc fd-find ripgrep fzf; do apt-get install -y -q $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done; if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then ln -s $(command -v fdfind) /usr/local/bin/fd; fi"]
   - [systemctl, restart, systemd-journald]
   - [timedatectl, set-timezone, Europe/Kyiv]
   - install -m 0755 -d /etc/apt/keyrings
