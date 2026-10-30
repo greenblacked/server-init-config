@@ -1,0 +1,14 @@
+[Unit]
+Description=Block CI jobs from the cloud metadata service and host services
+After=docker.service network-online.target
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ci-job-isolation.sh
+ExecReload=/usr/local/bin/ci-job-isolation.sh
+
+[Install]
+WantedBy=multi-user.target
