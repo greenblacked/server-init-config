@@ -298,6 +298,28 @@ if command -v systemd-analyze >/dev/null 2>&1; then
   done
 else echo "  SKIP  systemd-analyze not available"; fi
 
+# ---------------------------------------------------------------- firewall and a non-default SSH port
+section "debian firewall with sshd on another port"
+{
+  echo 'APP=none; EXTRA_PORTS=""; APP_NAME=""; APP_OWN_FW=0; CONF_FILE=x; log() { :; }; fail() { echo "FAIL $*"; }; detect_app() { :; }; pkg_installed() { return 1; }'
+  grep -E '^ufw_(is_active|ssh_saved|ssh_live|open)\(\) \{' "$S/server-init-debian.sh"
+  awk '/^unknown_hetzner_app\(\)/,/^}/' "$S/server-init-debian.sh"
+  awk '/^firewall\(\)/,/^}/' "$S/server-init-debian.sh"
+} > "$T/fw-funcs.sh"
+: > "$T/ufw.rules"; rm -f "$T/ufw.active"
+stub ufw 'R="'"$T"'/ufw.rules"; A="'"$T"'/ufw.active"
+case "$1 ${2:-}" in
+  "show added") echo "Added user rules:"; while read -r l; do echo "ufw allow $l"; done < "$R" ;;
+  "status ") if [ -f "$A" ]; then echo "Status: active"; while read -r l; do echo "$l ALLOW Anywhere"; done < "$R"; else echo "Status: inactive"; fi ;;
+  "--force enable") touch "$A" ;;
+  allow*) echo "$2" >> "$R" ;;
+esac'
+stub systemctl 'exit 0'
+stub sshd 'echo "port 22"; echo "port 2222"'
+out=$(bash -c 'source "$1"; firewall' _ "$T/fw-funcs.sh" 2>&1); rc=$?
+check "ufw is enabled with both 22 and the sshd port allowed" '[[ $rc -eq 0 ]] && grep -qx "22/tcp" "$T/ufw.rules" && grep -qx "2222/tcp" "$T/ufw.rules" && [[ -f "$T/ufw.active" ]]'
+rm -f "$T/bin/ufw" "$T/bin/sshd"
+
 # ---------------------------------------------------------------- destructive (container) tests
 if [[ $DESTRUCTIVE != 1 ]]; then
   echo
