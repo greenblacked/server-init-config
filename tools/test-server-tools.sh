@@ -340,6 +340,7 @@ stub fail2ban-client 'echo "Status"'
 out=$(FIREWALL_BACKEND=ufw JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin" bash "$ROOT/runner/install/host-firewall.sh" 2>&1); rc=$?
 check "ufw enabled, 22 and the sshd port allowed" '[[ $rc -eq 0 ]] && grep -qx "22/tcp" "$T/ufw.rules" && grep -qx "2222/tcp" "$T/ufw.rules" && [[ -f "$T/ufw.active" ]]'
 check "fail2ban sshd jail written for nftables" 'grep -q "^banaction = nftables" "$T/jail.local" && grep -q "^\[sshd\]" "$T/jail.local"'
+check "fail2ban sshd jail watches every sshd port" 'grep -qx "port     = 22,2222" "$T/jail.local"'
 rm -f "$T/bin/ufw" "$T/bin/sshd" "$T/bin/apt-get" "$T/bin/fail2ban-client"; reset_calls
 
 section "runner host firewall (firewalld branch, Docker already running)"
@@ -360,6 +361,7 @@ stub docker 'exit 0'
 stub ip 'exit 0'
 out=$(FIREWALL_BACKEND=firewalld JAIL_FILE="$T/jail.local" PATH="$T/bin:/usr/bin:/bin" bash "$ROOT/runner/install/host-firewall.sh" 2>&1); rc=$?
 check "docker0 is moved into the docker zone, no Docker restart" '[[ $rc -eq 0 ]] && grep -qx docker "$T/d0zone" && grep -q "^--permanent --zone=docker --add-interface=docker0" <<<"$(calls firewall-cmd)" && ! grep -q "restart docker" <<<"$(calls systemctl)"'
+check "the default zone is forced to public before the lockout guard" 'grep -q "^--set-default-zone=public" <<<"$(calls firewall-cmd)"'
 rm -f "$T/bin/firewall-cmd" "$T/bin/systemctl" "$T/bin/sshd" "$T/bin/dnf" "$T/bin/docker" "$T/bin/ip" "$T/d0zone" "$T/zonedocker"; reset_calls
 
 section "ci-job-isolation rules (own network namespace)"
@@ -374,6 +376,32 @@ if command -v iptables >/dev/null 2>&1 && unshare -n true 2>/dev/null; then
 else
   echo "  SKIP  no iptables or network namespaces here"
 fi
+
+section "runner job limits (ci-jobs.slice)"
+mkdir -p "$T/jl"
+printf '[[runners]]\n  [runners.docker]\n    image = "x"\n' > "$T/jl/config.toml"
+stub systemctl 'exit 0'
+out=$(RUNNER_CONFIG="$T/jl/config.toml" JOBS_SLICE_FILE="$T/jl/ci-jobs.slice" JOBS_MEMORY_MAX=3g bash "$ROOT/runner/install/job-limits.sh" 2>&1); rc=$?
+check "lower-case JOBS_MEMORY_MAX is written with an upper-case suffix (systemd ignores 3g)" '[[ $rc -eq 0 ]] && grep -qx "MemoryMax=3G" "$T/jl/ci-jobs.slice" && ! grep -q "[kmg]$" "$T/jl/ci-jobs.slice"'
+rm -f "$T/jl/ci-jobs.slice"
+out=$(RUNNER_CONFIG="$T/jl/config.toml" JOBS_SLICE_FILE="$T/jl/ci-jobs.slice" bash "$ROOT/runner/install/job-limits.sh" 2>&1); rc=$?
+check "default memory ceiling is 3G" '[[ $rc -eq 0 ]] && grep -qx "MemoryMax=3G" "$T/jl/ci-jobs.slice"'
+rm -f "$T/bin/systemctl"; reset_calls
+
+section "torrserver: root does not follow symlinks made by the container user"
+TSD="$T/ts"; mkdir -p "$TSD/data/config" "$TSD/data/downloads" "$TSD/data/torrents" "$T/ts-target"
+fn=$(awk '/^check_data_tree\(\) \{/ { p = 1 } p { print } p && /^\}/ { exit }' "$ROOT/other/torrserver/install.sh")
+tsrun() { bash -c 'die() { echo "ERROR: $*" >&2; exit 1; }; TS_DIR="$1"; DATA="$1/data"; '"$fn"'; check_data_tree' _ "$TSD" 2>&1; }
+out=$(tsrun); rc=$?
+check "plain data tree: accepted" '[[ $rc -eq 0 ]]'
+rm -rf "$TSD/data/config"; ln -s "$T/ts-target" "$TSD/data/config"
+out=$(tsrun); rc=$?
+check "data/config replaced by a symlink: refused, target untouched" '[[ $rc -ne 0 ]] && grep -q "is a symlink" <<<"$out" && [[ -z "$(ls -A "$T/ts-target")" ]]'
+rm -f "$TSD/data/config"; mkdir "$TSD/data/config"; mv "$TSD/data" "$T/ts-real"; ln -s "$T/ts-real" "$TSD/data"
+out=$(tsrun); rc=$?
+check "data itself a symlink: refused" '[[ $rc -ne 0 ]] && grep -q "is a symlink" <<<"$out"'
+rm -rf "$TSD" "$T/ts-real" "$T/ts-target"
+check "caddy ports are published on IPv4 only" 'grep -qF "\"0.0.0.0:\${TS_HTTP_PORT:-80}:80\"" "$ROOT/other/torrserver/docker-compose.yml" && grep -qF "\"0.0.0.0:\${TS_PUBLIC_PORT:-8443}:" "$ROOT/other/torrserver/docker-compose.yml"'
 
 section "runner-engine-update"
 stub logger 'exit 0'
@@ -392,6 +420,7 @@ stub rpm 'echo "pkg-1-1"'
 stub systemctl 'case "$1" in
   stop) touch "'"$T"'/runner-stopped" ;;
   start) rm -f "'"$T"'/runner-stopped" ;;
+  show) if [[ -e "'"$T"'/runner-stopped" || -e "'"$T"'/runner-masked" ]]; then echo inactive; else echo active; fi ;;
   is-active) [[ "$3" == gitlab-runner && -e "'"$T"'/runner-stopped" ]] && exit 3 ;;
   cat) exit 1 ;;
 esac
@@ -400,13 +429,37 @@ rm -f "$T/runner-stopped" "$T/docker-calls"
 stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 1 ]] && echo jobabc; exit 0'
 reset_calls
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
-check "a job picked up before the runner stopped: runner started again, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP a CI job appeared" <<<"$out" && grep -q "^start gitlab-runner" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)" && [[ ! -e "$T/runner-stopped" ]]'
-check "runner is stopped gracefully (SIGQUIT drop-in)" 'grep -q "^KillSignal=SIGQUIT" "$ENGINE_UPDATE_DROPIN" && grep -q "^stop --no-block gitlab-runner" <<<"$(calls systemctl)"'
+check "a job picked up before the runner stopped: runner started again, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP a CI job appeared" <<<"$out" && grep -q "^start --no-block gitlab-runner" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)" && [[ ! -e "$T/runner-stopped" ]]'
+check "runner is stopped gracefully (SIGQUIT drop-in, systemd never SIGKILLs it)" 'grep -q "^KillSignal=SIGQUIT" "$ENGINE_UPDATE_DROPIN" && grep -q "^TimeoutStopSec=infinity" "$ENGINE_UPDATE_DROPIN" && grep -q "^stop --no-block gitlab-runner" <<<"$(calls systemctl)"'
 rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
 stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; exit 0'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 seq=$(calls systemctl | grep -E '^(stop|mask|restart docker|start)' | tr '\n' ';')
-check "idle: stop, mask, upgrade, restart docker, start runner, OK" '[[ $rc -eq 0 ]] && grep -q "OK upgraded" <<<"$out" && grep -q "upgrade" <<<"$(calls dnf)" && [[ "$seq" == "stop --no-block gitlab-runner;mask --runtime gitlab-runner;restart docker;start gitlab-runner;" ]]' || echo "    seq: $seq"
+check "idle: stop, upgrade, restart docker, start runner, OK" '[[ $rc -eq 0 ]] && grep -q "OK upgraded" <<<"$out" && grep -q "upgrade" <<<"$(calls dnf)" && [[ "$seq" == "stop --no-block gitlab-runner;restart docker;start gitlab-runner;" ]]' || echo "    seq: $seq"
+# a job runs longer than STOP_WAIT: nothing is killed, the runner is queued to start again, Docker is untouched
+rm -f "$T/runner-stopped"; reset_calls
+stub systemctl 'case "$1" in
+  show) echo deactivating ;;
+  cat) exit 1 ;;
+esac
+exit 0'
+out=$(STOP_WAIT=10 bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+check "stop times out: SKIP, runner start queued, no SIGKILL timeout, docker not restarted, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP gitlab-runner did not stop" <<<"$out" && grep -q "^start --no-block gitlab-runner" <<<"$(calls systemctl)" && ! grep -q "^restart docker" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)" && grep -q "^TimeoutStopSec=infinity" "$ENGINE_UPDATE_DROPIN"'
+# a package scriptlet starts the runner and it takes a job: Docker is not restarted under it
+rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
+stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 2 ]] && echo jobabc; exit 0'
+stub dnf 'if [[ "$1 $2" == "-q check-update" ]]; then exit 100; fi; [[ "$1" == "-y" ]] && touch "'"$T"'/scriptlet-started"; exit 0'
+stub systemctl 'case "$1" in
+  stop) touch "'"$T"'/runner-stopped" ;;
+  start) rm -f "'"$T"'/runner-stopped" ;;
+  show) if [[ -e "'"$T"'/runner-stopped" && ! -e "'"$T"'/scriptlet-started" ]]; then echo inactive; elif [[ -e "'"$T"'/scriptlet-started" && "$(cat "'"$T"'/scriptlet-n" 2>/dev/null || echo 0)" -ge 1 ]]; then echo inactive; else [[ -e "'"$T"'/scriptlet-started" ]] && echo 1 > "'"$T"'/scriptlet-n"; echo active; fi ;;
+  cat) exit 1 ;;
+esac
+exit 0'
+rm -f "$T/scriptlet-started" "$T/scriptlet-n"
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+check "runner back up after the upgrade with a job: docker is not restarted" '[[ $rc -eq 0 ]] && grep -q "SKIP packages upgraded, but a CI job runs" <<<"$out" && ! grep -q "^restart docker" <<<"$(calls systemctl)"'
+rm -f "$T/scriptlet-started" "$T/scriptlet-n"
 rm -f "$T/bin/docker" "$T/bin/logger" "$T/bin/sleep" "$T/bin/dnf" "$T/bin/rpm" "$T/bin/systemctl" "$T/runner-stopped" "$T/docker-calls"; unset ENGINE_UPDATE_LOG ENGINE_UPDATE_DROPIN; reset_calls
 
 section "server lock-root"

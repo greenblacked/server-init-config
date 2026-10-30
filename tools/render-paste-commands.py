@@ -84,7 +84,7 @@ BLOCKS = [
           "until the [Lock root SSH](#lock-root) block. Run it first; safe to rerun.",
           ["runner/install/users.sh"], run=["runner/install/users.sh"]),
     Block("packages", "Admin tools: htop, btop, ncdu, iotop and others",
-          "htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, "
+          "htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, dig, lsof, "
           "sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, mc, fd, rg, fzf, plus the shell aliases, shell history with fzf Ctrl+R and tmux config. "
           "For a server created with an older init; safe to rerun.",
           ["common/admin-tools.sh", "common/shell-history.sh"], run=["common/admin-tools.sh"]),

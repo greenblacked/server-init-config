@@ -8,7 +8,7 @@
 #
 # GitLab Runner has no per-container process limit, so processes are limited per host through the slice: the jobs
 # together can start at most JOBS_TASKS_MAX processes and threads (default 4096), and a fork bomb ends there instead of
-# exhausting the host. JOBS_MEMORY_MAX (default 3g) is a ceiling for all job containers together; "" or "infinity" turns it off.
+# exhausting the host. JOBS_MEMORY_MAX (default 3G) is a ceiling for all job containers together; "" or "infinity" turns it off.
 #
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
@@ -19,7 +19,7 @@
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
 #      JOB_SHM_SIZE in bytes (default 268435456), JOB_SERVICE_MEMORY (default 384m), JOB_SERVICE_MEMORY_SWAP
 #      (default = JOB_SERVICE_MEMORY), JOB_SERVICE_CPUS (default 0.5), JOBS_TASKS_MAX (default 4096),
-#      JOBS_MEMORY_MAX (default 3g)
+#      JOBS_MEMORY_MAX (default 3G)
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -49,8 +49,11 @@ scpus_default="${JOB_SERVICE_CPUS:-0.5}"
 [[ "$scpus_default" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid JOB_SERVICE_CPUS: ${scpus_default}"
 tasks_max="${JOBS_TASKS_MAX:-4096}"
 [[ "$tasks_max" =~ ^[0-9]+$ ]] || die "invalid JOBS_TASKS_MAX: ${tasks_max}"
-mem_max="${JOBS_MEMORY_MAX-3g}"
-[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3g)"
+mem_max="${JOBS_MEMORY_MAX-3G}"
+[[ -z "$mem_max" || "$mem_max" == "infinity" || "$mem_max" =~ ^[0-9]+[KMGkmg]?$ ]] || die "invalid JOBS_MEMORY_MAX: ${mem_max} (for example 3G)"
+# systemd only accepts upper-case K/M/G suffixes; a lower-case value would be ignored with a warning.
+mem_max="${mem_max^^}"
+[[ "$mem_max" == "INFINITY" ]] && mem_max="infinity"
 
 # The slice is the parent cgroup of every job and service container (Docker uses the systemd cgroup driver on these hosts).
 slice="${JOBS_SLICE_FILE:-/etc/systemd/system/ci-jobs.slice}"

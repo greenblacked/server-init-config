@@ -165,9 +165,12 @@ write_files:
       Storage=none
       ProcessSizeMax=0
       EOF
-        put /etc/fail2ban/jail.d/50-sshd.local 0644 <<'EOF'
+        # The jail must watch the port sshd really listens on (bootstrap --port), not only the default 22.
+        sshd_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -un | paste -sd, -) || true
+        put /etc/fail2ban/jail.d/50-sshd.local 0644 <<EOF
       [sshd]
       enabled  = true
+      port     = ${sshd_ports:-ssh}
       backend  = systemd
       maxretry = 5
       findtime = 10m

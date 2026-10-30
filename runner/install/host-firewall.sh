@@ -2,7 +2,8 @@
 # Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
 # Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
 #
-# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T). Services of the host
+# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T); runner/install/grafana-domain.sh
+# adds 80/443 when it publishes Grafana, and a rerun of this script keeps them. Services of the host
 # (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
 # server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
@@ -29,13 +30,14 @@ ssh_ports() {
 }
 
 put_jail() {
-  local banaction="$1" tmp
+  local banaction="$1" tmp ports
+  ports=$(ssh_ports | paste -sd, -)   # the jail must watch every port sshd listens on, not only 22
   tmp=$(mktemp)
   {
     if [[ -n "$banaction" ]]; then
       printf '[DEFAULT]\nbanaction = %s\nbanaction_allports = %s[type=allports]\n\n' "$banaction" "$banaction"
     fi
-    printf '[sshd]\nenabled  = true\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n'
+    printf '[sshd]\nenabled  = true\nport     = %s\nbackend  = systemd\nmaxretry = 5\nfindtime = 10m\nbantime  = 1h\n' "$ports"
   } > "$tmp"
   install -D -m 0644 "$tmp" "$JAIL_FILE"
   rm -f "$tmp"
@@ -43,9 +45,15 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p
+  local running=0 p zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
+  # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
+  if (( running )); then zone=$(firewall-cmd --get-default-zone) || die "cannot read the default zone"; else zone=$(firewall-offline-cmd --get-default-zone) || die "cannot read the default zone"; fi
+  if [[ "$zone" != public ]]; then
+    log "firewalld: default zone was ${zone}, set to public"
+    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
+  fi
   # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
   fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
   fw --zone=public --query-service=ssh >/dev/null 2>&1 || fw --zone=public --add-service=ssh >/dev/null || die "cannot add ssh to the public zone"
