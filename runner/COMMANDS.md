@@ -719,6 +719,22 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
   firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
   log "firewalld: port ${SSH_PORT}/tcp allowed"
 fi
+# Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
+# firewall drops (and --lock-root, which closes port 22, would then lock you out).
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
+  log "ufw: port ${SSH_PORT}/tcp allowed"
+fi
+# Never write a config that leaves SSH only on a port the running host firewall drops.
+if [[ "$SSH_PORT" != 22 ]]; then
+  if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then
+    die "firewalld does not allow ${SSH_PORT}/tcp in the running rules; sshd config left unchanged"
+  fi
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active' \
+     && ! ufw status 2>/dev/null | grep -qE "^${SSH_PORT}/tcp([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|LIMIT)"; then
+    die "ufw does not allow ${SSH_PORT}/tcp in the running rules; sshd config left unchanged"
+  fi
+fi
 [[ -d /etc/ssh/sshd_config.d ]] || die "/etc/ssh/sshd_config.d missing (OpenSSH too old for drop-ins?)"
 grep -qiE '^\s*Include\s+/etc/ssh/sshd_config.d/' /etc/ssh/sshd_config || die "/etc/ssh/sshd_config does not include sshd_config.d"
 
@@ -8556,6 +8572,22 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
   firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
   log "firewalld: port ${SSH_PORT}/tcp allowed"
 fi
+# Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
+# firewall drops (and --lock-root, which closes port 22, would then lock you out).
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
+  log "ufw: port ${SSH_PORT}/tcp allowed"
+fi
+# Never write a config that leaves SSH only on a port the running host firewall drops.
+if [[ "$SSH_PORT" != 22 ]]; then
+  if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then
+    die "firewalld does not allow ${SSH_PORT}/tcp in the running rules; sshd config left unchanged"
+  fi
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active' \
+     && ! ufw status 2>/dev/null | grep -qE "^${SSH_PORT}/tcp([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|LIMIT)"; then
+    die "ufw does not allow ${SSH_PORT}/tcp in the running rules; sshd config left unchanged"
+  fi
+fi
 [[ -d /etc/ssh/sshd_config.d ]] || die "/etc/ssh/sshd_config.d missing (OpenSSH too old for drop-ins?)"
 grep -qiE '^\s*Include\s+/etc/ssh/sshd_config.d/' /etc/ssh/sshd_config || die "/etc/ssh/sshd_config does not include sshd_config.d"
 
@@ -10606,6 +10638,22 @@ fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then
   firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
   log "firewalld: port ${SSH_PORT}/tcp allowed"
+fi
+# Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
+# firewall drops (and --lock-root, which closes port 22, would then lock you out).
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
+  log "ufw: port ${SSH_PORT}/tcp allowed"
+fi
+# Never write a config that leaves SSH only on a port the running host firewall drops.
+if [[ "$SSH_PORT" != 22 ]]; then
+  if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then
+    die "firewalld does not allow ${SSH_PORT}/tcp in the running rules; sshd config left unchanged"
+  fi
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active' \
+     && ! ufw status 2>/dev/null | grep -qE "^${SSH_PORT}/tcp([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|LIMIT)"; then
+    die "ufw does not allow ${SSH_PORT}/tcp in the running rules; sshd config left unchanged"
+  fi
 fi
 [[ -d /etc/ssh/sshd_config.d ]] || die "/etc/ssh/sshd_config.d missing (OpenSSH too old for drop-ins?)"
 grep -qiE '^\s*Include\s+/etc/ssh/sshd_config.d/' /etc/ssh/sshd_config || die "/etc/ssh/sshd_config does not include sshd_config.d"
@@ -15319,6 +15367,22 @@ fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then
   firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
   log "firewalld: port ${SSH_PORT}/tcp allowed"
+fi
+# Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
+# firewall drops (and --lock-root, which closes port 22, would then lock you out).
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
+  log "ufw: port ${SSH_PORT}/tcp allowed"
+fi
+# Never write a config that leaves SSH only on a port the running host firewall drops.
+if [[ "$SSH_PORT" != 22 ]]; then
+  if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then
+    die "firewalld does not allow ${SSH_PORT}/tcp in the running rules; sshd config left unchanged"
+  fi
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active' \
+     && ! ufw status 2>/dev/null | grep -qE "^${SSH_PORT}/tcp([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|LIMIT)"; then
+    die "ufw does not allow ${SSH_PORT}/tcp in the running rules; sshd config left unchanged"
+  fi
 fi
 [[ -d /etc/ssh/sshd_config.d ]] || die "/etc/ssh/sshd_config.d missing (OpenSSH too old for drop-ins?)"
 grep -qiE '^\s*Include\s+/etc/ssh/sshd_config.d/' /etc/ssh/sshd_config || die "/etc/ssh/sshd_config does not include sshd_config.d"
