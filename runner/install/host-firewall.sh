@@ -105,7 +105,13 @@ ufw_setup() {
   log "ufw: $(ufw status | head -1); allowed: $(ssh_ports | tr '\n' ' ')"
 }
 
-if command -v dnf >/dev/null 2>&1; then
+# FIREWALL_BACKEND=firewalld|ufw overrides the choice by package manager (used by the tests).
+backend="${FIREWALL_BACKEND:-}"
+if [[ -z "$backend" ]]; then
+  if command -v dnf >/dev/null 2>&1; then backend=firewalld; elif command -v apt-get >/dev/null 2>&1; then backend=ufw; fi
+fi
+
+if [[ "$backend" == firewalld ]]; then
   dnf -y -q install epel-release >/dev/null 2>&1 || true
   dnf -y -q install fail2ban-server fail2ban-firewalld >/dev/null 2>&1 || log "WARN: fail2ban not available (EPEL?), sshd jail skipped"
   firewalld_setup
@@ -113,7 +119,7 @@ if command -v dnf >/dev/null 2>&1; then
     put_jail ""
     systemctl enable --now fail2ban >/dev/null && systemctl restart fail2ban
   fi
-elif command -v apt-get >/dev/null 2>&1; then
+elif [[ "$backend" == ufw ]]; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y -q fail2ban >/dev/null 2>&1 || log "WARN: fail2ban not installed, sshd jail skipped"
   ufw_setup
   if command -v fail2ban-client >/dev/null 2>&1; then
