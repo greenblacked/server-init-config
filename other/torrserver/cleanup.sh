@@ -2,7 +2,7 @@
 # TorrServer cleanup: drop torrents from the running server and delete old downloaded data.
 # Run by torrserver-cleanup.timer every 3 days; safe to run by hand (use --dry-run first).
 #
-# What it touches:   $TS_DIR/data/downloads  (piece cache of downloaded torrents) and the torrent list in the API.
+# What it touches:   $TS_DIR/data/downloads  (leftover disk cache; TorrServer streams from RAM now, so this is a safety net) and the torrent list in the API.
 # What it never does: touch $TS_DIR/data/config (accs.db, config.db, settings.json), the log, or $TS_DIR/credentials.
 # Sources (API actions "list", "drop", "rem"): https://github.com/YouROK/TorrServer/blob/MatriX.147.2/server/web/api/torrents.go
 set -Eeuo pipefail
