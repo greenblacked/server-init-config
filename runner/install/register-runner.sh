@@ -15,6 +15,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
      DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
+Per-job limits (memory 1536m, cpus 1.5, pids 2048, shm 256 MB) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
 USAGE
@@ -45,6 +46,8 @@ if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
 chmod 600 "$CFG"
+# Per-job CPU, memory and process limits (runner/install/job-limits.sh); the runner reloads config.toml by itself.
+bash "$(dirname "$0")/job-limits.sh" >/dev/null || log "WARN: job limits not set; run runner/install/job-limits.sh"
 runner_cfg_owner
 systemctl restart gitlab-runner
 sleep 3
