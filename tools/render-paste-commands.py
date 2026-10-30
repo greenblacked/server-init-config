@@ -98,13 +98,13 @@ BLOCKS = [
     Block("firewall", "Host firewall and fail2ban",
           "firewalld on Rocky, ufw on Debian, with SSH (22 and the port sshd listens on) allowed and everything else closed, plus the fail2ban sshd jail "
           "(5 tries in 10 minutes, 1 hour ban). The firewall starts only after SSH is in the saved rules and stops again if SSH is not allowed. "
-          "Open the same ports in the Hetzner Cloud Firewall. If Docker was already running on Rocky, restart it afterwards while no job runs.",
+          "Open the same ports in the Hetzner Cloud Firewall. If Docker was already running on Rocky, docker0 is moved into the firewalld docker zone, so Docker needs no restart.",
           ["runner/install/host-firewall.sh"], run=["runner/install/host-firewall.sh"]),
     Block("security", "Security tools: audit, network, scan",
           "Optional. Tools to test and audit your own server; use them only on systems you own or are authorized to test. "
           "Default: lynis, OpenSCAP, auditd (small ruleset), ssh-audit, testssl.sh, nmap and other network tools, and trivy, gitleaks, "
           "hadolint, cosign, osv-scanner, trufflehog, dockle as release binaries at pinned versions, checked against the checksums file of the same release. Options for the installer "
-          "(`bash /root/server-init-config/common/security-tools.sh --help`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, "
+          "(`sudo bash /root/server-init-config/common/security-tools.sh --help`; `/root` is not readable by `ops`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, "
           "`--grype`, `--syft`, `--k8s`, `--kali`, `--audit-timer`.",
           SECURITY, run=["common/security-tools.sh"]),
     Block("register", "Register the runner",
@@ -118,7 +118,7 @@ BLOCKS = [
           "Cache on `127.0.0.1:5000`, set as the Docker mirror. Restarts Docker: run it while no jobs are running.",
           REGISTRY, run=["runner/install/registry-cache.sh"]),
     Block("monitoring", "Monitoring: Prometheus, node_exporter, Grafana",
-          "All on `127.0.0.1`. Grafana password: `grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env`.",
+          "All on `127.0.0.1`. Grafana password: `sudo grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env`.",
           MONITORING, run=["runner/install/monitoring.sh"]),
     Block("logging", "Logging: Loki + Grafana Alloy",
           "Container logs (not CI jobs) and the journal, 7 days. Run after monitoring so Grafana gets the Loki datasource.",
