@@ -79,7 +79,7 @@ The domain needs monitoring, an A record and TCP 80 and 443 in the Cloud Firewal
 | `monitoring` | service | no | Prometheus, node_exporter, Grafana, Loki and Alloy; reads its config but cannot change it |
 | `root` | | by key until locked | the init does not change it |
 
-SSH accepts keys only, and only members of `ssh-users`. Local forwarding (`ssh -L`) works; remote, agent and X11 forwarding are off. Set `ADMIN_USER=...` for another admin name. `SSH_PORT=...` for another port is not remembered: pass it on every run of `users.sh`, otherwise a rerun goes back to 22, and open the port in the Cloud Firewall first. Why the split: anyone with the Developer role in a project can compromise a runner host, and `docker` group membership is root-equivalent, so nobody you log in as has it.
+SSH accepts keys only, and only members of `ssh-users`. Local forwarding (`ssh -L`) works; remote, agent and X11 forwarding are off. Set `ADMIN_USER=...` for another admin name. `SSH_PORT=...` for another port is remembered from `00-ci-hardening.conf`, so reruns, `--lock-root` and `--unlock-root` keep it (`SSH_PORT=22` goes back to 22); open the port in the Cloud Firewall first. Why the split: anyone with the Developer role in a project can compromise a runner host, and `docker` group membership is root-equivalent, so nobody you log in as has it.
 
 A shortcut for your laptop's `~/.ssh/config`, then `ssh runner` works:
 
