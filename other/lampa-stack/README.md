@@ -65,15 +65,25 @@ bearer tokens or OIDC for third-party apps, Authelia can also act as an OIDC pro
 |---|---|---|
 | `auth.DOMAIN` | the login page itself (public by nature; 5 failed logins ban for 10 min) | Authelia portal |
 | `ts.DOMAIN` (TorrServer UI + API), browser | Authelia session; Caddy then adds TorrServer's own credential | one login, not two |
-| `ts.DOMAIN`, request with `Authorization: Basic` (Lampa on the TV) | TorrServer's own HTTP Basic auth (`TS_HTTPAUTH`, checked on every API route). `/swagger` is blocked, `/echo` (version) is public. | the TV sends Basic from Lampa's settings and cannot follow a login redirect |
+| `ts.DOMAIN`, request with the exact TorrServer `Authorization: Basic` credential (Lampa on the TV) | Caddy compares the header with the credential from `secrets/ts_basic`; only an exact match goes to TorrServer, which checks it again (`TS_HTTPAUTH`). Any other Basic header goes to the Authelia login. `/swagger` is blocked, `/echo` (version) is public. | the TV sends Basic from Lampa's settings and cannot follow a login redirect |
+| `ts.DOMAIN` `/stream`, `/play/*`, `/subs/*`, `/playlist*` without a session, and CORS preflights (`OPTIONS`) | straight to TorrServer, which registers these routes **without** auth. It plays only torrents that are already in its database (an unknown hash answers 401); adding, preload and every API call still need the credential. | video players and `<video>` tags cannot send headers, and the browser sends the preflight without credentials. To stream a title, someone has to know its info-hash; the 3-day cleanup empties the torrent list |
 | `qbt.DOMAIN` | Authelia session, then qBittorrent's own login (generated password) | two independent logins |
-| `DOMAIN/` (Lampa app) and the Lampac client API (`/online*`, `/lite*`, `/lampainit.js`, `/on/*`, `/sisi*`, `/extensions`, `/testaccsdb`, `/proxy*` ...) | Lampac `accsdb`: a valid per-user token is required, otherwise Lampac answers with a deny. Caddy does not check the token. The page shell is static and exposes no controls. | the Lampa client must work without a browser login |
+| `DOMAIN/` (Lampa app) and the Lampac client API (`/online*`, `/lite*`, `/on/*`, `/sisi*`, `/testaccsdb` ...) | Lampac `accsdb`: a valid per-user token is required, otherwise Lampac answers with a deny. Caddy does not check the token. | the Lampa client must work without a browser login |
+| `DOMAIN` anonymous by design in Lampac: `/`, `/<name>.js` loaders, `/extensions`, `/reqinfo`, `/version`, `/api/geo`, `/api/myip`, the `/lite/*/bind` helpers | no token (Lampac's `accsdb` lets `[AllowAnonymous]` endpoints and the `/^\/[\w-]+\.js/` loaders through). They return the static page and scripts, and tell a caller its own IP. | the client has to load before it can send a token |
+| `DOMAIN/proxy*` | no token, but the links are server-encrypted and signed (`ProxyLink`), so only links Lampac handed to a token holder work | `Accsdb.cs` lets every `/proxy` path through |
+| Lampac modules with anonymous relays or bind helpers: `CubProxy` (`/cub/*`), `CorsMedia` (`/media`), `Corseu`, `TmdbProxy`, `Kit`, `WatchTogether`, `ExternalBind`, `TelegramAuth*`, `ForkPlayerXML`, `MsxNative` | **not loaded** (`SkipModules` in `init.conf`), so they cannot be used as open relays | this host is the one public surface without the login portal |
+| the Authelia session cookie (`lampa_session`, scoped to `DOMAIN`) | Caddy removes it from every request it forwards to Lampac, and `/api/headers` (which echoes request headers) is blocked. Cross-site `POST`s with that cookie to `ts.` and `qbt.` get 403 (`Sec-Fetch-Site`). | a plugin running on the Lampa page can reach Lampac and sibling hosts with the browser's cookies |
 | `DOMAIN/admin*`, `/adminpanel*`, `/stats*`, `/weblog*`, `/ts*`, `/dlna*` | blocked by Caddy (404) in every mode, case-insensitive | Lampac control surfaces; edit `init.conf` on the host instead |
-| request headers `lcrqpasswd`, `x-client-ip` | stripped by Caddy on every host | `lcrqpasswd` is Lampac's local-admin bypass |
+| request headers `lcrqpasswd`, `x-client-ip`, `xhost`, `xscheme` | stripped by Caddy on every host | `lcrqpasswd` is Lampac's local-admin bypass; `xhost`/`xscheme` let a client choose the host Lampac puts in its links |
 | Lampac `:9118`, Authelia `:9091`, TorrServer `:8090`, qBittorrent WebUI | not published; only reachable inside the internal compose network | |
 
-Lampac sees Caddy's address for every client (it only honours `X-Forwarded-For` behind Cloudflare), so its
-per-IP limits (`accsdb.maxip_hour`) count the proxy as one client. Leave them at their defaults.
+Lampac trusts `X-Forwarded-For` from the private ranges (its default known proxies), so it sees the real client
+address that Caddy sets and its per-IP limits count each client separately. qBittorrent is told to trust the same
+ranges (`ReverseProxySupportEnabled`), so its login ban applies to the offending client, not to everyone behind Caddy.
+Lampac builds all links it hands out with `https` (`listen.scheme` in `init.conf`), because Caddy always terminates TLS.
+The files holding Lampa tokens (`lampac/users.json`) are root:1000 `0640` and the install directory is `0750`
+root-only. Lampac runs as uid 1000, fixed in its image, which may be a human account on your host; that account
+cannot enter the install directory, but treat anyone with uid 1000 as having Lampac's rights.
 
 What was and was not tested is listed in [Verification status](#verification-status).
 
@@ -85,7 +95,8 @@ Print or reset credentials with `sudo ./install.sh --add-user NAME` (shown once)
    token** (the long hex string printed for your user). You can also add the plugin
    `https://DOMAIN/on/js/<token>` in Lampa under *Settings > Extensions*. (Exact TV flow: see Verification status.)
 2. *Settings > TorrServer*: URL `https://ts.DOMAIN`, login `lampa`, password = the TorrServer password from the
-   install output. Lampa sends it as HTTP Basic.
+   install output. Lampa sends it as HTTP Basic on its API calls. Turn **preload off** in Lampa's TorrServer
+   settings: preload needs credentials and the player cannot send them. Playback itself works without.
 3. For Samsung / LG TVs Lampac also serves packages at `https://DOMAIN/samsung.wgt` and `/lg.ipk`; they sit under
    the same token check.
 
@@ -111,7 +122,7 @@ Local mode is for the browser UIs only (TorrServer and qBittorrent pages, Lampa 
 `install.sh` sets these through TorrServer's own `/settings` API (keys are the Go field names in
 `server/settings/btsets.go`): `DisableUpload=true`, `RemoveCacheOnDrop=true`, `UseDisk=false` (RAM cache of
 `TS_CACHE_MB`, default 192), `EnableDLNA=false`, and checks them again afterwards (`--status` re-checks).
-Every 3 days `lampa-stack-cleanup.timer` empties `data/torrserver/cache` and `data/torrserver/torrents`; it never
+On days 1, 4, 7 ... 28 of the month (about every 3 days) `lampa-stack-cleanup.timer` empties `data/torrserver/cache` and `data/torrserver/torrents`; it never
 touches `data/torrserver/config` (settings, `accs.db`, viewed history), secrets or any other service's data.
 Preview: `sudo /opt/lampa-stack/scripts/cleanup.sh --dry-run`.
 
@@ -124,20 +135,23 @@ Edit, then run `sudo ./install.sh` again. Existing values are kept when a new ve
 | `*_IMAGE` | pinned tag + digest | image of each service; change to update |
 | `DOMAIN`, `ACME_EMAIL` | `lampa.localhost` | set by `--public` |
 | `AUTHELIA_POLICY` | `one_factor` | `two_factor` adds TOTP (register a device on first login) |
-| `LAMPA_AUTOUPDATE` | `false` | let Lampac's LampaWeb pull Lampa from GitHub every 90 min (a runtime download; off keeps the stack reproducible) |
+| `LAMPA_AUTOUPDATE` | `true` | LampaWeb downloads Lampa from GitHub on the first start. The image does not contain Lampa; with `false` the Lampa page answers 500 unless you put Lampa into `data/lampac/lampa-main` yourself |
+| `LAMPA_TREE` | pinned commit | the Lampa commit LampaWeb downloads. Fixed, so it fetches once and then stops; change it to update Lampa |
 | `TS_CACHE_MB` | 192 | TorrServer RAM cache |
 | `QBT_USER`, `QBT_WEBUI_PORT`, `QBT_PORT` | admin, 8085, 6881 | qBittorrent |
 | `QBT_PEER_BIND` | `127.0.0.1` | `0.0.0.0` only via `--enable-qbt-port` |
 | `QBT_MAX_RATIO`, `QBT_MAX_SEED_MINUTES` | 2.0, 10080 | seeding limits |
 | `QBT_DELETE_COMPLETED_DAYS` | 0 | optional old-download cleanup |
 | `*_MEM`, `LAMPAC_SHM` | see below | container memory limits |
-| `LAMPAC_READ_ONLY` | `false` | try a read-only Lampac root filesystem |
+| `LAMPAC_READ_ONLY` | `false` | unsupported: LampaWeb unpacks Lampa into the root filesystem on the first start |
 | `STACK_UID` | 10000 | uid of TorrServer / qBittorrent and of their data |
 
 Secrets are never in `.env` or the compose file: they live in `/opt/lampa-stack/secrets/` (root, 0600) and are
-handed to Authelia as Docker secrets (`*_FILE`). Users: `--add-user NAME`, `--remove-user NAME` (login and token).
+handed to Authelia and Caddy as Docker secret files (no environment variable, nothing in `docker inspect` or
+`docker compose config`). Users: `--add-user NAME`, `--remove-user NAME` (login and token).
 `--rotate-secrets` replaces the session secret, TorrServer/qBittorrent/Lampac passwords, every user's password and
-Lampa token (all sessions end; new credentials are printed once). The Authelia storage key is kept because it
+Lampa token (all sessions end; new credentials are printed once). `--remove-user` restarts Lampac, which does not
+forget removed tokens on its own. The Authelia storage key is kept because it
 encrypts TOTP seeds; to change it use Authelia's `storage encryption change-key`.
 
 ## Hardening and memory budget
@@ -178,7 +192,7 @@ TorrServer and qBittorrent (peers/trackers) and Caddy (ACME) are also on `egress
 | Browser certificate warning in local mode | expected (local CA); `--export-ca` and trust it |
 | Login loop on `ts.` / `qbt.` | open the UIs by the exact `*.lampa.localhost:8443` names; the session cookie is scoped to `DOMAIN` |
 | `502` from Caddy | `docker compose -p lampa-stack ps`; `docker logs lampa-stack-authelia-1` (Authelia restarts if its 256m is exceeded) |
-| Lampac unhealthy for a minute after start | normal: start period is 90 s |
+| Lampac unhealthy for a minute or two after start | normal on the first start: it downloads Lampa from GitHub (start period 180 s). If it stays unhealthy, `docker logs lampa-stack-lampac-1`: the host needs outbound access to `github.com` and `raw.githubusercontent.com` |
 | TV says access denied | the Lampa token is wrong or the user was removed; `--add-user` again |
 | qBittorrent shows "Unauthorized" | use the password from the install output, or `--rotate-secrets` |
 | TOTP registration mail | Authelia has no mail server; the link is appended to `/opt/lampa-stack/data/authelia/notification.txt` |
@@ -189,7 +203,9 @@ TorrServer and qBittorrent (peers/trackers) and Caddy (ACME) are also on `egress
 `yumata/lampa` publishes no image and no stable release (tags stop at v1.4.1 while the app is 3.x); its only
 Docker support is a Dockerfile on an end-of-life `httpd:alpine3.15` that bakes in a domain. Lampac NextGen's
 LampaWeb module serves Lampa itself (plus `lampainit.js`, TV packages and the token check), so one maintained
-image provides the frontend and the backend. LampaWeb auto-update is off by default (`LAMPA_AUTOUPDATE=false`).
+image provides the frontend and the backend. The image does **not** ship Lampa: on the first start LampaWeb downloads
+the commit pinned in `LAMPA_TREE` from GitHub into `data/lampac/lampa-main` (outbound access needed), then does nothing
+more. That is why the Lampac healthcheck requests `/`: it fails while the frontend is missing.
 
 ## Verification status
 
@@ -206,8 +222,16 @@ Tested on Ubuntu 24.04 with Docker 29 and compose 5:
   qBittorrent accepts only the generated password, seeding limits applied; add-user, remove-user,
   rotate-secrets, uninstall; cleanup dry-run and real run keep `config/`.
 
-**Not verified** (the sandbox could not pull `ghcr.io` and `lscr.io` blobs): the real Lampac image starting
-(healthcheck `curl /version?type=hash`, writable paths, `LAMPAC_READ_ONLY=true`, whether `wwwroot` already contains
-Lampa or is downloaded on first start); that Lampac's `accsdb` denies anonymous API calls and accepts the token
-from `users.json` exactly as read from its source; how a TV widget carries the token; and the pinned
-`lscr.io` / `ghcr.io` digests themselves (read from the registries, never pulled).
+Also checked against the Lampac **1.28.4 source** (tag read, image not run): `CoreInit.Host` takes the link scheme
+from `listen.scheme`; `LampaWeb` downloads Lampa only when `autoupdate` is true (the image has no Lampa); `/` throws
+until it exists; `Accsdb` lets `/proxy*` and `[AllowAnonymous]` endpoints through; `Program.UpdateUsersDb` only adds
+users from `users.json`; `SkipModules` matches module folder names; TorrServer `MatriX.147.2` registers `/stream`,
+`/play`, `/subs`, `/playlist` without auth and answers an unknown hash with 401 (also live: preflight 204, unknown
+`/stream` 401, exact Basic 200, other Basic to the login, cross-site POST 403, session cookie removed before Lampac).
+
+**Not verified** (the sandbox could not pull `ghcr.io` and `lscr.io` blobs, and a build needs hosts it cannot reach):
+the real Lampac image starting (writable paths, the first-start download of Lampa, memory with Chromium); that its
+`accsdb` denies anonymous `/lite/*`, `/online*`, `/sisi*` calls and accepts a token from `users.json` as read from the
+source (`tests/smoke.sh` checks both on a real stack, so run it once after install); how a TV widget carries the
+token; that every module left loaded is enough for the Lampa features you use; and the pinned `lscr.io` / `ghcr.io`
+digests themselves (read from the registries, never pulled).

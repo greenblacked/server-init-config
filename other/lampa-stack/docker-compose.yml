@@ -25,6 +25,9 @@ secrets:
   authelia_jwt:      {file: ./secrets/authelia_jwt}
   authelia_session:  {file: ./secrets/authelia_session}
   authelia_storage:  {file: ./secrets/authelia_storage}
+  # base64(user:password) of the TorrServer account; Caddy reads it at run time ({file./run/secrets/ts_basic}),
+  # so it is in no environment variable, `docker inspect` or `docker compose config`.
+  ts_basic:          {file: ./secrets/ts_basic}
 
 volumes:
   caddy_data: {}
@@ -37,7 +40,7 @@ services:
     ports:
       - "${PUBLISH_HTTP:-127.0.0.1:8080:80}"
       - "${PUBLISH_HTTPS:-127.0.0.1:8443:8443}"
-    env_file: [./secrets/caddy.env]   # TS_BASIC (TorrServer credential injected for Authelia-authenticated browsers)
+    secrets: [ts_basic]
     environment:
       SITE_MAIN: ${SITE_PREFIX-https://}${DOMAIN:-lampa.localhost}${SITE_SUFFIX-:8443}
       SITE_TS: ${SITE_PREFIX-https://}ts.${DOMAIN:-lampa.localhost}${SITE_SUFFIX-:8443}
@@ -107,8 +110,11 @@ services:
       - ./lampac/users.json:/lampac/users.json:ro,z
       - ./data/lampac/database:/lampac/database:z
       - ./data/lampac/cache:/lampac/cache:z
+      # Lampa itself: downloaded by the LampaWeb module on first start (pinned commit) and kept here.
+      - ./data/lampac/lampa-main:/lampac/wwwroot/lampa-main:z
     # UNVERIFIED on a live container (image could not be pulled where this was written): read_only needs
-    # every writable path listed. Off by default; set LAMPAC_READ_ONLY=true to try it.
+    # every writable path listed, and LampaWeb also writes /lampac/wwwroot (zip + extraction) on the first
+    # start, so it cannot work with a read-only root. Off by default; LAMPAC_READ_ONLY=true is unsupported.
     read_only: ${LAMPAC_READ_ONLY:-false}
     tmpfs: [/tmp, "/lampac/logs:uid=1000,gid=1000"]
     pids_limit: 512
@@ -116,11 +122,13 @@ services:
     cpus: 2.0
     networks: [backend, egress]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9118/version?type=hash"]
+      # "/" is the Lampa page: it answers 500 until LampaWeb has downloaded Lampa, so a missing frontend shows
+      # up as unhealthy (the /version endpoint stays green without it).
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9118/"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 90s
+      start_period: 180s
 
   torrserver:
     <<: *hardening

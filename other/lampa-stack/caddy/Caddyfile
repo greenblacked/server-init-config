@@ -3,9 +3,12 @@
 #   public mode: example.org, ts.example.org, ...                                   (automatic HTTPS)
 # Auth model per host:
 #   auth.*  Authelia portal (login page)
-#   ts.*    Authelia session (browser) OR TorrServer's own HTTP Basic (the Lampa TV client)
+#   ts.*    Authelia session (browser) OR the exact TorrServer HTTP Basic credential (the Lampa TV client);
+#           players cannot send headers, so /stream /play /subs /playlist and CORS preflights go straight to
+#           TorrServer, which serves only torrents already in its database (unknown hash: 401)
 #   qbt.*   Authelia session, then qBittorrent's own login
-#   main    Lampa app + Lampac API for the TV client (Lampac's accsdb token check); admin paths blocked
+#   main    Lampa app + Lampac API for the TV client (Lampac's accsdb token check); admin paths blocked;
+#           the Authelia cookie is never forwarded to Lampac
 {
 	email {$ACME_EMAIL}
 	servers {
@@ -22,10 +25,22 @@
 		Referrer-Policy no-referrer
 		Strict-Transport-Security "max-age=31536000"
 	}
-	# lcrqpasswd is Lampac's "local request" admin bypass; x-client-ip is trusted only with it. Never let a
-	# client set them.
+	# lcrqpasswd is Lampac's "local request" admin bypass; x-client-ip is trusted only with it. xhost and
+	# xscheme make Lampac build its links from client-chosen values. Never let a client set them.
 	request_header -lcrqpasswd
 	request_header -X-Client-IP
+	request_header -xhost
+	request_header -xscheme
+}
+
+# State-changing requests from a sibling site (a script on the main host, e.g. a third-party Lampa plugin)
+# must not ride on the Authelia session cookie, which is scoped to the whole domain.
+(samesite_only) {
+	@xsite {
+		not method GET HEAD OPTIONS
+		header_regexp Sec-Fetch-Site ^(same-site|cross-site)$
+	}
+	respond @xsite 403
 }
 
 (authelia) {
@@ -44,37 +59,60 @@
 	import secure
 	# Lampac control surfaces. Edit init.conf on the host instead. /ts* is the embedded TorrServer proxy
 	# (module skipped; blocked here as well).
-	@blocked path_regexp (?i)^/+(admin|adminpanel|stats|weblog|ts|dlna)(/|$)
+	# /api/headers is an anonymous Lampac endpoint that echoes every request header.
+	@blocked path_regexp (?i)^/+(admin|adminpanel|stats|weblog|ts|dlna|api/headers)(/|$)
 	handle @blocked {
 		respond 404
 	}
 	handle {
+		# The Authelia session cookie is scoped to the whole domain, so the browser sends it here too. Lampac
+		# (and any script that Lampa loads from it) has no use for it: remove it from the forwarded request.
+		request_header Cookie "(?i)(^|;\s*)lampa_session=[^;]*" "$1"
 		reverse_proxy lampac:9118
 	}
 }
 
 {$SITE_TS} {
 	import secure
-	# The TV client sends HTTP Basic (Lampa Settings > TorrServer). TorrServer checks it on every route.
 	@docs path /swagger*
 	handle @docs {
 		respond 404
 	}
-	@tv header Authorization Basic*
+	# Lampa on the TV: HTTP Basic with the exact credential (compared here, so any other Basic header falls
+	# through to the Authelia branch). TorrServer checks it again.
+	@tv header Authorization "Basic {file./run/secrets/ts_basic}"
 	handle @tv {
+		reverse_proxy torrserver:8090
+	}
+	# CORS preflight: Lampa (origin DOMAIN) calls this host cross-origin and the browser sends OPTIONS without
+	# credentials. TorrServer's own CORS middleware answers it.
+	@preflight method OPTIONS
+	handle @preflight {
+		reverse_proxy torrserver:8090
+	}
+	# Playback URLs carry no credentials (players cannot send headers). TorrServer registers these routes
+	# without auth and serves only torrents already added; an unknown hash gets 401. A browser that holds an
+	# Authelia session takes the branch below instead, so the web UI keeps its full access.
+	@playback {
+		path /stream /stream/* /play/* /subs/* /playlist /playlist/*
+		not header_regexp Cookie lampa_session=
+	}
+	handle @playback {
 		reverse_proxy torrserver:8090
 	}
 	# Browsers: Authelia session, then Caddy adds the TorrServer credential (one login, not two).
 	handle {
+		import samesite_only
 		import authelia
 		reverse_proxy torrserver:8090 {
-			header_up Authorization "Basic {$TS_BASIC}"
+			header_up Authorization "Basic {file./run/secrets/ts_basic}"
 		}
 	}
 }
 
 {$SITE_QBT} {
 	import secure
+	import samesite_only
 	import authelia
 	reverse_proxy qbittorrent:{$QBT_WEBUI_PORT}
 }

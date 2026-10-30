@@ -129,6 +129,7 @@ check_docker() {
   docker info >/dev/null 2>&1 || die "docker daemon not reachable"
   docker compose version >/dev/null 2>&1 || die "docker compose v2 plugin missing"
   command -v openssl >/dev/null || die "openssl not found"
+  command -v python3 >/dev/null || die "python3 not found (derives the qBittorrent password hash without putting it on a command line)"
   command -v curl >/dev/null || die "curl not found"
 }
 
@@ -140,7 +141,11 @@ selinux_note() {
 
 # ---------------------------------------------------------------- files and layout
 install_files() {
-  install -d -m 0755 "$DIR" "$DIR/caddy" "$DIR/authelia" "$DIR/lampac" "$DIR/scripts" "$DIR/systemd" "$DIR/tests"
+  # $DIR is 0750 root: Lampac and TorrServer data are owned by container uids (1000, STACK_UID) that may match a
+  # human account on the host; without the search bit on $DIR those accounts cannot reach any of it.
+  install -d -m 0750 "$DIR"
+  install -d -m 0755 "$DIR/caddy" "$DIR/authelia" "$DIR/scripts" "$DIR/systemd" "$DIR/tests"
+  install -d -m 0750 -o root -g 1000 "$DIR/lampac"   # init.conf, users.json (group-readable by the Lampac uid)
   install -d -m 0700 "$DIR/secrets"
   install -m 0644 "$SRC/docker-compose.yml" "$DIR/docker-compose.yml"
   install -m 0644 "$SRC/caddy/Caddyfile" "$DIR/caddy/Caddyfile"
@@ -151,11 +156,12 @@ install_files() {
   install -m 0755 "$SRC/tests/smoke.sh" "$DIR/tests/smoke.sh"
   install -m 0644 "$SRC/systemd/lampa-stack-cleanup.service" "$SRC/systemd/lampa-stack-cleanup.timer" "$DIR/systemd/"
   install -m 0644 "$SRC/README.md" "$DIR/README.md"
-  # Data dirs: TorrServer and qBittorrent run as STACK_UID, Lampac as uid 1000 (fixed in its image).
+  # Data dirs: TorrServer and qBittorrent run as STACK_UID, Lampac as uid 1000 (fixed in its image; a host
+  # account with uid 1000 is the same user to the kernel, which is why $DIR itself is closed to others).
   local uid; uid=$(env_get STACK_UID); uid="${uid:-10000}"
   install -d -m 0750 -o "$uid" -g "$uid" "$DIR/data/torrserver" "$DIR/data/torrserver/config" \
     "$DIR/data/torrserver/torrents" "$DIR/data/torrserver/cache" "$DIR/data/qbt" "$DIR/data/qbt/config" "$DIR/data/qbt/downloads"
-  install -d -m 0750 -o 1000 -g 1000 "$DIR/data/lampac" "$DIR/data/lampac/database" "$DIR/data/lampac/cache"
+  install -d -m 0750 -o 1000 -g 1000 "$DIR/data/lampac" "$DIR/data/lampac/database" "$DIR/data/lampac/cache" "$DIR/data/lampac/lampa-main"
   install -d -m 0750 "$DIR/data/authelia"
 }
 
@@ -196,6 +202,14 @@ ensure_env() {
   [[ "$(env_get QBT_DELETE_COMPLETED_DAYS)" =~ ^[0-9]+$ ]] || die "invalid QBT_DELETE_COMPLETED_DAYS"
   [[ "$(env_get QBT_USER)" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]] || die "invalid QBT_USER"
   [[ "$(env_get LAMPA_AUTOUPDATE)" =~ ^(true|false)$ ]] || die "LAMPA_AUTOUPDATE must be true or false"
+  [[ "$(env_get LAMPA_TREE)" =~ ^[0-9a-f]{40}$ ]] || die "LAMPA_TREE must be a 40-character git commit id"
+  # The peer port is opened in the host firewall: never a system port, never the SSH port.
+  v=$(env_get QBT_PORT)
+  (( v >= 1024 && v <= 65535 )) || die "QBT_PORT must be 1024-65535 (got ${v})"
+  local sp
+  for sp in 22 $(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}') $(ss -Hltnp 2>/dev/null | awk '/sshd/ {n=split($4,a,":"); print a[n]}'); do
+    [[ "$v" != "$sp" ]] || die "QBT_PORT ${v} is the SSH port"
+  done
 }
 
 gen_secret() { # file bytes ; creates only when missing
@@ -259,7 +273,8 @@ render_users() {
     echo "]"
   } > "$DIR/lampac/users.json.new"
   cat "$DIR/lampac/users.json.new" > "$DIR/lampac/users.json"; rm -f "$DIR/lampac/users.json.new"
-  chmod 0644 "$DIR/lampac/users.json"
+  # The tokens are the only credential on the public Lampac API: root and the Lampac uid (group) only.
+  chown root:1000 "$DIR/lampac/users.json"; chmod 0640 "$DIR/lampac/users.json"
 }
 
 render_authelia() {
@@ -276,27 +291,31 @@ render_authelia() {
 render_lampac() {
   local f="$DIR/lampac/init.conf"
   # Lampac accsdb on; users from users.json (one token per person). The embedded TorrServer, WebLog, DLNA and
-  # other modules are skipped (we run a separate TorrServer); LampaWeb auto-update off unless opted in.
+  # other modules are skipped (we run a separate TorrServer). Modules whose endpoints are anonymous by design
+  # (relays to cub.red / TMDB, media proxies, device binding, Telegram login, Kit, WatchTogether, ForkPlayer,
+  # MSX) are skipped too: this host is open to the internet without a login portal in front of it.
+  # scheme is "https" because Caddy always terminates TLS and Lampac sees plain HTTP from it; it builds every
+  # link it hands out (lampainit.js, online/lite, plugin URLs carrying the token) from this value.
   cat > "$f" <<CONF
 {
-  "listen": { "ip": "0.0.0.0", "port": 9118, "scheme": "http", "localhost": "127.0.0.1", "version": true },
+  "listen": { "ip": "0.0.0.0", "port": 9118, "scheme": "https", "localhost": "127.0.0.1", "version": true },
   "lowMemoryMode": true,
   "BaseModule": {
     "NotCheckLocalIp": true,
-    "SkipModules": ["AdminPanel", "Catalog", "DatabaseEditor", "DLNA", "JacRed", "Sync", "TimeCode", "TorrServer", "Tracks", "Transcoding", "WebLog"]
+    "SkipModules": ["AdminPanel", "Catalog", "CorsMedia", "Corseu", "CubProxy", "DLNA", "ExternalBind", "ForkPlayerXML", "JacRed", "Kit", "MsxNative", "Sync", "TelegramAuth", "TelegramAuthBot", "TimeCode", "TmdbProxy", "TorrServer", "Tracks", "Transcoding", "WatchTogether", "WebLog"]
   },
   "accsdb": {
     "enable": true,
     "authMesage": "Personal access only. Ask the owner for your link.",
     "denyMesage": "Access denied."
   },
-  "LampaWeb": { "autoupdate": $(env_get LAMPA_AUTOUPDATE) },
+  "LampaWeb": { "autoupdate": $(env_get LAMPA_AUTOUPDATE), "tree": "$(env_get LAMPA_TREE)" },
   "chromium": { "enable": true, "executablePath": "/usr/bin/chromium" },
   "openstat": { "enable": false },
   "online": { "name": "Lampac", "version": true }
 }
 CONF
-  chmod 0644 "$f"
+  chown root:1000 "$f"; chmod 0640 "$f"
   if [[ ! -s "$DIR/lampac/passwd" ]]; then
     ( umask 077; rand_pw > "$DIR/lampac/passwd" )
     log "generated lampac/passwd (root password, only for admin pages that Caddy blocks anyway)"
@@ -314,20 +333,28 @@ render_torrserver_auth() {
   # TorrServer reads accs.db as JSON {"user":"password"} from its config dir.
   ( umask 077; printf '{"%s":"%s"}\n' "$user" "$(cat "$f")" > "$DIR/data/torrserver/config/accs.db" )
   chown "$uid:$uid" "$DIR/data/torrserver/config/accs.db"; chmod 0600 "$DIR/data/torrserver/config/accs.db"
-  # Credential Caddy injects for browsers that passed Authelia.
-  ( umask 077; printf 'TS_BASIC=%s\n' "$(printf '%s:%s' "$user" "$(cat "$f")" | base64 -w0)" > "$DIR/secrets/caddy.env" )
+  # base64(user:password): Caddy compares the TV's Authorization header with it and injects it for browsers
+  # that passed Authelia. Mounted as a Docker secret file (no trailing newline), never an environment variable.
+  ( umask 077; printf '%s:%s' "$user" "$(cat "$f")" | base64 -w0 > "$DIR/secrets/ts_basic" )
+  rm -f "$DIR/secrets/caddy.env"   # older versions kept the credential here, as an environment file
 }
 
 # qBittorrent.conf pre-seed: PBKDF2-HMAC-SHA512, 100000 iterations, 16-byte salt, 64-byte key
 # (format of WebUI\Password_PBKDF2 = "@ByteArray(<b64 salt>:<b64 key>)"; qBittorrent source: src/base/utils/password.cpp).
-qbt_hash() { # password -> prints the @ByteArray(...) value
-  local pw="$1" salt_b64 salt_hex key_b64
-  salt_b64=$(openssl rand -base64 16)
-  salt_hex=$(printf '%s' "$salt_b64" | base64 -d | od -An -tx1 | tr -d ' \n')
-  key_b64=$(openssl kdf -keylen 64 -kdfopt digest:SHA512 -kdfopt "pass:${pw}" -kdfopt "hexsalt:${salt_hex}" -kdfopt iter:100000 -binary PBKDF2 | base64 -w0)
-  [[ -n "$key_b64" ]] || die "PBKDF2 derivation failed (need OpenSSL 3 with 'openssl kdf')"
-  printf '@ByteArray(%s:%s)' "$salt_b64" "$key_b64"
+qbt_hash() { # password -> prints the @ByteArray(...) value. The password goes in on stdin, never in argv.
+  local pw="$1" out
+  out=$(printf '%s' "$pw" | python3 -I -c '
+import base64, hashlib, os, sys
+pw = sys.stdin.buffer.read()
+salt = os.urandom(16)
+key = hashlib.pbkdf2_hmac("sha512", pw, salt, 100000, 64)
+sys.stdout.write("@ByteArray(%s:%s)" % (base64.b64encode(salt).decode(), base64.b64encode(key).decode()))
+') || die "PBKDF2 derivation failed"
+  [[ "$out" == '@ByteArray('*')' ]] || die "unexpected PBKDF2 output"
+  printf '%s' "$out"
 }
+
+QBT_TRUSTED_PROXIES="172.16.0.0/12;192.168.0.0/16;10.0.0.0/8"   # Docker's private ranges; the backend network is internal
 
 seed_qbt() { # $1 = "force" to replace the password of an existing config
   local conf="$DIR/data/qbt/config/qBittorrent/qBittorrent.conf" uid hash pwf="$DIR/secrets/qbt_password" new=0
@@ -349,7 +376,9 @@ seed_qbt() { # $1 = "force" to replace the password of an existing config
     # qBittorrent 5.x layout: keys live in [WebUI] without the old "WebUI\\" prefix (verified on 5.3.0).
     # Host header validation is off: qBittorrent 5.3.0 does not match a Host header that carries a non-standard
     # port (https://qbt.x:8443) even when listed, and only Caddy can reach it; Caddy answers just the exact
-    # qbt.<domain> site name. CSRF and clickjacking protection stay on.
+    # qbt.<domain> site name. CSRF and clickjacking protection stay on. Reverse proxy support makes the ban
+    # counter (5 failures, 1 hour) work per client address (Caddy's X-Forwarded-For) instead of locking out
+    # everyone behind Caddy's single address; only the private ranges of the internal backend network are trusted.
     cat > "$conf" <<CONF
 [LegalNotice]
 Accepted=true
@@ -361,7 +390,8 @@ LocalHostAuth=true
 CSRFProtection=true
 ClickjackingProtection=true
 HostHeaderValidation=false
-SecureCookie=false
+ReverseProxySupportEnabled=true
+TrustedReverseProxiesList=${QBT_TRUSTED_PROXIES}
 SessionTimeout=3600
 MaxAuthenticationFailCount=5
 BanDuration=3600
@@ -430,8 +460,8 @@ apply_qbt() {
   local port pw json
   port=$(env_get QBT_WEBUI_PORT); pw=$(cat "$DIR/secrets/qbt_password")
   [[ "$(qbt_login_code "$(env_get QBT_USER)" "$pw")" == 204 ]] || { warn "qBittorrent: login with the generated password failed"; return 1; }
-  json=$(printf '{"max_ratio_enabled":true,"max_ratio":%s,"max_seeding_time_enabled":true,"max_seeding_time":%s,"max_ratio_act":0,"listen_port":%s,"upnp":false,"save_path":"/downloads","web_ui_clickjacking_protection_enabled":true,"web_ui_csrf_protection_enabled":true,"web_ui_host_header_validation_enabled":false,"web_ui_domain_list":"%s"}' \
-    "$(env_get QBT_MAX_RATIO)" "$(env_get QBT_MAX_SEED_MINUTES)" "$(env_get QBT_PORT)" "qbt.$(env_get DOMAIN);qbt.$(env_get DOMAIN)$(env_get AUTH_URL_PORT);localhost;127.0.0.1")
+  json=$(printf '{"max_ratio_enabled":true,"max_ratio":%s,"max_seeding_time_enabled":true,"max_seeding_time":%s,"max_ratio_act":0,"listen_port":%s,"upnp":false,"save_path":"/downloads","web_ui_clickjacking_protection_enabled":true,"web_ui_csrf_protection_enabled":true,"web_ui_host_header_validation_enabled":false,"web_ui_reverse_proxy_enabled":true,"web_ui_reverse_proxies_list":"%s","web_ui_domain_list":"%s"}' \
+    "$(env_get QBT_MAX_RATIO)" "$(env_get QBT_MAX_SEED_MINUTES)" "$(env_get QBT_PORT)" "$QBT_TRUSTED_PROXIES" "qbt.$(env_get DOMAIN);qbt.$(env_get DOMAIN)$(env_get AUTH_URL_PORT);localhost;127.0.0.1")
   printf 'json=%s' "$json" | qbt_exec curl -sS --max-time 10 -b /tmp/lampa.cj --data @- "http://127.0.0.1:${port}/api/v2/app/setPreferences" >/dev/null \
     || { warn "qBittorrent: setPreferences failed"; return 1; }
   # the temporary/default passwords must not work
@@ -447,8 +477,15 @@ fw_open() { # proto/port ...
   (( NO_FIREWALL )) && { warn "firewall untouched (--no-firewall); open $* yourself"; return 0; }
   local p
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    for p in "$@"; do ufw allow "$p" >/dev/null && echo "ufw $p" >> "$(FW_RECORD)"; done
-    log "ufw: allowed $*"
+    # Record only the rules this script adds: --uninstall must not remove a rule the operator already had.
+    for p in "$@"; do
+      if ufw status 2>/dev/null | grep -Eq "^${p}[[:space:]]+ALLOW"; then
+        log "ufw: ${p} already allowed (left as is)"
+      else
+        ufw allow "$p" >/dev/null && echo "ufw $p" >> "$(FW_RECORD)"
+      fi
+    done
+    log "ufw: ports ready: $*"
   elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
     # lockout guard: SSH must already be allowed in the saved rules of the default zone
     local zone; zone=$(firewall-cmd --get-default-zone)
@@ -456,8 +493,11 @@ fw_open() { # proto/port ...
       warn "firewalld: ssh not in zone ${zone}; leaving the firewall alone. Open $* yourself."; return 0
     fi
     for p in "$@"; do
-      firewall-cmd --permanent --zone="$zone" --query-port="$p" >/dev/null 2>&1 || firewall-cmd --permanent --zone="$zone" --add-port="$p" >/dev/null
-      echo "firewalld $zone $p" >> "$(FW_RECORD)"
+      if firewall-cmd --permanent --zone="$zone" --query-port="$p" >/dev/null 2>&1; then
+        log "firewalld: ${p} already open in ${zone} (left as is)"
+      else
+        firewall-cmd --permanent --zone="$zone" --add-port="$p" >/dev/null && echo "firewalld $zone $p" >> "$(FW_RECORD)"
+      fi
     done
     firewall-cmd --reload >/dev/null
     firewall-cmd --zone="$zone" --query-service=ssh >/dev/null 2>&1 || firewall-cmd --zone="$zone" --query-port=22/tcp >/dev/null 2>&1 || warn "ssh not visible in zone ${zone} after reload; check the firewall!"
@@ -564,8 +604,9 @@ do_remove_user() {
   awk -F'\t' -v n="$TARGET_USER" '$1 != n' "$(users_file)" > "$(users_file).new"
   chmod 0600 "$(users_file).new"; mv -f "$(users_file).new" "$(users_file)"
   render_users
-  log "removed ${TARGET_USER}: login and Lampa token no longer valid (an existing browser session ends within its inactivity window; restart authelia to end it now)"
-  dc restart authelia >/dev/null 2>&1 || true
+  # Lampac only ever adds users from users.json while running; it forgets a removed one on restart.
+  dc restart authelia lampac >/dev/null 2>&1 || warn "could not restart authelia/lampac: the removed token works until Lampac restarts"
+  log "removed ${TARGET_USER}: login and Lampa token no longer valid (authelia and lampac were restarted, so existing sessions ended)"
 }
 
 do_rotate() {
