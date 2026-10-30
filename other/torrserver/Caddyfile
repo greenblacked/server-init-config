@@ -1,0 +1,30 @@
+# TLS front for TorrServer, used only with install.sh --public. DOMAIN and ACME_EMAIL come from .env.
+{
+	email {$ACME_EMAIL}
+	admin off
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# TorrServer does the login itself (HTTP basic auth); the Authorization header is passed through.
+	reverse_proxy torrserver:8090 {
+		flush_interval -1
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
