@@ -23,6 +23,7 @@ What a server built from this repo has:
 | Path | Purpose |
 |---|---|
 | `cloud-init/rocky.yaml`, `cloud-init/debian.yaml`, `cloud-init/rocky-x86.yaml`, `cloud-init/debian-x86.yaml` | user-data for new servers (generated, do not edit); the `-x86` files have the same content, labelled for x86 servers |
+| `cloud-init/server-fedora.yaml`, `cloud-init/server-el10.yaml` | user-data for new general (non-runner) servers: embed `server/server-init-*.sh` (generated, do not edit); see [`server/README.md`](server/README.md#cloud-config-new-servers) |
 | `cloud-init/templates/` | sources for the cloud-init files |
 | `gitlab-runner/` | **start here for a Rocky runner**: base init, `setup.sh` and copy-paste blocks for every component, `update.sh`, everyday commands and troubleshooting (see its README) |
 | `tools/render-cloud-init.py` | renders templates and embeds repo files; `--check` detects stale output |
