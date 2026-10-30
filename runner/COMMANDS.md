@@ -1613,7 +1613,7 @@ check_security() {
       case "$root_login" in
         no)  ok "SSH root login disabled" ;;
         yes) fail "SSH root login with password allowed" ;;
-        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo runner/install/users.sh --lock-root" ;;
+        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo bash -c \"cd /root/server-init-config && runner/setup.sh --lock-root\"" ;;
       esac
       if grep -q '^allowgroups ' <<<"$sshd_t"; then
         ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
@@ -1661,7 +1661,7 @@ check_security() {
     if ! is_runner; then
       info "SSH port: ${ssh_ports% }"
     elif [[ " ${ssh_ports}" == *" 22 "* ]]; then
-      info "SSH listens on: ${ssh_ports}(port 22 closes with runner/install/users.sh --lock-root)"
+      info "SSH listens on: ${ssh_ports}(port 22 closes with the lock-root step)"
     else
       ok "SSH port: ${ssh_ports% }"
     fi
@@ -10503,7 +10503,7 @@ check_security() {
       case "$root_login" in
         no)  ok "SSH root login disabled" ;;
         yes) fail "SSH root login with password allowed" ;;
-        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo runner/install/users.sh --lock-root" ;;
+        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo bash -c \"cd /root/server-init-config && runner/setup.sh --lock-root\"" ;;
       esac
       if grep -q '^allowgroups ' <<<"$sshd_t"; then
         ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
@@ -10551,7 +10551,7 @@ check_security() {
     if ! is_runner; then
       info "SSH port: ${ssh_ports% }"
     elif [[ " ${ssh_ports}" == *" 22 "* ]]; then
-      info "SSH listens on: ${ssh_ports}(port 22 closes with runner/install/users.sh --lock-root)"
+      info "SSH listens on: ${ssh_ports}(port 22 closes with the lock-root step)"
     else
       ok "SSH port: ${ssh_ports% }"
     fi
@@ -14631,7 +14631,7 @@ check_security() {
       case "$root_login" in
         no)  ok "SSH root login disabled" ;;
         yes) fail "SSH root login with password allowed" ;;
-        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo runner/install/users.sh --lock-root" ;;
+        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo bash -c \"cd /root/server-init-config && runner/setup.sh --lock-root\"" ;;
       esac
       if grep -q '^allowgroups ' <<<"$sshd_t"; then
         ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
@@ -14679,7 +14679,7 @@ check_security() {
     if ! is_runner; then
       info "SSH port: ${ssh_ports% }"
     elif [[ " ${ssh_ports}" == *" 22 "* ]]; then
-      info "SSH listens on: ${ssh_ports}(port 22 closes with runner/install/users.sh --lock-root)"
+      info "SSH listens on: ${ssh_ports}(port 22 closes with the lock-root step)"
     else
       ok "SSH port: ${ssh_ports% }"
     fi
