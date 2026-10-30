@@ -174,15 +174,21 @@ memory_swap = "1536m"
 cpus = "1.5"
 pids_limit = 2048
 shm_size = 268435456
+cgroup_parent = "ci-jobs.slice"
+service_memory = "384m"
+service_memory_swap = "384m"
+service_cpus = "0.5"
+service_cgroup_parent = "ci-jobs.slice"
 ```
 
+The `service_*` keys give the same kind of limit to the `services:` containers of a job (postgres, redis, ...). GitLab Runner has no per-container process limit, so processes are capped for all jobs together: the step writes `/etc/systemd/system/ci-jobs.slice` with `TasksMax=4096` and `MemoryMax=3g`, and every job and service container runs inside that slice (`cgroup_parent`). A fork bomb in a job stops at that ceiling instead of exhausting the host.
 Two jobs at 1.5 GB and 1.5 CPUs leave about 1 GB and one CPU's worth for the host on a CAX11. A job over its memory limit is killed (exit code 137) instead of freezing the server. Values you set yourself in `config.toml` are kept; to change them, pass the new values and rerun the step (a backup is made; the runner reloads the file by itself, new jobs get the new limits). Server, as `ops`, any directory:
 
 ```bash
 sudo bash -c 'cd /root/server-init-config && JOB_MEMORY=3g JOB_CPUS=2 runner/install/job-limits.sh'
 ```
 
-`JOB_MEMORY`, `JOB_MEMORY_SWAP` (default: equal to the memory, so no swap), `JOB_CPUS`, `JOB_PIDS` and `JOB_SHM_SIZE` (bytes) are the settings.
+`JOB_MEMORY`, `JOB_MEMORY_SWAP` (default: equal to the memory, so no swap), `JOB_CPUS`, `JOB_SHM_SIZE` (bytes), `JOB_SERVICE_MEMORY`, `JOB_SERVICE_MEMORY_SWAP`, `JOB_SERVICE_CPUS`, `JOBS_TASKS_MAX` (processes for all jobs together) and `JOBS_MEMORY_MAX` (memory for all jobs together; empty turns it off) are the settings.
 
 ### What jobs cannot reach
 

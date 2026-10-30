@@ -73,7 +73,7 @@ is_installed() {
     firewall)       systemctl is-active --quiet firewalld 2>/dev/null || ufw status 2>/dev/null | grep -q '^Status: active' ;;
     security)       command -v lynis >/dev/null 2>&1 && [[ -x /usr/local/bin/trivy ]] ;;
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;
-    job-limits)     [[ -f "$CFG" ]] && grep -q '^[[:space:]]*pids_limit' "$CFG" ;;
+    job-limits)     [[ -f "$CFG" ]] && grep -q '^[[:space:]]*cgroup_parent' "$CFG" ;;
     registry-cache) [[ -f /opt/registry-cache/docker-compose.yml ]] ;;
     monitoring)     [[ -f /opt/monitoring/docker-compose.yml ]] ;;
     logging)        [[ -f /opt/logging/docker-compose.yml ]] ;;

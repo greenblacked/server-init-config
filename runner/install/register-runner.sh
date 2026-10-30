@@ -15,7 +15,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
      DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
-Per-job limits (memory 1536m, cpus 1.5, pids 2048, shm 256 MB) are added to config.toml; see runner/install/job-limits.sh.
+Per-job limits (memory 1536m, cpus 1.5, shm 256 MB, services 384m, and a ci-jobs.slice with a process and memory ceiling) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
 USAGE
