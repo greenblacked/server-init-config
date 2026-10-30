@@ -394,14 +394,11 @@ write_files:
     permissions: '0755'
     content: |
       #!/usr/bin/env bash
-      # Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
-      # The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
-      # without this they would never be updated. No job is started or killed by the upgrade: the runner is first stopped
-      # gracefully (it takes no new job and lets a job that is already running finish; the unit gets KillSignal=SIGQUIT),
-      # the job list is checked again, and only then are the packages upgraded. A package scriptlet may start the runner
-      # again, so the runner and the job list are checked once more right before Docker is restarted. Docker is restarted,
-      # then gitlab-runner is started; both must be active afterwards. If a job is still there, the runner is started again
-      # and nothing is changed (or, after the package upgrade, only the Docker restart is left out).
+      # Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
+      # vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
+      # checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
+      # (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
+      # before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
       # The result is one line in /var/log/runner-engine-update.log, which health reads.
       # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
       set -Eeuo pipefail
@@ -436,11 +433,11 @@ write_files:
       installed=()
       if command -v dnf >/dev/null 2>&1; then
         for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
-        upgrade() { dnf -y -q upgrade "${installed[@]}"; }
+        upgrade() { dnf -y -q upgrade "$@"; }
         pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
       elif command -v apt-get >/dev/null 2>&1; then
         for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
-        upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "${installed[@]}"; }
+        upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "$@"; }
         pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
       else
         note "FAIL no supported package manager"
@@ -452,6 +449,9 @@ write_files:
         note "OK nothing to upgrade (${installed[*]})"
         exit 0
       fi
+      # Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
+      docker_pkgs=(); runner_pkgs=()
+      for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
       if [[ "$DRY_RUN" == 1 ]]; then
         note "DRY-RUN would upgrade ${installed[*]}"
         exit 0
@@ -499,27 +499,34 @@ write_files:
         exit 0
       fi
 
-      if ! upgrade >>"$LOG" 2>&1; then
-        note "FAIL package upgrade failed, see ${LOG}"
+      # Docker packages first, runner stopped: their own Docker restart finds no job.
+      if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
+        note "FAIL Docker package upgrade failed, see ${LOG}"
         exit 1
       fi
       # A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
       # taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
       if [[ "$(runner_state)" != inactive ]]; then
         if ! stop_runner_wait; then
-          note "SKIP packages upgraded, but gitlab-runner is busy again; Docker not restarted (new version active after its next restart or reboot)"
+          note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
           exit 0
         fi
       fi
       if ! no_jobs; then
-        note "SKIP packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (new version active after its next restart or reboot)"
+        note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
         exit 0
       fi
-      systemctl restart docker
-      sleep 5
-      # The isolation rules live in iptables; reapply them after the Docker restart.
       bad=""
-      if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+      if (( ${#docker_pkgs[@]} )); then
+        systemctl restart docker
+        sleep 5
+        # The isolation rules live in iptables; reapply them after the Docker restart.
+        if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+      fi
+      if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
+        note "FAIL gitlab-runner upgrade failed, see ${LOG}"
+        exit 1
+      fi
       systemctl start gitlab-runner || true
       runner_stopped=0
       sleep 5

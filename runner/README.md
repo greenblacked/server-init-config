@@ -243,6 +243,7 @@ Runner-specific; the general table is in the [main README](../README.md#troubles
 | `Cannot connect to the Docker daemon` | `sudo systemctl status docker`, `sudo journalctl -u docker --since "-10min"`. |
 | Runner offline in GitLab | `systemctl is-active gitlab-runner`, `sudo gitlab-runner verify`; the Cloud Firewall may block outbound HTTPS. |
 | No logs in Grafana | `health` shows whether Loki and Alloy are ready; `sudo docker compose -f /opt/logging/docker-compose.yml logs --tail 50 alloy`. |
+| `reboot` or `systemctl restart gitlab-runner` takes very long | After the weekly engine update has run once, the runner stops gracefully (`KillSignal=SIGQUIT`, no stop timeout): a reboot or restart waits until running jobs finish, bounded only by the GitLab job timeout. To force it now: `sudo systemctl kill -s SIGTERM gitlab-runner` (running jobs are lost). |
 | Verdaccio restart-loops | The `docker0` IP changed (`bip` in `daemon.json`). Rerun `runner/update.sh` or `setup.sh --npm-cache`. |
 
 <details>

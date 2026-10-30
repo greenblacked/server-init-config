@@ -725,6 +725,13 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: 
   ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
   log "ufw: port ${SSH_PORT}/tcp allowed"
 fi
+# Add this port to the fail2ban sshd jail written by host-firewall.sh.
+JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"
+if [[ -f "$JAIL_FILE" ]] && grep -q '^port ' "$JAIL_FILE" && ! grep -E '^port ' "$JAIL_FILE" | tr -c '0-9\n' ' ' | tr ' ' '\n' | grep -qx "$SSH_PORT"; then
+  sed -i -E "s/^(port[[:space:]]*=[[:space:]]*.*)\$/\1,${SSH_PORT}/" "$JAIL_FILE"
+  systemctl reload fail2ban >/dev/null 2>&1 || systemctl restart fail2ban >/dev/null 2>&1 || true
+  log "fail2ban: sshd jail now also watches port ${SSH_PORT}"
+fi
 # Never write a config that leaves SSH only on a port the running host firewall drops.
 if [[ "$SSH_PORT" != 22 ]]; then
   if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then
@@ -2985,14 +2992,11 @@ chmod 644 "$R/runner/systemd/runner-disk-guard.timer"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
-# The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
-# without this they would never be updated. No job is started or killed by the upgrade: the runner is first stopped
-# gracefully (it takes no new job and lets a job that is already running finish; the unit gets KillSignal=SIGQUIT),
-# the job list is checked again, and only then are the packages upgraded. A package scriptlet may start the runner
-# again, so the runner and the job list are checked once more right before Docker is restarted. Docker is restarted,
-# then gitlab-runner is started; both must be active afterwards. If a job is still there, the runner is started again
-# and nothing is changed (or, after the package upgrade, only the Docker restart is left out).
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
+# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
+# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
+# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
+# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
 # The result is one line in /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
@@ -3027,11 +3031,11 @@ fi
 installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
-  upgrade() { dnf -y -q upgrade "${installed[@]}"; }
+  upgrade() { dnf -y -q upgrade "$@"; }
   pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
 elif command -v apt-get >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
-  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "${installed[@]}"; }
+  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "$@"; }
   pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
 else
   note "FAIL no supported package manager"
@@ -3043,6 +3047,9 @@ if ! pending; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
+# Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
+docker_pkgs=(); runner_pkgs=()
+for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
 if [[ "$DRY_RUN" == 1 ]]; then
   note "DRY-RUN would upgrade ${installed[*]}"
   exit 0
@@ -3090,27 +3097,34 @@ if ! no_jobs; then
   exit 0
 fi
 
-if ! upgrade >>"$LOG" 2>&1; then
-  note "FAIL package upgrade failed, see ${LOG}"
+# Docker packages first, runner stopped: their own Docker restart finds no job.
+if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
+  note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
 # A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
 # taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP packages upgraded, but gitlab-runner is busy again; Docker not restarted (new version active after its next restart or reboot)"
+    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
     exit 0
   fi
 fi
 if ! no_jobs; then
-  note "SKIP packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (new version active after its next restart or reboot)"
+  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
   exit 0
 fi
-systemctl restart docker
-sleep 5
-# The isolation rules live in iptables; reapply them after the Docker restart.
 bad=""
-if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+if (( ${#docker_pkgs[@]} )); then
+  systemctl restart docker
+  sleep 5
+  # The isolation rules live in iptables; reapply them after the Docker restart.
+  if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+fi
+if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
+  note "FAIL gitlab-runner upgrade failed, see ${LOG}"
+  exit 1
+fi
 systemctl start gitlab-runner || true
 runner_stopped=0
 sleep 5
@@ -3454,8 +3468,8 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 # Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
 # Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
 #
-# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T); runner/install/grafana-domain.sh
-# adds 80/443 when it publishes Grafana, and a rerun of this script keeps them. Services of the host
+# Nothing is opened except SSH (22 and every port sshd listens on) and, when Grafana is published on a domain
+# (override file exists), 80/443. Services of the host
 # (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
 # server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
@@ -3467,6 +3481,7 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 set -Eeuo pipefail
 
 JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"   # overridable for tests
+GRAFANA_OVERRIDE="${GRAFANA_OVERRIDE:-/opt/monitoring/docker-compose.override.yml}"   # exists once grafana-domain.sh ran
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -3476,6 +3491,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 [[ $EUID -eq 0 ]] || die "run as root"
+
+web_published() { [[ -f "$GRAFANA_OVERRIDE" ]]; }
 
 ssh_ports() {
   { echo 22; sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'; } | sort -un
@@ -3497,14 +3514,16 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p zone
+  local running=0 p zone set_zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
   # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
   if (( running )); then zone=$(firewall-cmd --get-default-zone) || die "cannot read the default zone"; else zone=$(firewall-offline-cmd --get-default-zone) || die "cannot read the default zone"; fi
+  # Running: the default zone is switched after the reload, so SSH is never refused in between.
+  set_zone=0
   if [[ "$zone" != public ]]; then
     log "firewalld: default zone was ${zone}, set to public"
-    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
+    if (( running )); then set_zone=1; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
   fi
   # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
   fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
@@ -3513,6 +3532,12 @@ firewalld_setup() {
     [[ "$p" == 22 ]] && continue
     fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || fw --zone=public --add-port="${p}/tcp" >/dev/null || die "cannot add port ${p}"
   done
+  if web_published; then
+    for p in http https; do
+      fw --zone=public --query-service="$p" >/dev/null 2>&1 || fw --zone=public --add-service="$p" >/dev/null || die "cannot add ${p} to the public zone"
+    done
+    log "firewalld: http and https kept open (Grafana is published on a domain)"
+  fi
   # Lockout guard: the saved rules must allow SSH before the firewall runs.
   fw --zone=public --query-service=ssh >/dev/null 2>&1 || die "ssh missing from the saved public zone; firewall left as it was"
   for p in $(ssh_ports); do
@@ -3521,6 +3546,7 @@ firewalld_setup() {
   done
   if (( running )); then firewall-cmd --reload >/dev/null || die "firewalld reload failed"; else systemctl enable --now firewalld || die "firewalld did not start"; fi
   systemctl enable firewalld >/dev/null 2>&1 || true
+  if (( set_zone )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
   if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then
     systemctl stop firewalld
     die "ssh not allowed after start; firewalld stopped"
@@ -3560,6 +3586,10 @@ ufw_setup() {
   o=$(ufw status 2>/dev/null) || true
   if grep -q '^Status: active' <<<"$o"; then was_active=1; fi
   for p in $(ssh_ports); do ufw allow "${p}/tcp" >/dev/null || die "cannot allow ${p}/tcp"; done
+  if web_published; then
+    ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null || die "cannot allow 80/443 in ufw"
+    log "ufw: 80/tcp and 443/tcp kept open (Grafana is published on a domain)"
+  fi
   # Lockout guard: every SSH port must be in the saved rules before ufw is enabled.
   o=$(ufw show added 2>/dev/null) || true
   for p in $(ssh_ports); do
@@ -8667,6 +8697,13 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: 
   ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
   log "ufw: port ${SSH_PORT}/tcp allowed"
 fi
+# Add this port to the fail2ban sshd jail written by host-firewall.sh.
+JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"
+if [[ -f "$JAIL_FILE" ]] && grep -q '^port ' "$JAIL_FILE" && ! grep -E '^port ' "$JAIL_FILE" | tr -c '0-9\n' ' ' | tr ' ' '\n' | grep -qx "$SSH_PORT"; then
+  sed -i -E "s/^(port[[:space:]]*=[[:space:]]*.*)\$/\1,${SSH_PORT}/" "$JAIL_FILE"
+  systemctl reload fail2ban >/dev/null 2>&1 || systemctl restart fail2ban >/dev/null 2>&1 || true
+  log "fail2ban: sshd jail now also watches port ${SSH_PORT}"
+fi
 # Never write a config that leaves SSH only on a port the running host firewall drops.
 if [[ "$SSH_PORT" != 22 ]]; then
   if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then
@@ -9069,8 +9106,8 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 # Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
 # Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
 #
-# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T); runner/install/grafana-domain.sh
-# adds 80/443 when it publishes Grafana, and a rerun of this script keeps them. Services of the host
+# Nothing is opened except SSH (22 and every port sshd listens on) and, when Grafana is published on a domain
+# (override file exists), 80/443. Services of the host
 # (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
 # server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
@@ -9082,6 +9119,7 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 set -Eeuo pipefail
 
 JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"   # overridable for tests
+GRAFANA_OVERRIDE="${GRAFANA_OVERRIDE:-/opt/monitoring/docker-compose.override.yml}"   # exists once grafana-domain.sh ran
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -9091,6 +9129,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 [[ $EUID -eq 0 ]] || die "run as root"
+
+web_published() { [[ -f "$GRAFANA_OVERRIDE" ]]; }
 
 ssh_ports() {
   { echo 22; sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'; } | sort -un
@@ -9112,14 +9152,16 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p zone
+  local running=0 p zone set_zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
   # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
   if (( running )); then zone=$(firewall-cmd --get-default-zone) || die "cannot read the default zone"; else zone=$(firewall-offline-cmd --get-default-zone) || die "cannot read the default zone"; fi
+  # Running: the default zone is switched after the reload, so SSH is never refused in between.
+  set_zone=0
   if [[ "$zone" != public ]]; then
     log "firewalld: default zone was ${zone}, set to public"
-    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
+    if (( running )); then set_zone=1; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
   fi
   # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
   fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
@@ -9128,6 +9170,12 @@ firewalld_setup() {
     [[ "$p" == 22 ]] && continue
     fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || fw --zone=public --add-port="${p}/tcp" >/dev/null || die "cannot add port ${p}"
   done
+  if web_published; then
+    for p in http https; do
+      fw --zone=public --query-service="$p" >/dev/null 2>&1 || fw --zone=public --add-service="$p" >/dev/null || die "cannot add ${p} to the public zone"
+    done
+    log "firewalld: http and https kept open (Grafana is published on a domain)"
+  fi
   # Lockout guard: the saved rules must allow SSH before the firewall runs.
   fw --zone=public --query-service=ssh >/dev/null 2>&1 || die "ssh missing from the saved public zone; firewall left as it was"
   for p in $(ssh_ports); do
@@ -9136,6 +9184,7 @@ firewalld_setup() {
   done
   if (( running )); then firewall-cmd --reload >/dev/null || die "firewalld reload failed"; else systemctl enable --now firewalld || die "firewalld did not start"; fi
   systemctl enable firewalld >/dev/null 2>&1 || true
+  if (( set_zone )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
   if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then
     systemctl stop firewalld
     die "ssh not allowed after start; firewalld stopped"
@@ -9175,6 +9224,10 @@ ufw_setup() {
   o=$(ufw status 2>/dev/null) || true
   if grep -q '^Status: active' <<<"$o"; then was_active=1; fi
   for p in $(ssh_ports); do ufw allow "${p}/tcp" >/dev/null || die "cannot allow ${p}/tcp"; done
+  if web_published; then
+    ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null || die "cannot allow 80/443 in ufw"
+    log "ufw: 80/tcp and 443/tcp kept open (Grafana is published on a domain)"
+  fi
   # Lockout guard: every SSH port must be in the saved rules before ufw is enabled.
   o=$(ufw show added 2>/dev/null) || true
   for p in $(ssh_ports); do
@@ -10801,6 +10854,13 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: 
   ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
   log "ufw: port ${SSH_PORT}/tcp allowed"
 fi
+# Add this port to the fail2ban sshd jail written by host-firewall.sh.
+JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"
+if [[ -f "$JAIL_FILE" ]] && grep -q '^port ' "$JAIL_FILE" && ! grep -E '^port ' "$JAIL_FILE" | tr -c '0-9\n' ' ' | tr ' ' '\n' | grep -qx "$SSH_PORT"; then
+  sed -i -E "s/^(port[[:space:]]*=[[:space:]]*.*)\$/\1,${SSH_PORT}/" "$JAIL_FILE"
+  systemctl reload fail2ban >/dev/null 2>&1 || systemctl restart fail2ban >/dev/null 2>&1 || true
+  log "fail2ban: sshd jail now also watches port ${SSH_PORT}"
+fi
 # Never write a config that leaves SSH only on a port the running host firewall drops.
 if [[ "$SSH_PORT" != 22 ]]; then
   if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then
@@ -11017,14 +11077,11 @@ chmod 755 "$R/runner/scripts/runner-disk-guard.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
-# The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
-# without this they would never be updated. No job is started or killed by the upgrade: the runner is first stopped
-# gracefully (it takes no new job and lets a job that is already running finish; the unit gets KillSignal=SIGQUIT),
-# the job list is checked again, and only then are the packages upgraded. A package scriptlet may start the runner
-# again, so the runner and the job list are checked once more right before Docker is restarted. Docker is restarted,
-# then gitlab-runner is started; both must be active afterwards. If a job is still there, the runner is started again
-# and nothing is changed (or, after the package upgrade, only the Docker restart is left out).
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
+# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
+# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
+# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
+# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
 # The result is one line in /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
@@ -11059,11 +11116,11 @@ fi
 installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
-  upgrade() { dnf -y -q upgrade "${installed[@]}"; }
+  upgrade() { dnf -y -q upgrade "$@"; }
   pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
 elif command -v apt-get >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
-  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "${installed[@]}"; }
+  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "$@"; }
   pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
 else
   note "FAIL no supported package manager"
@@ -11075,6 +11132,9 @@ if ! pending; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
+# Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
+docker_pkgs=(); runner_pkgs=()
+for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
 if [[ "$DRY_RUN" == 1 ]]; then
   note "DRY-RUN would upgrade ${installed[*]}"
   exit 0
@@ -11122,27 +11182,34 @@ if ! no_jobs; then
   exit 0
 fi
 
-if ! upgrade >>"$LOG" 2>&1; then
-  note "FAIL package upgrade failed, see ${LOG}"
+# Docker packages first, runner stopped: their own Docker restart finds no job.
+if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
+  note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
 # A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
 # taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP packages upgraded, but gitlab-runner is busy again; Docker not restarted (new version active after its next restart or reboot)"
+    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
     exit 0
   fi
 fi
 if ! no_jobs; then
-  note "SKIP packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (new version active after its next restart or reboot)"
+  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
   exit 0
 fi
-systemctl restart docker
-sleep 5
-# The isolation rules live in iptables; reapply them after the Docker restart.
 bad=""
-if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+if (( ${#docker_pkgs[@]} )); then
+  systemctl restart docker
+  sleep 5
+  # The isolation rules live in iptables; reapply them after the Docker restart.
+  if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+fi
+if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
+  note "FAIL gitlab-runner upgrade failed, see ${LOG}"
+  exit 1
+fi
 systemctl start gitlab-runner || true
 runner_stopped=0
 sleep 5
@@ -13885,8 +13952,8 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 # Host firewall and fail2ban for the runner host: firewalld on Rocky/Alma/CentOS, ufw on Debian/Ubuntu.
 # Self-contained (no lib.sh) so cloud-init can embed it. Safe to rerun.
 #
-# Nothing is opened except SSH: port 22 and every other port sshd listens on (sshd -T); runner/install/grafana-domain.sh
-# adds 80/443 when it publishes Grafana, and a rerun of this script keeps them. Services of the host
+# Nothing is opened except SSH (22 and every port sshd listens on) and, when Grafana is published on a domain
+# (override file exists), 80/443. Services of the host
 # (monitoring, logging, caches) listen on 127.0.0.1 or the docker0 IP and need no rule. Lockout guard, as in
 # server/server-init-*.sh: the firewall is only started or enabled when SSH is in the saved rules, and it is
 # stopped again when SSH is not allowed in the running rules. Also open the same ports in the Hetzner Cloud Firewall.
@@ -13898,6 +13965,7 @@ cat > "$R/runner/install/host-firewall.sh" <<'__SIC_EOF__'
 set -Eeuo pipefail
 
 JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"   # overridable for tests
+GRAFANA_OVERRIDE="${GRAFANA_OVERRIDE:-/opt/monitoring/docker-compose.override.yml}"   # exists once grafana-domain.sh ran
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -13907,6 +13975,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 [[ $EUID -eq 0 ]] || die "run as root"
+
+web_published() { [[ -f "$GRAFANA_OVERRIDE" ]]; }
 
 ssh_ports() {
   { echo 22; sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'; } | sort -un
@@ -13928,14 +13998,16 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p zone
+  local running=0 p zone set_zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
   # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
   if (( running )); then zone=$(firewall-cmd --get-default-zone) || die "cannot read the default zone"; else zone=$(firewall-offline-cmd --get-default-zone) || die "cannot read the default zone"; fi
+  # Running: the default zone is switched after the reload, so SSH is never refused in between.
+  set_zone=0
   if [[ "$zone" != public ]]; then
     log "firewalld: default zone was ${zone}, set to public"
-    if (( running )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
+    if (( running )); then set_zone=1; else firewall-offline-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
   fi
   # Permanent rules are written first (offline when firewalld is stopped), then the daemon is started or reloaded.
   fw() { if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi; }
@@ -13944,6 +14016,12 @@ firewalld_setup() {
     [[ "$p" == 22 ]] && continue
     fw --zone=public --query-port="${p}/tcp" >/dev/null 2>&1 || fw --zone=public --add-port="${p}/tcp" >/dev/null || die "cannot add port ${p}"
   done
+  if web_published; then
+    for p in http https; do
+      fw --zone=public --query-service="$p" >/dev/null 2>&1 || fw --zone=public --add-service="$p" >/dev/null || die "cannot add ${p} to the public zone"
+    done
+    log "firewalld: http and https kept open (Grafana is published on a domain)"
+  fi
   # Lockout guard: the saved rules must allow SSH before the firewall runs.
   fw --zone=public --query-service=ssh >/dev/null 2>&1 || die "ssh missing from the saved public zone; firewall left as it was"
   for p in $(ssh_ports); do
@@ -13952,6 +14030,7 @@ firewalld_setup() {
   done
   if (( running )); then firewall-cmd --reload >/dev/null || die "firewalld reload failed"; else systemctl enable --now firewalld || die "firewalld did not start"; fi
   systemctl enable firewalld >/dev/null 2>&1 || true
+  if (( set_zone )); then firewall-cmd --set-default-zone=public >/dev/null || die "cannot set the default zone"; fi
   if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then
     systemctl stop firewalld
     die "ssh not allowed after start; firewalld stopped"
@@ -13991,6 +14070,10 @@ ufw_setup() {
   o=$(ufw status 2>/dev/null) || true
   if grep -q '^Status: active' <<<"$o"; then was_active=1; fi
   for p in $(ssh_ports); do ufw allow "${p}/tcp" >/dev/null || die "cannot allow ${p}/tcp"; done
+  if web_published; then
+    ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null || die "cannot allow 80/443 in ufw"
+    log "ufw: 80/tcp and 443/tcp kept open (Grafana is published on a domain)"
+  fi
   # Lockout guard: every SSH port must be in the saved rules before ufw is enabled.
   o=$(ufw show added 2>/dev/null) || true
   for p in $(ssh_ports); do
@@ -15617,6 +15700,13 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: 
   ufw allow "${SSH_PORT}/tcp" >/dev/null || die "cannot allow ${SSH_PORT}/tcp in ufw"
   log "ufw: port ${SSH_PORT}/tcp allowed"
 fi
+# Add this port to the fail2ban sshd jail written by host-firewall.sh.
+JAIL_FILE="${JAIL_FILE:-/etc/fail2ban/jail.d/50-sshd.local}"
+if [[ -f "$JAIL_FILE" ]] && grep -q '^port ' "$JAIL_FILE" && ! grep -E '^port ' "$JAIL_FILE" | tr -c '0-9\n' ' ' | tr ' ' '\n' | grep -qx "$SSH_PORT"; then
+  sed -i -E "s/^(port[[:space:]]*=[[:space:]]*.*)\$/\1,${SSH_PORT}/" "$JAIL_FILE"
+  systemctl reload fail2ban >/dev/null 2>&1 || systemctl restart fail2ban >/dev/null 2>&1 || true
+  log "fail2ban: sshd jail now also watches port ${SSH_PORT}"
+fi
 # Never write a config that leaves SSH only on a port the running host firewall drops.
 if [[ "$SSH_PORT" != 22 ]]; then
   if systemctl is-active --quiet firewalld 2>/dev/null && ! firewall-cmd --query-port="${SSH_PORT}/tcp" >/dev/null 2>&1; then
@@ -15833,14 +15923,11 @@ chmod 755 "$R/runner/scripts/runner-disk-guard.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs.
-# The distro's automatic updates (dnf-automatic security only, unattended-upgrades) skip these vendor repos, so
-# without this they would never be updated. No job is started or killed by the upgrade: the runner is first stopped
-# gracefully (it takes no new job and lets a job that is already running finish; the unit gets KillSignal=SIGQUIT),
-# the job list is checked again, and only then are the packages upgraded. A package scriptlet may start the runner
-# again, so the runner and the job list are checked once more right before Docker is restarted. Docker is restarted,
-# then gitlab-runner is started; both must be active afterwards. If a job is still there, the runner is started again
-# and nothing is changed (or, after the package upgrade, only the Docker restart is left out).
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
+# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
+# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
+# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
+# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
 # The result is one line in /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
@@ -15875,11 +15962,11 @@ fi
 installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
-  upgrade() { dnf -y -q upgrade "${installed[@]}"; }
+  upgrade() { dnf -y -q upgrade "$@"; }
   pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
 elif command -v apt-get >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
-  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "${installed[@]}"; }
+  upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "$@"; }
   pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
 else
   note "FAIL no supported package manager"
@@ -15891,6 +15978,9 @@ if ! pending; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
+# Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
+docker_pkgs=(); runner_pkgs=()
+for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
 if [[ "$DRY_RUN" == 1 ]]; then
   note "DRY-RUN would upgrade ${installed[*]}"
   exit 0
@@ -15938,27 +16028,34 @@ if ! no_jobs; then
   exit 0
 fi
 
-if ! upgrade >>"$LOG" 2>&1; then
-  note "FAIL package upgrade failed, see ${LOG}"
+# Docker packages first, runner stopped: their own Docker restart finds no job.
+if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
+  note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
 # A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
 # taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP packages upgraded, but gitlab-runner is busy again; Docker not restarted (new version active after its next restart or reboot)"
+    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
     exit 0
   fi
 fi
 if ! no_jobs; then
-  note "SKIP packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (new version active after its next restart or reboot)"
+  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
   exit 0
 fi
-systemctl restart docker
-sleep 5
-# The isolation rules live in iptables; reapply them after the Docker restart.
 bad=""
-if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+if (( ${#docker_pkgs[@]} )); then
+  systemctl restart docker
+  sleep 5
+  # The isolation rules live in iptables; reapply them after the Docker restart.
+  if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+fi
+if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
+  note "FAIL gitlab-runner upgrade failed, see ${LOG}"
+  exit 1
+fi
 systemctl start gitlab-runner || true
 runner_stopped=0
 sleep 5
