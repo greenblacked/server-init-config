@@ -9,7 +9,7 @@ lock you out. Every step is checked before it changes anything, so reruns are sa
 
 Shell: 100000-line history with timestamps, shared between sessions; `Ctrl+R` searches it with fzf and `Ctrl+T` finds files
 (`/etc/profile.d/90-server-shell.sh`, interactive bash only; log in again to get it). The text is the same as
-`scripts/shell-history.sh`; `tools/test-cloud-init.py` checks that they match.
+`common/shell-history.sh`; `tools/test-cloud-init.py` checks that they match.
 
 | Script | OS |
 |---|---|
@@ -150,10 +150,10 @@ root can see it only inside the curl process's stdin during the call. A failed n
 
 | File | OS |
 |---|---|
-| `cloud-init/server-fedora.yaml` | Fedora 44 |
-| `cloud-init/server-el10.yaml` | CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 |
-| `cloud-init/server-debian.yaml` | Ubuntu 26.04, Ubuntu 24.04, Debian 13 |
-| `cloud-init/server-opensuse.yaml` | openSUSE Leap 16.0 |
+| `server/cloud-init/server-fedora.yaml` | Fedora 44 |
+| `server/cloud-init/server-el10.yaml` | CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 |
+| `server/cloud-init/server-debian.yaml` | Ubuntu 26.04, Ubuntu 24.04, Debian 13 |
+| `server/cloud-init/server-opensuse.yaml` | openSUSE Leap 16.0 |
 
 Paste the file for the server's OS into Hetzner Console, **Cloud config**, when you create the server. It is
 user-data for cloud-init, not shell commands: never paste it into a terminal. If you need ports or other
@@ -246,9 +246,9 @@ scanning or attacking third-party systems violates their terms: check Hetzner's 
 against a host that is not yours.
 
 ```bash
-sudo install/security-tools.sh                  # default: --audit --network --scan
-sudo install/security-tools.sh --audit --network --scan --kali
-sudo install/security-tools.sh --aide --clamav  # opt-in tools; --help lists all and what they cost
+sudo common/security-tools.sh                  # default: --audit --network --scan
+sudo common/security-tools.sh --audit --network --scan --kali
+sudo common/security-tools.sh --aide --clamav  # opt-in tools; --help lists all and what they cost
 ```
 
 | Group | Installs |

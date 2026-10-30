@@ -1,0 +1,60 @@
+name: ai
+
+# Lightweight local AI: Ollama (model server) + Open WebUI (chat UI), CPU only.
+# Sized for a 2 vCPU / 4 GB server. Open WebUI listens on 127.0.0.1 only and is reached
+# through an SSH tunnel; Ollama publishes no port at all. Installed by server/install-ai.sh.
+
+services:
+  ollama:
+    image: ollama/ollama:0.40.12
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: "10m"          # unload the model from RAM after 10 min idle
+      OLLAMA_NUM_PARALLEL: "1"          # one request at a time keeps memory flat
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    volumes:
+      - ollama:/root/.ollama
+    mem_limit: 2g
+    cpus: 1.5                           # leave headroom for sshd and the OS
+    security_opt:
+      - no-new-privileges:true
+    networks: [ai]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.12.4
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY must be set in .env}"
+      # Only seeds the first-start value; Open WebUI then keeps it in its database. The first account
+      # can always register and becomes admin; Open WebUI then closes sign-ups itself.
+      ENABLE_SIGNUP: "${ENABLE_SIGNUP:-false}"
+      ENABLE_OPENAI_API: "false"                # local models only
+      ANONYMIZED_TELEMETRY: "false"
+      DO_NOT_TRACK: "true"
+      SCARF_NO_ANALYTICS: "true"
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - "127.0.0.1:${UI_PORT:-3080}:8080"  # never 0.0.0.0; 3000 is Grafana's, set UI_PORT if 3080 is taken
+    mem_limit: 1200m
+    cpus: 0.5                           # the UI is light; ollama 1.5 + this = the 2 vCPUs
+    security_opt:
+      - no-new-privileges:true
+    networks: [ai]
+
+volumes:
+  ollama:
+  open-webui:
+
+networks:
+  ai:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render gitlab-runner/COMMANDS.md: self-contained copy-paste blocks, one per component.
+"""Render runner/COMMANDS.md: self-contained copy-paste blocks, one per component.
 
 Each block recreates the files it needs under /root/server-init-config with heredocs and runs the
 installer, so it works on a server that has no copy of the repo. Interactive installers run on the
@@ -21,8 +21,8 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "gitlab-runner" / "COMMANDS.md"
-INIT = ROOT / "gitlab-runner" / "cloud-init-rocky.yaml"
+OUT = ROOT / "runner" / "COMMANDS.md"
+INIT = ROOT / "runner" / "cloud-init" / "rocky-clean.yaml"
 DEST = "/root/server-init-config"
 DELIM = "__SIC_EOF__"
 
@@ -41,7 +41,7 @@ class Block:
 
 
 # Never copied onto the runner host: the separate AI server installs it (its compose file is not embedded either).
-EXCLUDE = {"install/ai.sh"}
+EXCLUDE = {"server/install-ai.sh", "common/README.md"}
 
 
 def expand(paths: list[str]) -> list[str]:
@@ -58,21 +58,21 @@ def expand(paths: list[str]) -> list[str]:
     return [f for f in out if not (f in seen or seen.add(f))]
 
 
-TOOLS = ["install/host-tools.sh", "scripts/health", "scripts/runner-weekly-cleanup.sh", "scripts/runner-disk-guard.sh",
-         "systemd/runner-weekly-cleanup.service", "systemd/runner-weekly-cleanup.timer",
-         "systemd/runner-disk-guard.service", "systemd/runner-disk-guard.timer"]
-REGISTRY = ["install/registry-cache.sh", "registry-cache"]
-MONITORING = ["install/monitoring.sh", "monitoring/docker-compose.yml", "monitoring/env.example",
-              "monitoring/prometheus", "monitoring/grafana"]
-LOGGING = ["install/logging.sh", "logging"]
-NPM = ["install/npm-cache.sh", "npm-cache"]
-PREWARM = ["install/image-prewarm.sh", "scripts/ci-image-prewarm.sh",
-           "systemd/ci-image-prewarm.service", "systemd/ci-image-prewarm.timer"]
+TOOLS = ["runner/install/host-tools.sh", "common/health", "runner/scripts/runner-weekly-cleanup.sh", "runner/scripts/runner-disk-guard.sh",
+         "runner/systemd/runner-weekly-cleanup.service", "runner/systemd/runner-weekly-cleanup.timer",
+         "runner/systemd/runner-disk-guard.service", "runner/systemd/runner-disk-guard.timer"]
+REGISTRY = ["runner/install/registry-cache.sh", "runner/stacks/registry-cache"]
+MONITORING = ["runner/install/monitoring.sh", "runner/stacks/monitoring/docker-compose.yml", "runner/stacks/monitoring/env.example",
+              "runner/stacks/monitoring/prometheus", "runner/stacks/monitoring/grafana"]
+LOGGING = ["runner/install/logging.sh", "runner/stacks/logging"]
+NPM = ["runner/install/npm-cache.sh", "runner/stacks/npm-cache"]
+PREWARM = ["runner/install/image-prewarm.sh", "runner/scripts/ci-image-prewarm.sh",
+           "runner/systemd/ci-image-prewarm.service", "runner/systemd/ci-image-prewarm.timer"]
 # Optional security tooling: has its own block, left out of the update and everything-at-once blocks to keep them small.
-SECURITY = ["install/security-tools.sh", "scripts/kali", "scripts/security-audit-run.sh", "security/kali/Dockerfile",
-            "systemd/security-audit.service", "systemd/security-audit.timer",
-            "systemd/security-freshclam.service", "systemd/security-freshclam.timer"]
-EVERYTHING = ["install", "scripts", "systemd", "monitoring", "logging", "registry-cache", "npm-cache"]
+SECURITY = ["common/security-tools.sh", "common/kali", "common/security-audit-run.sh", "common/security/kali/Dockerfile",
+            "common/systemd/security-audit.service", "common/systemd/security-audit.timer",
+            "common/systemd/security-freshclam.service", "common/systemd/security-freshclam.timer"]
+EVERYTHING = ["runner/install", "runner/scripts", "runner/systemd", "runner/stacks", "common"]
 
 BLOCKS = [
     Block("users", "Users: admin, service accounts, SSH hardening",
@@ -80,70 +80,70 @@ BLOCKS = [
           "root, the service accounts `gitlab-runner` (the runner service then runs as it) and `monitoring` (runs the "
           "monitoring and logging containers), and the SSH drop-in: keys only, only the `ssh-users` group. Root keeps SSH by key "
           "until the [Lock root SSH](#lock-root) block. Run it first; safe to rerun.",
-          ["install/users.sh"], run=["install/users.sh"]),
+          ["runner/install/users.sh"], run=["runner/install/users.sh"]),
     Block("packages", "Admin tools: htop, btop, ncdu, iotop and others",
           "htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dig, lsof, "
           "sysstat (`sar`), tcpdump, traceroute, nc, jq, git, tmux, mc, fd, rg, fzf, plus the shell aliases, shell history with fzf Ctrl+R and tmux config. "
           "For a server created with an older init; safe to rerun.",
-          ["install/admin-tools.sh", "scripts/shell-history.sh"], run=["install/admin-tools.sh"]),
+          ["common/admin-tools.sh", "common/shell-history.sh"], run=["common/admin-tools.sh"]),
     Block("tools", "Health + cleanup: health, weekly cleanup, disk guard",
           "Installs `/usr/local/bin/health` and the cleanup: weekly run on Monday 03:30 (Docker images, build cache, "
           "runner caches, old builds, packages, journal, temp files) plus the disk guard, which runs an emergency "
           "cleanup every 30 minutes when the disk is 85% full. Ends with a dry run of the cleanup.",
-          TOOLS, run=["install/host-tools.sh"]),
+          TOOLS, run=["runner/install/host-tools.sh"]),
     Block("security", "Security tools: audit, network, scan",
           "Optional. Tools to test and audit your own server; use them only on systems you own or are authorized to test. "
           "Default: lynis, OpenSCAP, auditd (small ruleset), ssh-audit, testssl.sh, nmap and other network tools, and trivy, gitleaks, "
           "hadolint, cosign, osv-scanner, trufflehog, dockle as SHA256-verified release binaries. Options for the installer "
-          "(`bash /root/server-init-config/install/security-tools.sh --help`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, "
+          "(`bash /root/server-init-config/common/security-tools.sh --help`): `--aide`, `--clamav`, `--rkhunter`, `--chkrootkit`, "
           "`--grype`, `--syft`, `--k8s`, `--kali`, `--audit-timer`.",
-          SECURITY, run=["install/security-tools.sh"]),
+          SECURITY, run=["common/security-tools.sh"]),
     Block("register", "Register the runner",
           "Asks for the `glrt-` token (GitLab: Settings > CI/CD > Runners > New runner). Change `DESCRIPTION` if you like.",
-          ["install/register-runner.sh"], interactive=["sudo DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh"]),
+          ["runner/install/register-runner.sh"], interactive=["sudo DESCRIPTION=hetzner-cax11 bash {d}/runner/install/register-runner.sh"]),
     Block("registry-cache", "Docker Hub pull-through cache",
           "Cache on `127.0.0.1:5000`, set as the Docker mirror. Restarts Docker: run it while no jobs are running.",
-          REGISTRY, run=["install/registry-cache.sh"]),
+          REGISTRY, run=["runner/install/registry-cache.sh"]),
     Block("monitoring", "Monitoring: Prometheus, node_exporter, Grafana",
           "All on `127.0.0.1`. Grafana password: `grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env`.",
-          MONITORING, run=["install/monitoring.sh"]),
+          MONITORING, run=["runner/install/monitoring.sh"]),
     Block("logging", "Logging: Loki + Grafana Alloy",
           "Container logs (not CI jobs) and the journal, 7 days. Run after monitoring so Grafana gets the Loki datasource.",
-          LOGGING, run=["install/logging.sh"]),
+          LOGGING, run=["runner/install/logging.sh"]),
     Block("npm-cache", "npm cache (Verdaccio)",
-          "Needs a registered runner. Points `npm` and `yarn` in jobs at the cache. Run it while no jobs are running. Verdaccio binds to the docker0 IP: if it changes (`bip` in daemon.json), rerun this block or `install/update.sh`.",
-          NPM, run=["install/npm-cache.sh"]),
+          "Needs a registered runner. Points `npm` and `yarn` in jobs at the cache. Run it while no jobs are running. Verdaccio binds to the docker0 IP: if it changes (`bip` in daemon.json), rerun this block or `runner/install/update.sh`.",
+          NPM, run=["runner/install/npm-cache.sh"]),
     Block("shared-cache", "Shared cache /srv/ci-cache",
           "Needs a registered runner. Mounts `/srv/ci-cache` into every job for npm and Sonar. Trusted projects only.",
-          ["install/shared-cache.sh"], run=["install/shared-cache.sh"]),
+          ["runner/install/shared-cache.sh"], run=["runner/install/shared-cache.sh"]),
     Block("prewarm", "Image prewarm",
           "Asks for the path of one image (copy icon in Container Registry) and a deploy token with `read_registry`.",
-          PREWARM, interactive=["sudo bash {d}/install/image-prewarm.sh"]),
+          PREWARM, interactive=["sudo bash {d}/runner/install/image-prewarm.sh"]),
     Block("grafana-domain", "Grafana on a domain (HTTPS via Caddy)",
           "First: A record to the server IP, ports 80/443 open in the Hetzner Firewall. "
           "Replace `grafana.example.com` and `you@example.com` on the last line with your domain and email.",
-          ["install/grafana-domain.sh", "monitoring/caddy/Caddyfile.tmpl"],
-          interactive=["sudo DOMAIN=grafana.example.com ACME_EMAIL=you@example.com bash {d}/install/grafana-domain.sh"]),
+          ["runner/install/grafana-domain.sh", "runner/stacks/monitoring/caddy/Caddyfile.tmpl"],
+          interactive=["sudo DOMAIN=grafana.example.com ACME_EMAIL=you@example.com bash {d}/runner/install/grafana-domain.sh"]),
     Block("selinux", "SELinux enforcing",
           "Switches SELinux to enforcing now and after reboot, then restarts and checks Docker and the runner. Refuses to run while CI jobs are running.",
-          ["install/selinux-enforcing.sh"], run=["install/selinux-enforcing.sh"]),
+          ["runner/install/selinux-enforcing.sh"], run=["runner/install/selinux-enforcing.sh"]),
     Block("lock-root", "Lock root SSH",
           "Only after this works from your laptop: `ssh ops@SERVER_IP 'sudo -n true && echo ok'`. Sets "
           "`PermitRootLogin no`. Refuses to run while the admin has no SSH key. Undo, from a "
-          "session that is still open: `sudo bash /root/server-init-config/install/users.sh --unlock-root`.",
-          ["install/users.sh", "install/lock-root.sh"], run=["install/lock-root.sh"]),
+          "session that is still open: `sudo bash /root/server-init-config/runner/install/users.sh --unlock-root`.",
+          ["runner/install/users.sh", "runner/install/lock-root.sh"], run=["runner/install/lock-root.sh"]),
     Block("update", "Update everything installed",
           "Writes the current repo files and runs `update.sh`: syncs what is installed, backs up and restores on failure. "
           "Add `--dry-run` to the last line to preview, `--os` to upgrade packages too.",
-          EVERYTHING, interactive=["sudo bash {d}/install/update.sh"], skip=frozenset(SECURITY)),
+          EVERYTHING, interactive=["sudo bash {d}/runner/install/update.sh"], skip=frozenset(SECURITY)),
     Block("all", "Everything at once",
           "Users, admin tools, host tools, Docker Hub cache, monitoring and logging are installed first; the last line asks for the "
           "runner token and then sets up the npm and shared caches. Root SSH stays open: lock it with the Lock root SSH block "
           "after the admin login works.",
           EVERYTHING,
-          run=["install/users.sh", "install/admin-tools.sh", "install/host-tools.sh", "install/registry-cache.sh", "install/monitoring.sh", "install/logging.sh"],
-          interactive=[("sudo DESCRIPTION=hetzner-cax11 bash {d}/install/register-runner.sh && "
-                        "sudo bash {d}/install/npm-cache.sh && sudo bash {d}/install/shared-cache.sh && "
+          run=["runner/install/users.sh", "common/admin-tools.sh", "runner/install/host-tools.sh", "runner/install/registry-cache.sh", "runner/install/monitoring.sh", "runner/install/logging.sh"],
+          interactive=[("sudo DESCRIPTION=hetzner-cax11 bash {d}/runner/install/register-runner.sh && "
+                        "sudo bash {d}/runner/install/npm-cache.sh && sudo bash {d}/runner/install/shared-cache.sh && "
                         "sudo /usr/local/bin/health -q")],
           skip=frozenset(SECURITY)),
 ]
@@ -153,13 +153,13 @@ def file_heredoc(rel: str) -> list[str]:
     text = (ROOT / rel).read_text(encoding="utf-8")
     if any(line in (DELIM, "INSTALL") for line in text.splitlines()):
         raise ValueError(f"{rel} contains a heredoc delimiter line ({DELIM} or INSTALL)")
-    mode = "755" if rel.endswith(".sh") or rel == "scripts/health" else "644"
+    mode = "755" if rel.endswith(".sh") or rel == "common/health" else "644"
     return [f'install -d "$R/{Path(rel).parent.as_posix()}"',
             f"cat > \"$R/{rel}\" <<'{DELIM}'", text.rstrip("\n"), DELIM, f'chmod {mode} "$R/{rel}"']
 
 
 def render_block(b: Block) -> str:
-    files = [f for f in expand(["install/lib.sh", *b.files]) if f not in b.skip]
+    files = [f for f in expand(["common/lib.sh", *b.files]) if f not in b.skip]
     lines = ["sudo bash <<'INSTALL'", "set -Eeuo pipefail", f"R={DEST}", ""]
     for rel in files:
         lines += file_heredoc(rel) + [""]
@@ -200,7 +200,7 @@ def render_base() -> str:
         lines.append(line)
     lines += ["", "systemctl is-active docker gitlab-runner", "INSTALL"]
     return ('<a id="base"></a>\n## Base host: Docker, GitLab Runner, tools\n\n'
-            "The same steps as `cloud-init-rocky.yaml`, for a Rocky server created without it. Skip this if you used the init. "
+            "The same steps as `rocky-clean.yaml`, for a Rocky server created without it. Skip this if you used the init. "
             "Paste it as root (that is how a server without the init is reached). It does not create the `ops` admin: "
             "paste the [Users](#users) block next. Root SSH stays open until the [Lock root SSH](#lock-root) block.\n\n"
             "````bash\n" + "\n".join(lines) + "\n````\n")

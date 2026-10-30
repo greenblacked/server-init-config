@@ -1,7 +1,7 @@
 # Never commit secrets or generated runtime files
 .env
 *.env
-!monitoring/env.example
+!runner/stacks/monitoring/env.example
 *.bak.*
 config.toml
 *.log

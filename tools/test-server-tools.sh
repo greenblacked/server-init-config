@@ -241,7 +241,7 @@ unset SERVER_SBIN SERVER_BIN; rm -f "$T/sbin"/*
 
 # ---------------------------------------------------------------- health --brief
 section "health --brief"
-H="$ROOT/scripts/health"
+H="$ROOT/common/health"
 export HEALTH_BRIEF_DIR="$T/hb" SERVER_UPDATE_STATE="$T/ustate" SERVER_CLEANUP_STATE="$T/cstate" SERVER_SBIN="$T/sbin"
 mkdir -p "$T/hb" "$T/ustate" "$T/cstate"
 now=$(date +%s)

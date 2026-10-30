@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# kali: Kali Linux tools in a Docker container, nothing offensive is installed on the host.
+# Use only against systems you own or are authorized to test.
+set -Eeuo pipefail
+
+IMAGE="${KALI_IMAGE_NAME:-local/kali-tools}"
+VOLUME="${KALI_VOLUME:-kali-home}"
+HOME_IN=/home/kali
+
+usage() {
+  cat <<'USAGE'
+Usage: kali [--host-net] [COMMAND [ARGS...]]
+       kali update | remove [-y] | --help
+
+Runs Kali Linux (kalilinux/kali-rolling, headless tool set) in a container that is deleted on exit.
+Your files in /home/kali live in the Docker volume "kali-home" and survive between runs.
+
+  kali                       interactive shell
+  kali nmap -sV 203.0.113.5  run one command (use sudo inside for raw-socket scans: kali sudo nmap -sS ...)
+  --host-net                 use the host network (default: Docker bridge). Gives the container the host's
+                             network view; only use it when you need it
+  update                     pull the newest base image and rebuild (the volume is kept)
+  remove [-y]                delete the image and the volume (asks first unless -y)
+
+The first run builds the image local/kali-tools: 2-3 GB download, several minutes. No Docker socket is mounted.
+Needs Docker (not installed by this tool) and permission to use it (root, or the docker group).
+USAGE
+}
+
+reminder() { echo "Reminder: use these tools only on systems you own or are authorized to test." >&2; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+find_dockerfile_dir() {
+  local here d
+  here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+  for d in "${KALI_DIR:-}" /usr/local/share/kali-tools "${here}/security/kali"; do
+    if [[ -n "$d" && -f "$d/Dockerfile" ]]; then (cd "$d" && pwd); return 0; fi
+  done
+  die "Dockerfile not found (looked in /usr/local/share/kali-tools and common/security/kali); run common/security-tools.sh --kali or set KALI_DIR"
+}
+
+need_docker() {
+  command -v docker >/dev/null 2>&1 || die "docker is not installed. This helper needs Docker and does not install it."
+  docker info >/dev/null 2>&1 || die "cannot talk to the Docker daemon: is it running, and are you root or in the docker group? (try: sudo kali)"
+}
+
+have_image() { docker image inspect "$IMAGE" >/dev/null 2>&1; }
+
+build() {
+  local dir
+  dir="$(find_dockerfile_dir)"
+  echo "Building ${IMAGE} from the official kalilinux/kali-rolling image (2-3 GB, several minutes)..." >&2
+  docker build "$@" -t "$IMAGE" "$dir"
+}
+
+main() {
+  local host_net=0 yes=0 args=()
+  case "${1:-}" in
+    -h|--help) usage; reminder; exit 0 ;;
+    update)
+      reminder; need_docker
+      build --pull --no-cache
+      echo "Updated ${IMAGE}; the volume ${VOLUME} was kept." >&2
+      exit 0 ;;
+    remove)
+      reminder; need_docker
+      [[ "${2:-}" == "-y" ]] && yes=1
+      if (( ! yes )); then
+        [[ -t 0 ]] || die "not a terminal: use 'kali remove -y'"
+        read -r -p "Delete image ${IMAGE} and volume ${VOLUME} (your files in ${HOME_IN})? [y/N] " ans
+        [[ "$ans" == y || "$ans" == Y ]] || { echo "Nothing deleted."; exit 0; }
+      fi
+      docker image rm "$IMAGE" >/dev/null 2>&1 || echo "image ${IMAGE} not present" >&2
+      docker volume rm "$VOLUME" >/dev/null 2>&1 || echo "volume ${VOLUME} not present" >&2
+      echo "Removed."
+      exit 0 ;;
+  esac
+  if [[ "${1:-}" == "--host-net" ]]; then host_net=1; shift; fi
+  args=("$@")
+
+  reminder
+  need_docker
+  have_image || build
+  local run=(docker run --rm -i --hostname kali -v "${VOLUME}:${HOME_IN}")
+  if [[ -t 0 && -t 1 ]]; then run+=(-t); fi
+  if (( host_net )); then run+=(--network host); fi
+  exec "${run[@]}" "$IMAGE" "${args[@]}"
+}
+
+main "$@"

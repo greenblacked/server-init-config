@@ -1,0 +1,80 @@
+  - path: /etc/ssh/sshd_config.d/00-ci-hardening.conf
+    permissions: '0600'
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+      X11Forwarding no
+
+  - path: /etc/gai.conf
+    append: true
+    content: |
+      precedence ::ffff:0:0/96  100
+
+  - path: /etc/systemd/journald.conf.d/50-size.conf
+    permissions: '0644'
+    content: |
+      [Journal]
+      SystemMaxUse=500M
+      MaxRetentionSec=14day
+
+  - path: /etc/docker/daemon.json
+    permissions: '0644'
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "50m", "max-file": "3" },
+        "registry-mirrors": ["http://127.0.0.1:5000"]
+      }
+
+  - path: /etc/gitlab-runner/config.toml
+    permissions: '0600'
+    content: |
+      concurrent = 2
+      check_interval = 0
+      listen_address = "127.0.0.1:9252"
+
+  - path: /opt/registry-cache/config.yml
+    permissions: '0644'
+    content: |
+@@FILE runner/stacks/registry-cache/config.yml@@
+
+  - path: /opt/registry-cache/docker-compose.yml
+    permissions: '0644'
+    content: |
+@@FILE runner/stacks/registry-cache/docker-compose.yml@@
+
+  - path: /usr/local/bin/runner-weekly-cleanup.sh
+    permissions: '0755'
+    content: |
+@@FILE runner/scripts/runner-weekly-cleanup.sh@@
+
+  - path: /usr/local/bin/runner-disk-guard.sh
+    permissions: '0755'
+    content: |
+@@FILE runner/scripts/runner-disk-guard.sh@@
+
+  - path: /etc/systemd/system/runner-weekly-cleanup.service
+    permissions: '0644'
+    content: |
+@@FILE runner/systemd/runner-weekly-cleanup.service@@
+
+  - path: /etc/systemd/system/runner-weekly-cleanup.timer
+    permissions: '0644'
+    content: |
+@@FILE runner/systemd/runner-weekly-cleanup.timer@@
+
+  - path: /etc/systemd/system/runner-disk-guard.service
+    permissions: '0644'
+    content: |
+@@FILE runner/systemd/runner-disk-guard.service@@
+
+  - path: /etc/systemd/system/runner-disk-guard.timer
+    permissions: '0644'
+    content: |
+@@FILE runner/systemd/runner-disk-guard.timer@@
+
+  - path: /etc/profile.d/90-shell-history.sh
+    permissions: '0644'
+    content: |
+@@FILE common/shell-history.sh@@

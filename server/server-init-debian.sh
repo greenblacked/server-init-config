@@ -157,7 +157,7 @@ Unattended-Upgrade::Origins-Pattern {
 Unattended-Upgrade::Automatic-Reboot "false";
 EOF
   fi
-  # Same text as scripts/shell-history.sh (keep identical; tools/test-cloud-init.py checks it).
+  # Same text as common/shell-history.sh (keep identical; tools/test-cloud-init.py checks it).
   put /etc/profile.d/90-server-shell.sh 0644 <<'EOF'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
