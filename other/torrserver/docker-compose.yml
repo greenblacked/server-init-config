@@ -10,7 +10,8 @@ services:
     restart: unless-stopped
     # The image runs as root by default but needs no root: it only writes under /opt/ts (bind mount).
     user: "${TS_UID:-10001}:${TS_GID:-10001}"
-    # Localhost only by default (reach it with an SSH tunnel). TS_BIND is 0.0.0.0 only if you set it yourself.
+    # Localhost only by default (reach it with an SSH tunnel). install.sh always sets TS_BIND=127.0.0.1;
+    # --public (Caddy with a login on every path, see Caddyfile) is the supported way to expose the service.
     ports:
       - "${TS_BIND:-127.0.0.1}:${TS_HOST_PORT:-8090}:8090"
     environment:
@@ -64,6 +65,7 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - ./caddy-auth.caddy:/etc/caddy/auth.caddy:ro,z
       - caddy-data:/data
       - caddy-config:/config
     tmpfs:
