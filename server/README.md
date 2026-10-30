@@ -1,6 +1,6 @@
 # Plain servers (no GitLab Runner)
 
-A fresh Hetzner server with SSH keys only, an admin user `ops` with sudo, a firewall with only SSH open, fail2ban, daily security updates (no automatic reboot), Docker Engine and Compose, swap if there is none, sysctl tuning, time sync, a journald limit, a weekly cleanup (not on Ubuntu and Debian) and admin tools. Root keeps key login on port 22, so nothing here can lock you out. Every step is checked before it changes anything, so reruns are safe; a failed step is logged to `/var/log/server-init-failed.log` and the next step still runs. For a GitLab Runner host see [../runner/README.md](../runner/README.md).
+A fresh Hetzner server with SSH keys only, an admin user `ops` with sudo, a firewall with only SSH open, fail2ban, daily security updates (no automatic reboot), Docker Engine and Compose, swap if there is none, sysctl tuning and kernel hardening, core dumps off, time sync, a journald limit, a weekly cleanup (not on Ubuntu and Debian) and admin tools. Root keeps key login on port 22, so nothing here can lock you out. Every step is checked before it changes anything, so reruns are safe; a failed step is logged to `/var/log/server-init-failed.log` and the next step still runs. For a GitLab Runner host see [../runner/README.md](../runner/README.md).
 
 | Script | OS |
 |---|---|
@@ -135,6 +135,16 @@ Settings live in `/etc/server-init.conf`; set a key and rerun the bootstrap to c
 sudo systemctl disable --now server-update.timer server-cleanup.timer server-disk-guard.timer server-health-brief.timer
 ```
 
+## Close root SSH (optional)
+
+The init keeps root's key login so nothing can lock you out. After the admin login works from a second terminal, you can close it. Server, as `ops`, any directory:
+
+```bash
+sudo bash /root/server-init-config/server/lock-root.sh
+```
+
+The script refuses unless `ADMIN_USER` (from `/etc/server-init.conf`) has an SSH key and `sudo -n true` works for it. It writes `/etc/ssh/sshd_config.d/00-a-root-lock.conf` with `PermitRootLogin no` (the name makes it load before `00-hardening.conf`, because the first match wins), checks `sshd -t`, reloads sshd, verifies the effective value with `sshd -T` and restores the previous state on any failure. It never changes the SSH port, and rerunning the init does not undo it. To reopen root (from a session that is still open): `sudo bash /root/server-init-config/server/lock-root.sh --unlock-root`; `--status` shows the effective setting. If you lose both logins, use the Hetzner web console: `rm /etc/ssh/sshd_config.d/00-a-root-lock.conf && systemctl reload ssh` (`sshd` on Fedora, EL and openSUSE).
+
 A firewall mistake that cuts SSH is fixed from the Hetzner web console. The init saves SSH in the rules before the firewall starts, so a rerun cannot cut it.
 
 ## Troubleshooting
@@ -222,7 +232,7 @@ kali
 
 ### Firewall
 
-firewalld on Fedora, EL and openSUSE, ufw on Ubuntu and Debian: only SSH and your `EXTRA_PORTS` are open. SSH is saved in the permanent rules and verified before the firewall starts, and verified again afterwards (if it is missing, the firewall is switched off again). The Hetzner Cloud Firewall is separate: it filters before traffic reaches the server, so a port must be open in both places. Check, server, as `ops`, any directory:
+firewalld on Fedora, EL and openSUSE, ufw on Ubuntu and Debian: only SSH and your `EXTRA_PORTS` are open. SSH (port 22 and any other port sshd listens on, read with `sshd -T`) is saved in the permanent rules and verified before the firewall starts, and verified again afterwards (if it is missing, the firewall is switched off again). The Hetzner Cloud Firewall is separate: it filters before traffic reaches the server, so a port must be open in both places. Check, server, as `ops`, any directory:
 
 ```bash
 sudo firewall-cmd --list-services --list-ports
@@ -237,7 +247,7 @@ On Ubuntu and Debian use `sudo ufw status`. Then `sudo fail2ban-client status ss
 | Firewall | `ufw`. SSH (`22/tcp`) is saved in the rules and checked in `ufw show added` before ufw is enabled, and in `ufw status` afterwards. `deny incoming` / `allow outgoing` are set only when ufw is first switched on. An already active ufw keeps its rules; the script only adds rules and never runs `ufw reset`. |
 | Updates | `unattended-upgrades`, security origin only, `Automatic-Reboot "false"`. |
 | fail2ban | journal backend (Debian 13 has no `/var/log/auth.log`), bans through nftables. |
-| Docker | `download.docker.com` repo for `ubuntu` or `debian` (key in `/etc/apt/keyrings`). If Docker has no repo for the codename, the distro packages are used; the log says which. |
+| Docker | `download.docker.com` repo for `ubuntu` or `debian` (key in `/etc/apt/keyrings`, installed only if its fingerprint is Docker's `9DC8 5822 9FC7 DD38 854A  E2D8 8D81 803C 0EBF CD88`). The distro packages are used only when the repo answers HTTP 404 for the codename; a network error stops the Docker step so a rerun can retry; the log says which. |
 | SSH | drop-in `00-hardening.conf`, checked with `sshd -t`. On Ubuntu the service is `ssh` (may be socket activated). |
 | Time sync | keeps `systemd-timesyncd` or `chrony` if one runs, installs `chrony` only if neither does. |
 | Swap | `fallocate` on ext4, `btrfs filesystem mkswapfile` on btrfs, only when there is no swap. |

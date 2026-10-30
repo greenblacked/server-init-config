@@ -16,7 +16,7 @@ A Hetzner server that runs CI jobs for GitLab with the docker executor. Built fo
    runner/bootstrap.sh SERVER_IP
    ```
 
-   It waits for cloud-init (and shows `/var/log/ci-bootstrap-failed.log` if a step failed), streams `git archive HEAD` to `/root/server-init-config`, installs users, admin tools, health and cleanup, the runner registration (you type the token on the server), Docker Hub cache, monitoring, logging, npm cache and shared cache, and ends with `health`. Options: `--no-register`, `--with-prewarm`, `--user`, `--port`, `--allow-dirty`, `--dry-run`. `DOMAIN` and `ACME_EMAIL` in the environment add Grafana on an HTTPS domain. It never runs lock-root or selinux. Rerunning is safe: installed components are skipped.
+   It waits for cloud-init (and shows `/var/log/ci-bootstrap-failed.log` if a step failed), streams `git archive HEAD` to `/root/server-init-config`, installs users, admin tools, health and cleanup, the runner registration (you type the token on the server), Docker Hub cache, monitoring, logging, npm cache and shared cache, and ends with `health`. It also turns on the host firewall and fail2ban. Options: `--no-register`, `--no-firewall`, `--with-prewarm`, `--user`, `--port`, `--allow-dirty`, `--dry-run`. `DOMAIN` and `ACME_EMAIL` in the environment add Grafana on an HTTPS domain. It never runs lock-root or selinux. Rerunning is safe: installed components are skipped.
 4. **Smoke test**: run `ci/smoke.yml` in a project. The log must show `on <runner description>` and `aarch64` (`x86_64` on x86). If the job stays pending, check `tags:`.
 5. **Test the admin login** from a second terminal (laptop, any directory), then close root SSH if you want:
 
@@ -29,7 +29,7 @@ A Hetzner server that runs CI jobs for GitLab with the docker executor. Built fo
 | File | OS | What the server has after boot |
 |---|---|---|
 | `cloud-init/rocky-clean.yaml` (recommended) | Rocky 10 | Docker, GitLab Runner, SSH hardening (password logins off), security updates, admin tools, aliases, tmux. Nothing else: SELinux, users and caches come from `setup.sh`. |
-| `cloud-init/rocky.yaml` | Rocky 10 | The same host plus the Docker Hub cache on `127.0.0.1:5000`, weekly cleanup and disk guard timers, SELinux enforcing, and firewalld switched off. No aliases and no `health`; `bootstrap.sh` adds them. |
+| `cloud-init/rocky.yaml` | Rocky 10 | The same host plus the Docker Hub cache on `127.0.0.1:5000`, weekly cleanup, disk guard and engine update timers, the job isolation rules, SELinux enforcing; firewalld is left as the image has it. No aliases and no `health`; `bootstrap.sh` adds them, together with the host firewall and fail2ban. |
 | `cloud-init/debian.yaml` | Debian 13 | Docker, GitLab Runner, Docker Hub cache, cleanup timers, unattended-upgrades. |
 | `cloud-init/*-x86.yaml` | x86_64 | The same for CX, CPX and CCX servers. |
 
@@ -43,8 +43,9 @@ You can run every step yourself with `setup.sh`, on the server, as root, in `/ro
 |---|---|---|---|
 | 1 | Users: admin `ops`, service accounts, SSH hardening (root stays open) | `--users` | `ssh ops@SERVER_IP 'sudo -n true && echo ok'` |
 | 2 | Admin tools and aliases | `--packages` | `htop --version` |
-| 3 | `health`, weekly cleanup, disk guard | `--tools` | `health -q`, `systemctl list-timers 'runner-*'` |
-| 4 | Register the runner (asks for the token) | `--register` | GitLab shows it Online; `sudo gitlab-runner verify` |
+| 3 | `health`, weekly cleanup, disk guard, job isolation, weekly Docker and runner update | `--tools` | `health -q`, `systemctl list-timers 'runner-*'`, `systemctl is-active ci-job-isolation` |
+| 3b | Host firewall (SSH only) and fail2ban | `--firewall` | `sudo firewall-cmd --list-all` or `sudo ufw status`, `sudo fail2ban-client status sshd` |
+| 4 | Register the runner (asks for the token; also sets the per-job limits) | `--register`, `--job-limits` | GitLab shows it Online; `sudo gitlab-runner verify` |
 | 5 | Docker Hub cache | `--registry-cache` | `curl -s 127.0.0.1:5000/v2/_catalog` |
 | 6 | Monitoring (Prometheus, node_exporter, Grafana) | `--monitoring` | SSH tunnel, then `http://localhost:3000` |
 | 7 | Logging (Loki, Alloy) | `--logging` | `health` shows both ready |
@@ -52,7 +53,7 @@ You can run every step yourself with `setup.sh`, on the server, as root, in `/ro
 | 9 | Shared cache `/srv/ci-cache` (needs 4, trusted projects only) | `--shared-cache` | `sudo grep 'volumes =' /etc/gitlab-runner/config.toml` |
 | opt | Image prewarm, Grafana domain, security tools, SELinux, lock root | `--prewarm`, `--grafana-domain`, `--security`, `--selinux`, `--lock-root` | see below |
 
-`--base` is steps 1, 2, 3, 5, 6; `--all` is `--base` plus 4, 7, 8, 9 and asks for the token. Components are installed in this order whatever the flag order. If one fails, fix the cause and rerun the same command.
+`--base` is steps 1, 2, 3, 3b, 5, 6; `--all` is `--base` plus 4, 7, 8, 9 and asks for the token. Components are installed in this order whatever the flag order. If one fails, fix the cause and rerun the same command.
 
 Server, as `ops`, any directory:
 
@@ -163,23 +164,38 @@ Logs are in Grafana, Explore, Loki, kept 7 days: `{unit="gitlab-runner.service"}
 
 ## Concurrent jobs and limits
 
-`concurrent` is the number of jobs at once and `request_concurrency` the number of parallel job requests to GitLab. The init writes `concurrent = 2`, which fits a CAX11 (2 vCPU, 4 GB); keep it at or below the vCPU count. Job containers have no CPU or memory limit unless you add one, so two heavy jobs can starve the host, Docker and the monitoring. A sizing that fits the CAX11 with `concurrent = 2` is 1.5 GB and 1.5 CPUs per job, leaving about 1 GB for the host. Add it under `[runners.docker]` in `/etc/gitlab-runner/config.toml`:
+`concurrent` is the number of jobs at once and `request_concurrency` the number of parallel job requests to GitLab. The init writes `concurrent = 2`, which fits a CAX11 (2 vCPU, 4 GB); keep it at or below the vCPU count.
+
+Registering the runner (or `setup.sh --job-limits`) adds per-job limits under `[runners.docker]` in `/etc/gitlab-runner/config.toml`, so one job cannot starve the host, Docker and the monitoring:
 
 ```text
 memory = "1536m"
 memory_swap = "1536m"
 cpus = "1.5"
+pids_limit = 2048
 shm_size = 268435456
 ```
 
-Edit with a backup, then restart while no jobs run. Server, as `ops`, any directory:
+Two jobs at 1.5 GB and 1.5 CPUs leave about 1 GB and one CPU's worth for the host on a CAX11. A job over its memory limit is killed (exit code 137) instead of freezing the server. Values you set yourself in `config.toml` are kept; to change them, pass the new values and rerun the step (a backup is made; the runner reloads the file by itself, new jobs get the new limits). Server, as `ops`, any directory:
 
 ```bash
-sudo cp -a /etc/gitlab-runner/config.toml /etc/gitlab-runner/config.toml.bak.manual
-sudo nano /etc/gitlab-runner/config.toml
-sudo gitlab-runner verify
-sudo systemctl restart gitlab-runner
+sudo bash -c 'cd /root/server-init-config && JOB_MEMORY=3g JOB_CPUS=2 runner/install/job-limits.sh'
 ```
+
+`JOB_MEMORY`, `JOB_MEMORY_SWAP` (default: equal to the memory, so no swap), `JOB_CPUS`, `JOB_PIDS` and `JOB_SHM_SIZE` (bytes) are the settings.
+
+### What jobs cannot reach
+
+`ci-job-isolation.service` (installed with `--tools`, reapplied after every Docker start) sets two kinds of iptables rules for IPv4:
+
+- Traffic from containers to `169.254.169.254` (Hetzner metadata) is dropped in `DOCKER-USER`.
+- Traffic from `docker0` and the `br-*` bridges to the host itself goes through the chain `CI-JOBS-IN`: replies, ping and the npm cache (docker0 IP, port 4873) are let in, everything else is dropped.
+
+Internet access of jobs, the Docker Hub cache (Docker pulls through the mirror, jobs do not) and traffic between the containers of one job are not affected. Check, server, as `ops`, any directory: `sudo iptables -S DOCKER-USER`, `sudo iptables -S CI-JOBS-IN`. If a job legitimately needs a host service, add an `ACCEPT` rule for it to `CI-JOBS-IN` in `runner/scripts/ci-job-isolation.sh` and rerun `sudo systemctl restart ci-job-isolation`.
+
+### Updates of Docker and GitLab Runner
+
+`dnf-automatic` (security only) and `unattended-upgrades` do not cover the Docker and GitLab repositories. `runner-engine-update.timer` (Sunday 04:30) upgrades `docker-ce*`, `containerd.io` and `gitlab-runner` only when `docker ps` answers and shows no CI job; otherwise it logs why it skipped and tries again next week. It restarts Docker, then the runner, and checks both are active. The result is one line in `/var/log/runner-engine-update.log`, which `health` shows. Run it now (server, as `ops`, any directory): `sudo runner-engine-update.sh --dry-run`, then `sudo runner-engine-update.sh`.
 
 `pull_policy = "if-not-present"` reuses images on the host; GitLab allows that only for runners limited to trusted projects. Use `always` if you attach projects you don't control.
 
@@ -239,7 +255,8 @@ Runner-specific; the general table is in the [main README](../README.md#troubles
 ### What the init writes
 
 - SSH drop-in `00-ci-hardening.conf`: no password or keyboard-interactive logins, root by key, no X11. sshd checks it first (`sshd -t`); if it is rejected the file is removed and the defaults stay.
-- Security updates, journal limit (500 MB, 14 days), timezone, Docker Engine and GitLab Runner.
+- Security updates, journal limit (500 MB, 14 days), timezone, kernel hardening (`kptr_restrict`, `dmesg_restrict`, `ptrace_scope`, protected fifos and regular files, `log_martians`) and core dumps off.
+- Docker Engine and GitLab Runner from repo files written by the init. The signing keys are installed only if their fingerprints match (`pin-repo-key`): Docker `9DC8 5822 9FC7 DD38 854A  E2D8 8D81 803C 0EBF CD88` (checked against the key download), GitLab Runner `F640 3F65 44A3 8863 DAA0  B6E0 3F01 618A 5131 2F3F` (from GitLab's install docs, **not verified here**: compare it with https://docs.gitlab.com/runner/install/linux-repository/ before relying on it; a mismatch stops the install instead of trusting the key).
 - Tools: htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, restic, dnf-utils, dig, lsof, sysstat, tcpdump, traceroute, nc, tmux, jq, git, mc, fd, rg, fzf. EPEL ones that are missing are logged to `ci-bootstrap-failed.log` and do not stop the boot.
 - Not in the init, on purpose: users, closing root SSH, another SSH port, SELinux enforcing (`rocky-clean.yaml`), service users.
 
@@ -293,7 +310,8 @@ Then delete the runner in GitLab if it still shows, create a new one and run `re
 - The token is stored only in `/etc/gitlab-runner/config.toml` (owner `gitlab-runner`, mode `600`). Never put it in user-data.
 - Job containers are not privileged. Enable `privileged = true` only for trusted projects that need Docker-in-Docker.
 - Monitoring, logging and the caches listen on `127.0.0.1` or the `docker0` bridge. `/srv/ci-cache` and the npm cache are shared by every project: no untrusted projects or forks.
-- Not done here: rootless Docker and `userns-remap` (they change ownership of bind mounts and caches), a host firewall next to the Cloud Firewall, and filtering the cloud metadata endpoint (169.254.169.254) from job containers, which GitLab suggests.
+- The host firewall (`--firewall`), fail2ban for SSH, the block of the cloud metadata address and host services for jobs, and per-job resource limits are set up by the steps above. IPv6 is not filtered by the job isolation.
+- Not done here: rootless Docker and `userns-remap` (they change ownership of bind mounts and caches).
 
 ### Decommission
 
