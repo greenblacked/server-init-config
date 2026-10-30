@@ -38,6 +38,24 @@ Settings are saved to `/etc/server-init.conf` on the first run (`ADMIN_USER`, `E
 `"80/tcp 443/tcp"`, `INSTALL_DOCKER`, `INSTALL_SWAP`, `TIMEZONE`). Edit the file and rerun
 `/usr/local/sbin/server-init.sh` to change them.
 
+## Cloud config (new servers)
+
+| File | OS |
+|---|---|
+| `cloud-init/server-fedora.yaml` | Fedora 44 |
+| `cloud-init/server-el10.yaml` | CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 |
+
+Paste the file for the server's OS into Hetzner Console, **Cloud config**, when you create the server. It is
+user-data for cloud-init, not shell commands: never paste it into a terminal. If you need ports or other
+settings, edit the `/etc/server-init.conf` block at the top of the file first. The file embeds the script, so it
+is generated (`tools/render-cloud-init.py`) and must not be edited except for that block. After the first boot:
+
+```bash
+ssh root@SERVER_IP 'cloud-init status --wait'
+```
+
+Then run the commands under [Check](#check).
+
 ## Check
 
 ```bash
