@@ -49,8 +49,8 @@ Env (passed to the server, none of them is a secret):
   DESCRIPTION         runner description for the registration
   GITLAB_URL          GitLab URL for the registration (default https://gitlab.com)
 
-Never installed here: lock-root (run it yourself after testing the ops login) and selinux (the
-Rocky inits enable it already). The runner token is typed at the prompt on the server.
+Never installed here: lock-root (run it yourself after testing the ops login) and selinux (rocky.yaml
+switches SELinux to enforcing, rocky-clean.yaml does not: then run runner/setup.sh --selinux yourself). The runner token is typed at the prompt on the server.
 Components that are already installed are skipped, so rerunning is safe.
 USAGE
 }
@@ -397,6 +397,17 @@ main() {
     if (( rc >= 2 )); then warn "health reports failures (exit ${rc}); read the report above"; fi
   fi
 
+  local selinux_step=""
+  if (( ! DRY_RUN )); then
+    local se
+    se=$(ssh "${SSH_OPTS[@]}" "$TARGET" 'getenforce 2>/dev/null' 2>/dev/null || true)
+    if [[ "$se" == Permissive || "$se" == Disabled ]]; then
+      selinux_step="
+  5. SELinux is ${se} on the server. While no CI job runs, make it enforcing (restarts Docker):
+     ssh${PORT_OPT} ${TARGET} '${SUDO}bash ${REMOTE_DIR}/runner/setup.sh --selinux'"
+    fi
+  fi
+
   cat <<NEXT
 
 [done] Next steps
@@ -405,7 +416,7 @@ main() {
      The tags in runner/ci/*.yml say arm64: on an x86 server change them to your runner's tag.
   2. Test the admin login from a second terminal:  ssh${PORT_OPT} ops@${SERVER} 'sudo -n true && echo ok'
   3. Only then close root SSH, by hand:  ssh${PORT_OPT} ${TARGET} '${SUDO}bash ${REMOTE_DIR}/runner/setup.sh --lock-root'
-  4. Later updates: rerun this script, then  ssh${PORT_OPT} ops@${SERVER} 'sudo ${REMOTE_DIR}/runner/update.sh'
+  4. Later updates: rerun this script, then  ssh${PORT_OPT} ops@${SERVER} 'sudo ${REMOTE_DIR}/runner/update.sh'${selinux_step}
 NEXT
 }
 
