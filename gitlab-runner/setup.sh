@@ -8,7 +8,7 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 CFG=/etc/gitlab-runner/config.toml
 CURRENT=""
 
-COMPONENTS=(users packages tools register registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux lock-root)
+COMPONENTS=(users packages tools security register registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux lock-root)
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -18,6 +18,7 @@ describe() {
     users)          echo "admin user ops (sudo), service users gitlab-runner and monitoring, SSH hardening" ;;
     packages)       echo "admin tools: htop, btop, ncdu, iotop, mtr, dig, tcpdump, restic, skopeo, aliases" ;;
     tools)          echo "health, weekly cleanup, disk guard and their timers" ;;
+    security)       echo "security tools: lynis, oscap, auditd, ssh-audit, nmap, trivy, gitleaks, ... (not in --base/--all)" ;;
     register)       echo "register the runner (asks for the glrt- token)" ;;
     registry-cache) echo "Docker Hub pull-through cache on 127.0.0.1:5000" ;;
     monitoring)     echo "Prometheus, node_exporter, Grafana (127.0.0.1 only)" ;;
@@ -36,6 +37,7 @@ script_for() {
     users)          echo "${ROOT}/install/users.sh" ;;
     packages)       echo "${ROOT}/install/admin-tools.sh" ;;
     tools)          echo "${ROOT}/install/host-tools.sh" ;;
+    security)       echo "${ROOT}/install/security-tools.sh" ;;
     register)       echo "${HERE}/register.sh" ;;
     registry-cache) echo "${ROOT}/install/registry-cache.sh" ;;
     monitoring)     echo "${ROOT}/install/monitoring.sh" ;;
@@ -64,6 +66,7 @@ is_installed() {
     users)          id monitoring >/dev/null 2>&1 && grep -qs "^AllowGroups" /etc/ssh/sshd_config.d/00-ci-hardening.conf ;;
     packages)       command -v htop >/dev/null 2>&1 && [[ -f /etc/profile.d/ci-runner.sh ]] ;;
     tools)          [[ -x /usr/local/bin/health && -x /usr/local/bin/runner-weekly-cleanup.sh ]] ;;
+    security)       command -v lynis >/dev/null 2>&1 && [[ -x /usr/local/bin/trivy ]] ;;
     register)       [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG" ;;
     registry-cache) [[ -f /opt/registry-cache/docker-compose.yml ]] ;;
     monitoring)     [[ -f /opt/monitoring/docker-compose.yml ]] ;;
@@ -96,6 +99,8 @@ USAGE
   cat <<USAGE
 
 Components that are already installed are skipped; refresh them with install/update.sh.
+--security installs the default groups of install/security-tools.sh (audit, network, scan); it is never part of --base or --all.
+For the opt-in tools (--aide, --clamav, --kali, ...) run install/security-tools.sh directly.
 Examples:
   $0 --register
   $0 --npm-cache --shared-cache
