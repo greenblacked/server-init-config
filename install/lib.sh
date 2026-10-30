@@ -37,6 +37,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {

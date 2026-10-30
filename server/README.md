@@ -76,6 +76,27 @@ From a second terminal, before you log out:
 ssh ops@SERVER_IP 'sudo -n true && echo sudo-ok'
 ```
 
+## Health report
+
+`health` gives a one-command status report: system, disk and memory, security, firewall and open ports, fail2ban,
+automatic updates, pending reboot, SSH settings, services, Docker and containers. Install it once from a checkout
+of this repo on the server:
+
+```bash
+sudo server/install-health.sh
+```
+
+Then, as your admin user (`ops`), no `sudo` needed:
+
+```bash
+health -q
+```
+
+`-q` skips the slow checks; `health` without it runs everything. It re-runs itself through passwordless sudo
+when you are not root; without sudo rights it still runs and skips only the root-only checks. On a plain server
+the GitLab Runner checks are skipped; they run only when a runner is registered (or with `--profile runner`).
+It is not embedded in the Cloud config files: it is about 30 KB and Hetzner's user-data limit is 32 KiB.
+
 ## Notes
 
 - Ports published by Docker (`-p 8080:80`) bypass firewalld. Bind to `127.0.0.1:8080:80` unless the port should be public.

@@ -241,6 +241,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -709,6 +732,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -1063,6 +1109,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -1188,7 +1257,7 @@ chmod 755 "$R/install/lib.sh"
 install -d "$R/install"
 cat > "$R/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Install health, cleanup and disk guard scripts plus their systemd timers.
+# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
@@ -1204,6 +1273,7 @@ for f in health runner-weekly-cleanup.sh runner-disk-guard.sh; do
   install -m 0755 "$REPO_ROOT/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
+ensure_secure_path
 
 for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer; do
   install -m 0644 "$REPO_ROOT/systemd/$u" "/etc/systemd/system/$u"
@@ -1215,14 +1285,14 @@ systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer
 
 DRY_RUN=1 /usr/local/bin/runner-weekly-cleanup.sh >/dev/null
 systemctl list-timers 'runner-*' --no-pager
-log "OK: run 'health' for a full report"
+log "OK: run 'health' for a full report (it uses sudo itself when needed)"
 __SIC_EOF__
 chmod 755 "$R/install/host-tools.sh"
 
 install -d "$R/scripts"
 cat > "$R/scripts/health" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# health: one-command health and status report for the CI runner host
+# health: one-command health and status report for this host (GitLab Runner host or general server)
 set -Eeuo pipefail
 
 DISK_WARN=70
@@ -1235,6 +1305,8 @@ LOAD_FAIL=3
 QUICK=0
 ONLY_CONTAINERS=0
 COLOR=1
+PROFILE=auto
+RUNNER_UNREGISTERED=0
 CFG=/etc/gitlab-runner/config.toml
 PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
 FORECAST_MIN_HISTORY_H="${FORECAST_MIN_HISTORY_H:-6}"
@@ -1243,11 +1315,17 @@ usage() {
   cat <<'USAGE'
 Usage: health [options]
 
-One-command health and status report for this CI runner host.
+One-command health and status report for this host. Works on a GitLab Runner
+host and on a general server.
+
+Run it as a normal user: it re-runs itself through sudo when that needs no password.
+Without root and without passwordless sudo it still runs, but skips the root-only
+checks (firewall rules, fail2ban, sshd settings, journal, docker, runner).
 
 Options:
-  -q, --quick       skip slow checks (runner verify, network, pending updates)
+  -q, --quick       skip slow checks (runner verify, network, pending updates, needs-restarting)
   -c, --containers  only show health of running containers
+  --profile P       server|runner (default: auto = server; runner only when a runner is registered)
   --no-color        plain output without colors
   -h, --help        show this help
 
@@ -1255,10 +1333,13 @@ Exit codes: 0 all OK, 1 warnings only, 2 at least one failure
 USAGE
 }
 
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -q|--quick) QUICK=1 ;;
     -c|--containers) ONLY_CONTAINERS=1 ;;
+    --profile) shift; PROFILE="${1:-}" ;;
+    --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -1266,7 +1347,20 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ $EUID -eq 0 ]] || { echo "run as root: sudo health" >&2; exit 2; }
+case "$PROFILE" in
+  auto|runner|server) ;;
+  *) echo "invalid --profile '${PROFILE}': use runner or server" >&2; exit 2 ;;
+esac
+
+LIMITED=0
+# Not root: re-run through sudo when that works without a password (HEALTH_REEXEC stops loops);
+# otherwise run in limited mode and skip the checks that need root.
+if [[ $EUID -ne 0 ]]; then
+  if [[ -z "${HEALTH_REEXEC:-}" ]] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    exec sudo -n -- env HEALTH_REEXEC=1 "$(readlink -f "$0")" "${ORIG_ARGS[@]}"
+  fi
+  LIMITED=1
+fi
 
 if [[ -t 1 && "$COLOR" == "1" && -z "${NO_COLOR:-}" ]]; then
   C_OK=$'\e[32m'; C_WARN=$'\e[33m'; C_FAIL=$'\e[31m'; C_B=$'\e[1m'; C_D=$'\e[2m'; C_N=$'\e[0m'
@@ -1275,6 +1369,7 @@ else
 fi
 
 N_OK=0; N_WARN=0; N_FAIL=0
+FW_STATE=unknown
 ok()      { N_OK=$((N_OK + 1));     printf '  %s%-5s%s %s\n' "$C_OK" "OK" "$C_N" "$*"; }
 warn()    { N_WARN=$((N_WARN + 1)); printf '  %s%-5s%s %s\n' "$C_WARN" "WARN" "$C_N" "$*"; }
 fail()    { N_FAIL=$((N_FAIL + 1)); printf '  %s%-5s%s %s\n' "$C_FAIL" "FAIL" "$C_N" "$*"; }
@@ -1286,6 +1381,18 @@ gt()      { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 isnum()   { [[ "${1:-}" =~ ^-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; }
 num()     { awk -v x="$1" -v d="${2:-1}" 'BEGIN { printf "%.*f", d, x }'; }
 unit_exists() { systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q .; }
+is_runner()   { [[ "$PROFILE" == "runner" ]]; }
+detect_profile() {
+  [[ "$PROFILE" == "auto" ]] || return 0
+  # Default is a plain server. Only a host with a registered runner gets the runner checks;
+  # gitlab-runner installed but never registered is still a plain server.
+  if [[ -r "$CFG" ]] && grep -q '^[[:space:]]*\[\[runners\]\]' "$CFG" 2>/dev/null; then
+    PROFILE=runner
+  else
+    PROFILE=server
+    if have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
+  fi
+}
 http_code()   { curl -s -o /dev/null -m "${2:-5}" -w '%{http_code}' "$1" 2>/dev/null || true; }
 
 human_age() {
@@ -1348,19 +1455,28 @@ check_system() {
   swap_total=$(awk '/^SwapTotal:/ { print $2 }' /proc/meminfo)
   swap_free=$(awk '/^SwapFree:/ { print $2 }' /proc/meminfo)
   if (( swap_total > 0 )); then
-    info "swap $(( (swap_total - swap_free) / 1024 ))/$(( swap_total / 1024 )) MB used"
+    local swap_pct=$(( (swap_total - swap_free) * 100 / swap_total ))
+    msg="swap $(( (swap_total - swap_free) / 1024 ))/$(( swap_total / 1024 )) MB used (${swap_pct}%)"
+    if is_runner; then info "$msg"
+    elif (( swap_pct >= 80 )); then warn "$msg, memory pressure"
+    else ok "$msg"; fi
   else
     info "swap: none"
   fi
 
   local kills ooms victims
   # Count kills, not every related kernel line. One kill emits several matches.
-  kills=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep 'Out of memory: Killed process' || true)
+  if (( LIMITED )); then
+    kills=""
+    skip "OOM kills: needs root (kernel log)"
+  else
+    kills=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep 'Out of memory: Killed process' || true)
+  fi
   if [[ -n "$kills" ]]; then
     ooms=$(grep -c . <<<"$kills")
     victims=$(sed -nE 's/.*Killed process [0-9]+ \(([^)]+)\).*/\1/p' <<<"$kills" | sort | uniq -c | awk '{printf "%s x%s, ", $2, $1}' | sed 's/, $//')
     warn "${ooms} OOM kill(s) since boot${victims:+ (${victims})} (journalctl -k -b | grep 'Killed process')"
-  else
+  elif (( ! LIMITED )); then
     ok "no OOM kills since boot"
   fi
 
@@ -1383,20 +1499,6 @@ check_system() {
     fail "failed units: ${failed}"
   else
     ok "no failed systemd units"
-  fi
-
-  if [[ -f /var/run/reboot-required ]]; then
-    warn "reboot required after package updates"
-  elif have rpm; then
-    local latest
-    latest=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | sort -V | tail -1 || true)
-    if [[ -n "$latest" && "$latest" != *"not installed"* && "$latest" != "$(uname -r)" ]]; then
-      warn "newer kernel installed (${latest}), reboot to apply"
-    else
-      ok "running the latest installed kernel"
-    fi
-  else
-    ok "no reboot required"
   fi
 
   if have timedatectl; then
@@ -1431,7 +1533,9 @@ check_security() {
     esac
     # ausearch treats a pipe on stdin as the audit log and blocks until it closes.
     # health is often started over ssh, so force the on-disk logs and bound the query.
-    if ! have ausearch; then
+    if (( LIMITED )); then
+      skip "SELinux denials: needs root"
+    elif ! have ausearch; then
       skip "ausearch not installed"
     else
       raw=$(timeout 10 ausearch --input-logs -m avc -ts today </dev/null 2>/dev/null) || rc=$?
@@ -1450,24 +1554,35 @@ check_security() {
     fi
   fi
 
-  if have sshd; then
+  if (( LIMITED )); then
+    skip "sshd settings, listening ports, pending updates: need root (run as root for the full report)"
+  elif have sshd; then
     local sshd_t root_login
     sshd_t=$(sshd -T 2>/dev/null || true)
     if grep -qx 'passwordauthentication no' <<<"$sshd_t"; then
       ok "SSH password login disabled"
-    else
+    elif is_runner; then
       fail "SSH password login enabled"
+    else
+      warn "SSH password login enabled (set PasswordAuthentication no)"
     fi
     root_login=$(awk '/^permitrootlogin / { print $2 }' <<<"$sshd_t")
-    case "$root_login" in
-      no)  ok "SSH root login disabled" ;;
-      yes) fail "SSH root login with password allowed" ;;
-      *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo install/users.sh --lock-root" ;;
-    esac
-    if grep -q '^allowgroups ' <<<"$sshd_t"; then
-      ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
+    if is_runner; then
+      case "$root_login" in
+        no)  ok "SSH root login disabled" ;;
+        yes) fail "SSH root login with password allowed" ;;
+        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo install/users.sh --lock-root" ;;
+      esac
+      if grep -q '^allowgroups ' <<<"$sshd_t"; then
+        ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
+      else
+        warn "SSH not limited by AllowGroups (install/users.sh sets it)"
+      fi
     else
-      warn "SSH not limited by AllowGroups (install/users.sh sets it)"
+      case "$root_login" in
+        yes) warn "SSH root login with password allowed (PermitRootLogin yes)" ;;
+        *)   info "SSH root login: ${root_login:-unknown}" ;;
+      esac
     fi
   fi
 
@@ -1476,7 +1591,7 @@ check_security() {
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    ok "docker group: only gitlab-runner"
+    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
   fi
   for u in gitlab-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
@@ -1497,24 +1612,35 @@ check_security() {
   fi
 
   local exposed ssh_ports allowed
-  ssh_ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
-  ssh_ports="${ssh_ports:-22 }"
-  allowed="$(tr ' ' '|' <<<"${ssh_ports% }")|80|443"
-  if [[ " ${ssh_ports}" == *" 22 "* ]]; then
-    info "SSH listens on: ${ssh_ports}(port 22 closes with install/users.sh --lock-root)"
-  else
-    ok "SSH port: ${ssh_ports% }"
-  fi
-  exposed=$(ss -ltnH 2>/dev/null | awk '{ print $4 }' \
-    | grep -vE '^(127\.|\[::1\]|172\.17\.)' \
-    | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE "$allowed" | tr '\n' ' ' || true)
-  if [[ -n "${exposed// /}" ]]; then
-    warn "ports listening on public interfaces: ${exposed}(make sure the Hetzner firewall blocks them)"
-  else
-    ok "only SSH/HTTP/HTTPS listen on public interfaces"
+  if (( LIMITED == 0 )); then
+    ssh_ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+    ssh_ports="${ssh_ports:-22 }"
+    allowed="$(tr ' ' '|' <<<"${ssh_ports% }")|80|443"
+    if ! is_runner; then
+      info "SSH port: ${ssh_ports% }"
+    elif [[ " ${ssh_ports}" == *" 22 "* ]]; then
+      info "SSH listens on: ${ssh_ports}(port 22 closes with install/users.sh --lock-root)"
+    else
+      ok "SSH port: ${ssh_ports% }"
+    fi
+    exposed=$(ss -ltnH 2>/dev/null | awk '{ print $4 }' \
+      | grep -vE '^(127\.|\[::1\]|172\.17\.)' \
+      | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE "$allowed" | tr '\n' ' ' || true)
+    if [[ -n "${exposed// /}" ]]; then
+      if is_runner; then
+        warn "ports listening on public interfaces: ${exposed}(make sure the Hetzner firewall blocks them)"
+      elif [[ "$FW_STATE" == "active" ]]; then
+        info "ports listening on public interfaces: ${exposed}(the host firewall decides what is reachable)"
+      else
+        warn "ports listening on public interfaces: ${exposed}(no active host firewall)"
+      fi
+    else
+      ok "only SSH/HTTP/HTTPS listen on public interfaces"
+    fi
+
   fi
 
-  if (( QUICK == 0 )); then
+  if (( QUICK == 0 && LIMITED == 0 )); then
     local out n
     if have dnf; then
       if out=$(timeout 90 dnf -q updateinfo list --security 2>/dev/null); then
@@ -1539,15 +1665,217 @@ check_security() {
   return 0
 }
 
+# Sets FW_KIND (firewalld|ufw|none) and FW_STATE (active|inactive|none) without printing.
+detect_firewall() {
+  FW_KIND=none; FW_STATE=none
+  (( LIMITED == 0 )) || return 0
+  if have firewall-cmd || unit_exists firewalld.service; then
+    FW_KIND=firewalld; FW_STATE=inactive
+    if have firewall-cmd && [[ "$(firewall-cmd --state 2>/dev/null || true)" == "running" ]]; then FW_STATE=active; fi
+  elif have ufw; then
+    FW_KIND=ufw; FW_STATE=inactive
+    if ufw status 2>/dev/null | grep -qi '^Status: active'; then FW_STATE=active; fi
+  fi
+  return 0
+}
+
+check_firewall() {
+  section "Firewall and brute-force protection"
+  if (( LIMITED )); then
+    skip "firewall and fail2ban: need root (run as root for the full report)"
+    return 0
+  fi
+  local ports p ssh_ok=0 zone svc open ufw_out
+  ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+  ports="${ports:-22}"
+
+  case "$FW_KIND:$FW_STATE" in
+    firewalld:active)
+      zone=$(firewall-cmd --get-default-zone 2>/dev/null || true)
+      svc=$(firewall-cmd --zone="$zone" --list-services 2>/dev/null || true)
+      open=$(firewall-cmd --zone="$zone" --list-ports 2>/dev/null || true)
+      for p in $ports; do
+        if [[ " ${open} " == *" ${p}/tcp "* ]]; then ssh_ok=1; fi
+        if [[ "$p" == "22" && " ${svc} " == *" ssh "* ]]; then ssh_ok=1; fi
+      done
+      if (( ssh_ok )); then
+        ok "firewalld active, default zone ${zone:-?}, SSH allowed"
+      else
+        fail "firewalld active but SSH (${ports% }) is not allowed in zone ${zone:-?}; the next reload can lock you out"
+      fi
+      info "open in ${zone:-?}: services ${svc:-none} | ports ${open:-none}"
+      ;;
+    firewalld:*)
+      if is_runner; then info "firewalld installed but not running (cloud firewall assumed)"
+      else warn "firewalld installed but not running (systemctl enable --now firewalld)"; fi
+      ;;
+    ufw:active)
+      ufw_out=$(ufw status 2>/dev/null || true)
+      for p in $ports; do
+        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?[[:space:]]+ALLOW" <<<"$ufw_out"; then ssh_ok=1; fi
+      done
+      if (( ssh_ok )); then
+        ok "ufw active, SSH allowed"
+      else
+        fail "ufw active but SSH (${ports% }) is not allowed"
+      fi
+      open=$(awk '/ALLOW/ && !/\(v6\)/ { print $1 }' <<<"$ufw_out" | sort -u | tr '\n' ' ')
+      info "allowed in ufw: ${open:-none}"
+      ;;
+    ufw:*)
+      if is_runner; then info "ufw installed but inactive (cloud firewall assumed)"
+      else warn "ufw installed but inactive (ufw enable)"; fi
+      ;;
+    *)
+      if is_runner; then info "no host firewall (cloud firewall assumed)"
+      else warn "no host firewall found (firewalld or ufw)"; fi
+      ;;
+  esac
+
+  if ! have fail2ban-client && ! unit_exists fail2ban.service; then
+    if is_runner; then skip "fail2ban not installed"; else warn "fail2ban not installed (SSH brute-force protection)"; fi
+    return 0
+  fi
+  if ! systemctl is-active --quiet fail2ban 2>/dev/null && ! { have fail2ban-client && fail2ban-client ping >/dev/null 2>&1; }; then
+    warn "fail2ban not active"
+    return 0
+  fi
+  local st banned total
+  if st=$(fail2ban-client status sshd 2>/dev/null); then
+    banned=$(sed -nE 's/.*Currently banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -1)
+    total=$(sed -nE 's/.*Total banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -1)
+    ok "fail2ban active, sshd jail: ${banned:-0} banned now (${total:-0} total)"
+  else
+    warn "fail2ban active but no sshd jail (fail2ban-client status)"
+  fi
+  return 0
+}
+
+check_updates() {
+  section "Updates and reboot"
+  local t found="" n pending="" applies=0 conf
+  for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
+    unit_exists "$t" || continue
+    systemctl is-enabled --quiet "$t" 2>/dev/null || systemctl is-active --quiet "$t" 2>/dev/null || continue
+    found="$t"; break
+  done
+  if [[ -z "$found" ]]; then
+    # openSUSE and others: any enabled timer that looks like an update job
+    found=$(systemctl list-unit-files '*.timer' --state=enabled --no-legend --plain 2>/dev/null \
+      | awk '{ print $1 }' | grep -E 'zypper|yum-cron|unattended|transactional-update|packagekit-offline' | head -1 || true)
+  fi
+
+  if [[ -z "$found" ]]; then
+    warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
+  elif [[ "$found" == apt-daily-upgrade.timer ]]; then
+    if grep -qsE '^[^/]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/20auto-upgrades; then
+      ok "unattended-upgrades enabled (${found})"
+    else
+      warn "${found} enabled but APT::Periodic::Unattended-Upgrade is not 1 (/etc/apt/apt.conf.d/20auto-upgrades)"
+    fi
+  elif [[ "$found" == dnf*automatic* ]]; then
+    [[ "$found" == *install* ]] && applies=1
+    for conf in /etc/dnf/automatic.conf /etc/dnf/dnf5-plugins/automatic.conf; do
+      [[ -f "$conf" ]] || continue
+      if grep -qE '^[[:space:]]*apply_updates[[:space:]]*=[[:space:]]*(yes|true|1)' "$conf"; then applies=1; fi
+    done
+    if (( applies )); then
+      ok "automatic updates: ${found} (installs updates)"
+    else
+      warn "${found} enabled but apply_updates is not yes (updates are only downloaded or reported)"
+    fi
+  else
+    ok "automatic updates: ${found}"
+  fi
+
+  local reboot=0 latest running
+  running=$(uname -r)
+  if [[ -f /var/run/reboot-required ]]; then
+    reboot=1
+    pending=$(tr '\n' ' ' < /var/run/reboot-required.pkgs 2>/dev/null || true)
+    warn "reboot required after package updates${pending:+ (${pending% })}"
+  fi
+  if (( QUICK == 0 && LIMITED == 0 && reboot == 0 )); then
+    local out rc=0 cmd=""
+    if have needs-restarting; then cmd="needs-restarting"
+    elif have dnf; then cmd="dnf needs-restarting"; fi
+    if [[ -n "$cmd" ]]; then
+      # shellcheck disable=SC2086
+      out=$(timeout 60 $cmd -r 2>&1 </dev/null) || rc=$?
+      if (( rc == 0 )); then
+        ok "no reboot required (${cmd} -r)"
+      elif (( rc == 1 )) && grep -qi 'reboot is required' <<<"$out"; then
+        reboot=1
+        warn "reboot required (${cmd} -r): core libraries or the kernel were updated since boot"
+      else
+        skip "${cmd} -r not usable (exit ${rc}), reboot state unknown"
+      fi
+    fi
+  fi
+  if have rpm; then
+    latest=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | grep -v 'not installed' | sort -V | tail -1 || true)
+    if [[ -z "$latest" ]]; then
+      info "kernel ${running} (kernel-core not found in rpm)"
+    elif [[ "$latest" != "$running" ]]; then
+      if (( reboot == 0 )); then warn "newer kernel installed (${latest}), running ${running}; reboot to apply"
+      else info "kernel running ${running}, newest installed ${latest}"; fi
+    else
+      info "kernel ${running} is the newest installed"
+    fi
+  elif have dpkg-query && ls /boot/vmlinuz-* >/dev/null 2>&1; then
+    latest=$(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f\n' | sed 's/^vmlinuz-//' | sort -V | tail -1)
+    if [[ "$latest" != "$running" ]]; then info "kernel running ${running}, newest installed ${latest}"
+    else info "kernel ${running} is the newest installed"; fi
+  fi
+  if (( LIMITED == 1 && reboot == 0 )); then
+    info "needs-restarting skipped (needs root)"
+  elif (( QUICK == 1 && reboot == 0 )); then
+    info "needs-restarting skipped (quick mode)"
+  fi
+  return 0
+}
+
+check_serverinit() {
+  local conf=/etc/server-init.conf failed=/var/log/server-init-failed.log
+  [[ -r "$conf" || -r "$failed" ]] || return 0
+  [[ -f "$conf" || -s "$failed" ]] || return 0
+  section "Server setup"
+  if [[ -f "$conf" ]]; then
+    local vals admin
+    vals=$(grep -E '^(ADMIN_USER|EXTRA_PORTS|INSTALL_DOCKER)=' "$conf" | tr '\n' ' ' || true)
+    info "${conf}: ${vals:-no known settings}"
+    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1)
+    if [[ -n "$admin" ]]; then
+      if id "$admin" >/dev/null 2>&1; then ok "admin user ${admin} exists"
+      else warn "admin user ${admin} from ${conf} does not exist"; fi
+    fi
+    if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
+      info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
+    fi
+  fi
+  if [[ -s "$failed" ]]; then
+    local n last
+    n=$(grep -c . "$failed" || true)
+    last=$(tail -1 "$failed" | cut -c1-110)
+    warn "${n} failed setup step(s) in ${failed}; last: ${last}"
+  elif [[ -f "$failed" ]]; then
+    ok "no failed setup steps (${failed} is empty)"
+  fi
+  return 0
+}
+
 check_services() {
   section "Services"
   local u
   for u in sshd.service docker.service gitlab-runner.service; do
+    if [[ "$u" == "gitlab-runner.service" ]] && ! is_runner; then continue; fi
     if ! unit_exists "$u"; then
       if [[ "$u" == "sshd.service" ]] && unit_exists ssh.service; then
         u=ssh.service
-      else
+      elif is_runner; then
         skip "${u} not installed"
+        continue
+      else
         continue
       fi
     fi
@@ -1559,7 +1887,8 @@ check_services() {
   done
 
   local t next
-  for t in dnf-automatic.timer unattended-upgrades.service runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+  for t in runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+    is_runner || break
     unit_exists "$t" || continue
     if systemctl is-active --quiet "$t" 2>/dev/null; then
       next=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2>/dev/null || true)
@@ -1575,6 +1904,7 @@ check_services() {
 
   local s started result
   for s in runner-weekly-cleanup.service runner-disk-guard.service ci-image-prewarm.service; do
+    is_runner || break
     unit_exists "$s" || continue
     started=$(systemctl show "$s" -p ExecMainStartTimestamp --value 2>/dev/null || true)
     result=$(systemctl show "$s" -p Result --value 2>/dev/null || true)
@@ -1587,7 +1917,7 @@ check_services() {
     fi
   done
 
-  if unit_exists ci-image-prewarm.service; then
+  if is_runner && unit_exists ci-image-prewarm.service; then
     local summary noarm failed_n
     summary=$(journalctl -t ci-image-prewarm --since -2d --no-pager -o cat 2>/dev/null | grep 'summary:' | tail -1 || true)
     if [[ -n "$summary" ]]; then
@@ -1606,6 +1936,14 @@ check_services() {
 }
 
 check_runner() {
+  if ! is_runner; then
+    skip "runner: not a runner host (skipped)"
+    return 0
+  fi
+  if (( LIMITED )); then
+    skip "runner: needs root (skipped)"
+    return 0
+  fi
   section "GitLab Runner"
   if ! have gitlab-runner; then
     skip "gitlab-runner not installed"
@@ -1675,9 +2013,17 @@ check_runner() {
 }
 
 check_docker() {
+  if ! is_runner && ! have docker; then
+    skip "docker: not installed"
+    return 0
+  fi
   section "Docker"
   if ! have docker; then
     skip "docker not installed"
+    return 0
+  fi
+  if (( LIMITED )) && ! docker info >/dev/null 2>&1; then
+    skip "docker: no access (not root, not in the docker group)"
     return 0
   fi
   if ! docker info >/dev/null 2>&1; then
@@ -1700,9 +2046,12 @@ check_docker() {
 }
 
 check_containers() {
+  if ! is_runner && ! have docker; then
+    return 0
+  fi
   section "Containers"
   if ! have docker || ! docker info >/dev/null 2>&1; then
-    skip "docker not available"
+    skip "docker not available (or no access)"
     return 0
   fi
 
@@ -1785,11 +2134,25 @@ check_containers() {
     esac
   done < <(docker inspect -f "$tpl" "${ids[@]}" 2>/dev/null || true)
 
-  info "${n_total} running containers, ${n_jobs} of them CI jobs"
+  if is_runner; then
+    info "${n_total} running containers, ${n_jobs} of them CI jobs"
+  else
+    info "${n_total} running containers"
+  fi
   return 0
 }
 
 check_caches() {
+  if ! is_runner; then
+    local d any=0
+    for d in /opt/registry-cache /opt/npm-cache /opt/monitoring /opt/logging; do
+      [[ -d "$d" ]] && any=1
+    done
+    if (( any == 0 )); then
+      skip "caches, monitoring, logging: not installed"
+      return 0
+    fi
+  fi
   section "Caches and monitoring"
   local c
   if [[ -d /opt/registry-cache ]]; then
@@ -1797,7 +2160,7 @@ check_caches() {
     if [[ "$c" == "200" ]]; then ok "Docker Hub cache 127.0.0.1:5000"
     else fail "Docker Hub cache not responding (HTTP ${c:-000}), pulls fall back to Docker Hub"; fi
   else
-    skip "Docker Hub cache not installed"
+    is_runner && skip "Docker Hub cache not installed"
   fi
 
   if [[ -d /opt/npm-cache ]]; then
@@ -1807,7 +2170,7 @@ check_caches() {
     if [[ "$c" == "200" ]]; then ok "npm cache (Verdaccio) ${bip:-172.17.0.1}:4873"
     else fail "npm cache not responding (HTTP ${c:-000}), npm ci in jobs will fail"; fi
   else
-    skip "npm cache (Verdaccio) not installed"
+    is_runner && skip "npm cache (Verdaccio) not installed"
   fi
 
   if [[ -d /srv/ci-cache ]]; then
@@ -1831,7 +2194,7 @@ check_caches() {
       else ok "no alerts firing"; fi
     fi
   else
-    skip "monitoring stack not installed"
+    is_runner && skip "monitoring stack not installed"
   fi
 
   if [[ -d /opt/logging ]]; then
@@ -1840,7 +2203,7 @@ check_caches() {
     if [[ "$(http_code http://127.0.0.1:12345/-/ready 3)" == "200" ]]; then ok "Alloy ready"
     else fail "Alloy not ready, logs are not collected"; fi
   else
-    skip "logging (Loki + Alloy) not installed"
+    is_runner && skip "logging (Loki + Alloy) not installed"
   fi
   return 0
 }
@@ -1861,17 +2224,29 @@ check_url() {
 check_network() {
   (( QUICK == 1 )) && return 0
   section "Network"
-  local h unresolved=""
-  for h in gitlab.com registry.gitlab.com registry-1.docker.io registry.npmjs.org; do
+  local h unresolved="" hosts
+  if is_runner; then
+    hosts="gitlab.com registry.gitlab.com registry-1.docker.io registry.npmjs.org"
+  else
+    hosts="cloudflare.com"
+    have docker && hosts+=" registry-1.docker.io"
+  fi
+  for h in $hosts; do
     getent ahostsv4 "$h" >/dev/null 2>&1 || unresolved="${unresolved}${h} "
   done
   if [[ -n "$unresolved" ]]; then fail "DNS cannot resolve: ${unresolved}"
-  else ok "DNS resolves GitLab, Docker Hub and npm"; fi
+  elif is_runner; then ok "DNS resolves GitLab, Docker Hub and npm"
+  else ok "DNS resolves ${hosts}"; fi
 
-  check_url "gitlab.com API" "https://gitlab.com/api/v4/version" "200 401"
-  check_url "GitLab registry" "https://registry.gitlab.com/v2/" "200 401"
-  check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"
-  check_url "npm registry" "https://registry.npmjs.org/" "200"
+  if is_runner; then
+    check_url "gitlab.com API" "https://gitlab.com/api/v4/version" "200 401"
+    check_url "GitLab registry" "https://registry.gitlab.com/v2/" "200 401"
+    check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"
+    check_url "npm registry" "https://registry.npmjs.org/" "200"
+  else
+    check_url "internet (HTTPS)" "https://cloudflare.com/" "200 301 302 403"
+    if have docker; then check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"; fi
+  fi
 
   if grep -qE '^precedence ::ffff:0:0/96' /etc/gai.conf 2>/dev/null; then
     info "IPv4 preferred over IPv6 (gai.conf)"
@@ -1880,6 +2255,7 @@ check_network() {
 }
 
 check_trends() {
+  is_runner || return 0
   section "Trends (Prometheus, last 24h)"
   if ! have jq; then
     skip "jq not installed, trend checks skipped"
@@ -2020,15 +2396,23 @@ check_trends() {
   return 0
 }
 
+detect_profile
+detect_firewall
+
 if (( ONLY_CONTAINERS == 1 )); then
-  printf '%scontainer health%s  %s | %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  printf '%scontainer health%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
   check_containers
   print_summary_and_exit
 fi
 
-printf '%shealth report%s  %s | %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+printf '%shealth report%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
+if (( LIMITED )); then info "limited mode: not root and sudo needs a password; root-only checks skipped"; fi
+if (( RUNNER_UNREGISTERED )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
 check_system
 check_security
+check_firewall
+check_updates
+check_serverinit
 check_services
 check_runner
 check_docker
@@ -2286,6 +2670,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -2526,6 +2933,29 @@ selinux_label_dir() {
 }
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
@@ -2824,6 +3254,29 @@ selinux_label_dir() {
 }
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
@@ -3303,6 +3756,29 @@ selinux_label_dir() {
 }
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
@@ -3798,6 +4274,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -4097,6 +4596,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -4321,6 +4843,29 @@ selinux_label_dir() {
 }
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
@@ -4668,6 +5213,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -4966,6 +5534,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -5176,6 +5767,29 @@ selinux_label_dir() {
 }
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
@@ -5661,6 +6275,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -5977,7 +6614,7 @@ chmod 755 "$R/install/grafana-domain.sh"
 install -d "$R/install"
 cat > "$R/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Install health, cleanup and disk guard scripts plus their systemd timers.
+# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
@@ -5993,6 +6630,7 @@ for f in health runner-weekly-cleanup.sh runner-disk-guard.sh; do
   install -m 0755 "$REPO_ROOT/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
+ensure_secure_path
 
 for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer; do
   install -m 0644 "$REPO_ROOT/systemd/$u" "/etc/systemd/system/$u"
@@ -6004,7 +6642,7 @@ systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer
 
 DRY_RUN=1 /usr/local/bin/runner-weekly-cleanup.sh >/dev/null
 systemctl list-timers 'runner-*' --no-pager
-log "OK: run 'health' for a full report"
+log "OK: run 'health' for a full report (it uses sudo itself when needed)"
 __SIC_EOF__
 chmod 755 "$R/install/host-tools.sh"
 
@@ -7472,7 +8110,7 @@ chmod 755 "$R/scripts/ci-image-prewarm.sh"
 install -d "$R/scripts"
 cat > "$R/scripts/health" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# health: one-command health and status report for the CI runner host
+# health: one-command health and status report for this host (GitLab Runner host or general server)
 set -Eeuo pipefail
 
 DISK_WARN=70
@@ -7485,6 +8123,8 @@ LOAD_FAIL=3
 QUICK=0
 ONLY_CONTAINERS=0
 COLOR=1
+PROFILE=auto
+RUNNER_UNREGISTERED=0
 CFG=/etc/gitlab-runner/config.toml
 PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
 FORECAST_MIN_HISTORY_H="${FORECAST_MIN_HISTORY_H:-6}"
@@ -7493,11 +8133,17 @@ usage() {
   cat <<'USAGE'
 Usage: health [options]
 
-One-command health and status report for this CI runner host.
+One-command health and status report for this host. Works on a GitLab Runner
+host and on a general server.
+
+Run it as a normal user: it re-runs itself through sudo when that needs no password.
+Without root and without passwordless sudo it still runs, but skips the root-only
+checks (firewall rules, fail2ban, sshd settings, journal, docker, runner).
 
 Options:
-  -q, --quick       skip slow checks (runner verify, network, pending updates)
+  -q, --quick       skip slow checks (runner verify, network, pending updates, needs-restarting)
   -c, --containers  only show health of running containers
+  --profile P       server|runner (default: auto = server; runner only when a runner is registered)
   --no-color        plain output without colors
   -h, --help        show this help
 
@@ -7505,10 +8151,13 @@ Exit codes: 0 all OK, 1 warnings only, 2 at least one failure
 USAGE
 }
 
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -q|--quick) QUICK=1 ;;
     -c|--containers) ONLY_CONTAINERS=1 ;;
+    --profile) shift; PROFILE="${1:-}" ;;
+    --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -7516,7 +8165,20 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ $EUID -eq 0 ]] || { echo "run as root: sudo health" >&2; exit 2; }
+case "$PROFILE" in
+  auto|runner|server) ;;
+  *) echo "invalid --profile '${PROFILE}': use runner or server" >&2; exit 2 ;;
+esac
+
+LIMITED=0
+# Not root: re-run through sudo when that works without a password (HEALTH_REEXEC stops loops);
+# otherwise run in limited mode and skip the checks that need root.
+if [[ $EUID -ne 0 ]]; then
+  if [[ -z "${HEALTH_REEXEC:-}" ]] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    exec sudo -n -- env HEALTH_REEXEC=1 "$(readlink -f "$0")" "${ORIG_ARGS[@]}"
+  fi
+  LIMITED=1
+fi
 
 if [[ -t 1 && "$COLOR" == "1" && -z "${NO_COLOR:-}" ]]; then
   C_OK=$'\e[32m'; C_WARN=$'\e[33m'; C_FAIL=$'\e[31m'; C_B=$'\e[1m'; C_D=$'\e[2m'; C_N=$'\e[0m'
@@ -7525,6 +8187,7 @@ else
 fi
 
 N_OK=0; N_WARN=0; N_FAIL=0
+FW_STATE=unknown
 ok()      { N_OK=$((N_OK + 1));     printf '  %s%-5s%s %s\n' "$C_OK" "OK" "$C_N" "$*"; }
 warn()    { N_WARN=$((N_WARN + 1)); printf '  %s%-5s%s %s\n' "$C_WARN" "WARN" "$C_N" "$*"; }
 fail()    { N_FAIL=$((N_FAIL + 1)); printf '  %s%-5s%s %s\n' "$C_FAIL" "FAIL" "$C_N" "$*"; }
@@ -7536,6 +8199,18 @@ gt()      { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 isnum()   { [[ "${1:-}" =~ ^-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; }
 num()     { awk -v x="$1" -v d="${2:-1}" 'BEGIN { printf "%.*f", d, x }'; }
 unit_exists() { systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q .; }
+is_runner()   { [[ "$PROFILE" == "runner" ]]; }
+detect_profile() {
+  [[ "$PROFILE" == "auto" ]] || return 0
+  # Default is a plain server. Only a host with a registered runner gets the runner checks;
+  # gitlab-runner installed but never registered is still a plain server.
+  if [[ -r "$CFG" ]] && grep -q '^[[:space:]]*\[\[runners\]\]' "$CFG" 2>/dev/null; then
+    PROFILE=runner
+  else
+    PROFILE=server
+    if have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
+  fi
+}
 http_code()   { curl -s -o /dev/null -m "${2:-5}" -w '%{http_code}' "$1" 2>/dev/null || true; }
 
 human_age() {
@@ -7598,19 +8273,28 @@ check_system() {
   swap_total=$(awk '/^SwapTotal:/ { print $2 }' /proc/meminfo)
   swap_free=$(awk '/^SwapFree:/ { print $2 }' /proc/meminfo)
   if (( swap_total > 0 )); then
-    info "swap $(( (swap_total - swap_free) / 1024 ))/$(( swap_total / 1024 )) MB used"
+    local swap_pct=$(( (swap_total - swap_free) * 100 / swap_total ))
+    msg="swap $(( (swap_total - swap_free) / 1024 ))/$(( swap_total / 1024 )) MB used (${swap_pct}%)"
+    if is_runner; then info "$msg"
+    elif (( swap_pct >= 80 )); then warn "$msg, memory pressure"
+    else ok "$msg"; fi
   else
     info "swap: none"
   fi
 
   local kills ooms victims
   # Count kills, not every related kernel line. One kill emits several matches.
-  kills=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep 'Out of memory: Killed process' || true)
+  if (( LIMITED )); then
+    kills=""
+    skip "OOM kills: needs root (kernel log)"
+  else
+    kills=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep 'Out of memory: Killed process' || true)
+  fi
   if [[ -n "$kills" ]]; then
     ooms=$(grep -c . <<<"$kills")
     victims=$(sed -nE 's/.*Killed process [0-9]+ \(([^)]+)\).*/\1/p' <<<"$kills" | sort | uniq -c | awk '{printf "%s x%s, ", $2, $1}' | sed 's/, $//')
     warn "${ooms} OOM kill(s) since boot${victims:+ (${victims})} (journalctl -k -b | grep 'Killed process')"
-  else
+  elif (( ! LIMITED )); then
     ok "no OOM kills since boot"
   fi
 
@@ -7633,20 +8317,6 @@ check_system() {
     fail "failed units: ${failed}"
   else
     ok "no failed systemd units"
-  fi
-
-  if [[ -f /var/run/reboot-required ]]; then
-    warn "reboot required after package updates"
-  elif have rpm; then
-    local latest
-    latest=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | sort -V | tail -1 || true)
-    if [[ -n "$latest" && "$latest" != *"not installed"* && "$latest" != "$(uname -r)" ]]; then
-      warn "newer kernel installed (${latest}), reboot to apply"
-    else
-      ok "running the latest installed kernel"
-    fi
-  else
-    ok "no reboot required"
   fi
 
   if have timedatectl; then
@@ -7681,7 +8351,9 @@ check_security() {
     esac
     # ausearch treats a pipe on stdin as the audit log and blocks until it closes.
     # health is often started over ssh, so force the on-disk logs and bound the query.
-    if ! have ausearch; then
+    if (( LIMITED )); then
+      skip "SELinux denials: needs root"
+    elif ! have ausearch; then
       skip "ausearch not installed"
     else
       raw=$(timeout 10 ausearch --input-logs -m avc -ts today </dev/null 2>/dev/null) || rc=$?
@@ -7700,24 +8372,35 @@ check_security() {
     fi
   fi
 
-  if have sshd; then
+  if (( LIMITED )); then
+    skip "sshd settings, listening ports, pending updates: need root (run as root for the full report)"
+  elif have sshd; then
     local sshd_t root_login
     sshd_t=$(sshd -T 2>/dev/null || true)
     if grep -qx 'passwordauthentication no' <<<"$sshd_t"; then
       ok "SSH password login disabled"
-    else
+    elif is_runner; then
       fail "SSH password login enabled"
+    else
+      warn "SSH password login enabled (set PasswordAuthentication no)"
     fi
     root_login=$(awk '/^permitrootlogin / { print $2 }' <<<"$sshd_t")
-    case "$root_login" in
-      no)  ok "SSH root login disabled" ;;
-      yes) fail "SSH root login with password allowed" ;;
-      *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo install/users.sh --lock-root" ;;
-    esac
-    if grep -q '^allowgroups ' <<<"$sshd_t"; then
-      ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
+    if is_runner; then
+      case "$root_login" in
+        no)  ok "SSH root login disabled" ;;
+        yes) fail "SSH root login with password allowed" ;;
+        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo install/users.sh --lock-root" ;;
+      esac
+      if grep -q '^allowgroups ' <<<"$sshd_t"; then
+        ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
+      else
+        warn "SSH not limited by AllowGroups (install/users.sh sets it)"
+      fi
     else
-      warn "SSH not limited by AllowGroups (install/users.sh sets it)"
+      case "$root_login" in
+        yes) warn "SSH root login with password allowed (PermitRootLogin yes)" ;;
+        *)   info "SSH root login: ${root_login:-unknown}" ;;
+      esac
     fi
   fi
 
@@ -7726,7 +8409,7 @@ check_security() {
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    ok "docker group: only gitlab-runner"
+    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
   fi
   for u in gitlab-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
@@ -7747,24 +8430,35 @@ check_security() {
   fi
 
   local exposed ssh_ports allowed
-  ssh_ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
-  ssh_ports="${ssh_ports:-22 }"
-  allowed="$(tr ' ' '|' <<<"${ssh_ports% }")|80|443"
-  if [[ " ${ssh_ports}" == *" 22 "* ]]; then
-    info "SSH listens on: ${ssh_ports}(port 22 closes with install/users.sh --lock-root)"
-  else
-    ok "SSH port: ${ssh_ports% }"
-  fi
-  exposed=$(ss -ltnH 2>/dev/null | awk '{ print $4 }' \
-    | grep -vE '^(127\.|\[::1\]|172\.17\.)' \
-    | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE "$allowed" | tr '\n' ' ' || true)
-  if [[ -n "${exposed// /}" ]]; then
-    warn "ports listening on public interfaces: ${exposed}(make sure the Hetzner firewall blocks them)"
-  else
-    ok "only SSH/HTTP/HTTPS listen on public interfaces"
+  if (( LIMITED == 0 )); then
+    ssh_ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+    ssh_ports="${ssh_ports:-22 }"
+    allowed="$(tr ' ' '|' <<<"${ssh_ports% }")|80|443"
+    if ! is_runner; then
+      info "SSH port: ${ssh_ports% }"
+    elif [[ " ${ssh_ports}" == *" 22 "* ]]; then
+      info "SSH listens on: ${ssh_ports}(port 22 closes with install/users.sh --lock-root)"
+    else
+      ok "SSH port: ${ssh_ports% }"
+    fi
+    exposed=$(ss -ltnH 2>/dev/null | awk '{ print $4 }' \
+      | grep -vE '^(127\.|\[::1\]|172\.17\.)' \
+      | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE "$allowed" | tr '\n' ' ' || true)
+    if [[ -n "${exposed// /}" ]]; then
+      if is_runner; then
+        warn "ports listening on public interfaces: ${exposed}(make sure the Hetzner firewall blocks them)"
+      elif [[ "$FW_STATE" == "active" ]]; then
+        info "ports listening on public interfaces: ${exposed}(the host firewall decides what is reachable)"
+      else
+        warn "ports listening on public interfaces: ${exposed}(no active host firewall)"
+      fi
+    else
+      ok "only SSH/HTTP/HTTPS listen on public interfaces"
+    fi
+
   fi
 
-  if (( QUICK == 0 )); then
+  if (( QUICK == 0 && LIMITED == 0 )); then
     local out n
     if have dnf; then
       if out=$(timeout 90 dnf -q updateinfo list --security 2>/dev/null); then
@@ -7789,15 +8483,217 @@ check_security() {
   return 0
 }
 
+# Sets FW_KIND (firewalld|ufw|none) and FW_STATE (active|inactive|none) without printing.
+detect_firewall() {
+  FW_KIND=none; FW_STATE=none
+  (( LIMITED == 0 )) || return 0
+  if have firewall-cmd || unit_exists firewalld.service; then
+    FW_KIND=firewalld; FW_STATE=inactive
+    if have firewall-cmd && [[ "$(firewall-cmd --state 2>/dev/null || true)" == "running" ]]; then FW_STATE=active; fi
+  elif have ufw; then
+    FW_KIND=ufw; FW_STATE=inactive
+    if ufw status 2>/dev/null | grep -qi '^Status: active'; then FW_STATE=active; fi
+  fi
+  return 0
+}
+
+check_firewall() {
+  section "Firewall and brute-force protection"
+  if (( LIMITED )); then
+    skip "firewall and fail2ban: need root (run as root for the full report)"
+    return 0
+  fi
+  local ports p ssh_ok=0 zone svc open ufw_out
+  ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+  ports="${ports:-22}"
+
+  case "$FW_KIND:$FW_STATE" in
+    firewalld:active)
+      zone=$(firewall-cmd --get-default-zone 2>/dev/null || true)
+      svc=$(firewall-cmd --zone="$zone" --list-services 2>/dev/null || true)
+      open=$(firewall-cmd --zone="$zone" --list-ports 2>/dev/null || true)
+      for p in $ports; do
+        if [[ " ${open} " == *" ${p}/tcp "* ]]; then ssh_ok=1; fi
+        if [[ "$p" == "22" && " ${svc} " == *" ssh "* ]]; then ssh_ok=1; fi
+      done
+      if (( ssh_ok )); then
+        ok "firewalld active, default zone ${zone:-?}, SSH allowed"
+      else
+        fail "firewalld active but SSH (${ports% }) is not allowed in zone ${zone:-?}; the next reload can lock you out"
+      fi
+      info "open in ${zone:-?}: services ${svc:-none} | ports ${open:-none}"
+      ;;
+    firewalld:*)
+      if is_runner; then info "firewalld installed but not running (cloud firewall assumed)"
+      else warn "firewalld installed but not running (systemctl enable --now firewalld)"; fi
+      ;;
+    ufw:active)
+      ufw_out=$(ufw status 2>/dev/null || true)
+      for p in $ports; do
+        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?[[:space:]]+ALLOW" <<<"$ufw_out"; then ssh_ok=1; fi
+      done
+      if (( ssh_ok )); then
+        ok "ufw active, SSH allowed"
+      else
+        fail "ufw active but SSH (${ports% }) is not allowed"
+      fi
+      open=$(awk '/ALLOW/ && !/\(v6\)/ { print $1 }' <<<"$ufw_out" | sort -u | tr '\n' ' ')
+      info "allowed in ufw: ${open:-none}"
+      ;;
+    ufw:*)
+      if is_runner; then info "ufw installed but inactive (cloud firewall assumed)"
+      else warn "ufw installed but inactive (ufw enable)"; fi
+      ;;
+    *)
+      if is_runner; then info "no host firewall (cloud firewall assumed)"
+      else warn "no host firewall found (firewalld or ufw)"; fi
+      ;;
+  esac
+
+  if ! have fail2ban-client && ! unit_exists fail2ban.service; then
+    if is_runner; then skip "fail2ban not installed"; else warn "fail2ban not installed (SSH brute-force protection)"; fi
+    return 0
+  fi
+  if ! systemctl is-active --quiet fail2ban 2>/dev/null && ! { have fail2ban-client && fail2ban-client ping >/dev/null 2>&1; }; then
+    warn "fail2ban not active"
+    return 0
+  fi
+  local st banned total
+  if st=$(fail2ban-client status sshd 2>/dev/null); then
+    banned=$(sed -nE 's/.*Currently banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -1)
+    total=$(sed -nE 's/.*Total banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -1)
+    ok "fail2ban active, sshd jail: ${banned:-0} banned now (${total:-0} total)"
+  else
+    warn "fail2ban active but no sshd jail (fail2ban-client status)"
+  fi
+  return 0
+}
+
+check_updates() {
+  section "Updates and reboot"
+  local t found="" n pending="" applies=0 conf
+  for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
+    unit_exists "$t" || continue
+    systemctl is-enabled --quiet "$t" 2>/dev/null || systemctl is-active --quiet "$t" 2>/dev/null || continue
+    found="$t"; break
+  done
+  if [[ -z "$found" ]]; then
+    # openSUSE and others: any enabled timer that looks like an update job
+    found=$(systemctl list-unit-files '*.timer' --state=enabled --no-legend --plain 2>/dev/null \
+      | awk '{ print $1 }' | grep -E 'zypper|yum-cron|unattended|transactional-update|packagekit-offline' | head -1 || true)
+  fi
+
+  if [[ -z "$found" ]]; then
+    warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
+  elif [[ "$found" == apt-daily-upgrade.timer ]]; then
+    if grep -qsE '^[^/]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/20auto-upgrades; then
+      ok "unattended-upgrades enabled (${found})"
+    else
+      warn "${found} enabled but APT::Periodic::Unattended-Upgrade is not 1 (/etc/apt/apt.conf.d/20auto-upgrades)"
+    fi
+  elif [[ "$found" == dnf*automatic* ]]; then
+    [[ "$found" == *install* ]] && applies=1
+    for conf in /etc/dnf/automatic.conf /etc/dnf/dnf5-plugins/automatic.conf; do
+      [[ -f "$conf" ]] || continue
+      if grep -qE '^[[:space:]]*apply_updates[[:space:]]*=[[:space:]]*(yes|true|1)' "$conf"; then applies=1; fi
+    done
+    if (( applies )); then
+      ok "automatic updates: ${found} (installs updates)"
+    else
+      warn "${found} enabled but apply_updates is not yes (updates are only downloaded or reported)"
+    fi
+  else
+    ok "automatic updates: ${found}"
+  fi
+
+  local reboot=0 latest running
+  running=$(uname -r)
+  if [[ -f /var/run/reboot-required ]]; then
+    reboot=1
+    pending=$(tr '\n' ' ' < /var/run/reboot-required.pkgs 2>/dev/null || true)
+    warn "reboot required after package updates${pending:+ (${pending% })}"
+  fi
+  if (( QUICK == 0 && LIMITED == 0 && reboot == 0 )); then
+    local out rc=0 cmd=""
+    if have needs-restarting; then cmd="needs-restarting"
+    elif have dnf; then cmd="dnf needs-restarting"; fi
+    if [[ -n "$cmd" ]]; then
+      # shellcheck disable=SC2086
+      out=$(timeout 60 $cmd -r 2>&1 </dev/null) || rc=$?
+      if (( rc == 0 )); then
+        ok "no reboot required (${cmd} -r)"
+      elif (( rc == 1 )) && grep -qi 'reboot is required' <<<"$out"; then
+        reboot=1
+        warn "reboot required (${cmd} -r): core libraries or the kernel were updated since boot"
+      else
+        skip "${cmd} -r not usable (exit ${rc}), reboot state unknown"
+      fi
+    fi
+  fi
+  if have rpm; then
+    latest=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | grep -v 'not installed' | sort -V | tail -1 || true)
+    if [[ -z "$latest" ]]; then
+      info "kernel ${running} (kernel-core not found in rpm)"
+    elif [[ "$latest" != "$running" ]]; then
+      if (( reboot == 0 )); then warn "newer kernel installed (${latest}), running ${running}; reboot to apply"
+      else info "kernel running ${running}, newest installed ${latest}"; fi
+    else
+      info "kernel ${running} is the newest installed"
+    fi
+  elif have dpkg-query && ls /boot/vmlinuz-* >/dev/null 2>&1; then
+    latest=$(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f\n' | sed 's/^vmlinuz-//' | sort -V | tail -1)
+    if [[ "$latest" != "$running" ]]; then info "kernel running ${running}, newest installed ${latest}"
+    else info "kernel ${running} is the newest installed"; fi
+  fi
+  if (( LIMITED == 1 && reboot == 0 )); then
+    info "needs-restarting skipped (needs root)"
+  elif (( QUICK == 1 && reboot == 0 )); then
+    info "needs-restarting skipped (quick mode)"
+  fi
+  return 0
+}
+
+check_serverinit() {
+  local conf=/etc/server-init.conf failed=/var/log/server-init-failed.log
+  [[ -r "$conf" || -r "$failed" ]] || return 0
+  [[ -f "$conf" || -s "$failed" ]] || return 0
+  section "Server setup"
+  if [[ -f "$conf" ]]; then
+    local vals admin
+    vals=$(grep -E '^(ADMIN_USER|EXTRA_PORTS|INSTALL_DOCKER)=' "$conf" | tr '\n' ' ' || true)
+    info "${conf}: ${vals:-no known settings}"
+    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1)
+    if [[ -n "$admin" ]]; then
+      if id "$admin" >/dev/null 2>&1; then ok "admin user ${admin} exists"
+      else warn "admin user ${admin} from ${conf} does not exist"; fi
+    fi
+    if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
+      info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
+    fi
+  fi
+  if [[ -s "$failed" ]]; then
+    local n last
+    n=$(grep -c . "$failed" || true)
+    last=$(tail -1 "$failed" | cut -c1-110)
+    warn "${n} failed setup step(s) in ${failed}; last: ${last}"
+  elif [[ -f "$failed" ]]; then
+    ok "no failed setup steps (${failed} is empty)"
+  fi
+  return 0
+}
+
 check_services() {
   section "Services"
   local u
   for u in sshd.service docker.service gitlab-runner.service; do
+    if [[ "$u" == "gitlab-runner.service" ]] && ! is_runner; then continue; fi
     if ! unit_exists "$u"; then
       if [[ "$u" == "sshd.service" ]] && unit_exists ssh.service; then
         u=ssh.service
-      else
+      elif is_runner; then
         skip "${u} not installed"
+        continue
+      else
         continue
       fi
     fi
@@ -7809,7 +8705,8 @@ check_services() {
   done
 
   local t next
-  for t in dnf-automatic.timer unattended-upgrades.service runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+  for t in runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+    is_runner || break
     unit_exists "$t" || continue
     if systemctl is-active --quiet "$t" 2>/dev/null; then
       next=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2>/dev/null || true)
@@ -7825,6 +8722,7 @@ check_services() {
 
   local s started result
   for s in runner-weekly-cleanup.service runner-disk-guard.service ci-image-prewarm.service; do
+    is_runner || break
     unit_exists "$s" || continue
     started=$(systemctl show "$s" -p ExecMainStartTimestamp --value 2>/dev/null || true)
     result=$(systemctl show "$s" -p Result --value 2>/dev/null || true)
@@ -7837,7 +8735,7 @@ check_services() {
     fi
   done
 
-  if unit_exists ci-image-prewarm.service; then
+  if is_runner && unit_exists ci-image-prewarm.service; then
     local summary noarm failed_n
     summary=$(journalctl -t ci-image-prewarm --since -2d --no-pager -o cat 2>/dev/null | grep 'summary:' | tail -1 || true)
     if [[ -n "$summary" ]]; then
@@ -7856,6 +8754,14 @@ check_services() {
 }
 
 check_runner() {
+  if ! is_runner; then
+    skip "runner: not a runner host (skipped)"
+    return 0
+  fi
+  if (( LIMITED )); then
+    skip "runner: needs root (skipped)"
+    return 0
+  fi
   section "GitLab Runner"
   if ! have gitlab-runner; then
     skip "gitlab-runner not installed"
@@ -7925,9 +8831,17 @@ check_runner() {
 }
 
 check_docker() {
+  if ! is_runner && ! have docker; then
+    skip "docker: not installed"
+    return 0
+  fi
   section "Docker"
   if ! have docker; then
     skip "docker not installed"
+    return 0
+  fi
+  if (( LIMITED )) && ! docker info >/dev/null 2>&1; then
+    skip "docker: no access (not root, not in the docker group)"
     return 0
   fi
   if ! docker info >/dev/null 2>&1; then
@@ -7950,9 +8864,12 @@ check_docker() {
 }
 
 check_containers() {
+  if ! is_runner && ! have docker; then
+    return 0
+  fi
   section "Containers"
   if ! have docker || ! docker info >/dev/null 2>&1; then
-    skip "docker not available"
+    skip "docker not available (or no access)"
     return 0
   fi
 
@@ -8035,11 +8952,25 @@ check_containers() {
     esac
   done < <(docker inspect -f "$tpl" "${ids[@]}" 2>/dev/null || true)
 
-  info "${n_total} running containers, ${n_jobs} of them CI jobs"
+  if is_runner; then
+    info "${n_total} running containers, ${n_jobs} of them CI jobs"
+  else
+    info "${n_total} running containers"
+  fi
   return 0
 }
 
 check_caches() {
+  if ! is_runner; then
+    local d any=0
+    for d in /opt/registry-cache /opt/npm-cache /opt/monitoring /opt/logging; do
+      [[ -d "$d" ]] && any=1
+    done
+    if (( any == 0 )); then
+      skip "caches, monitoring, logging: not installed"
+      return 0
+    fi
+  fi
   section "Caches and monitoring"
   local c
   if [[ -d /opt/registry-cache ]]; then
@@ -8047,7 +8978,7 @@ check_caches() {
     if [[ "$c" == "200" ]]; then ok "Docker Hub cache 127.0.0.1:5000"
     else fail "Docker Hub cache not responding (HTTP ${c:-000}), pulls fall back to Docker Hub"; fi
   else
-    skip "Docker Hub cache not installed"
+    is_runner && skip "Docker Hub cache not installed"
   fi
 
   if [[ -d /opt/npm-cache ]]; then
@@ -8057,7 +8988,7 @@ check_caches() {
     if [[ "$c" == "200" ]]; then ok "npm cache (Verdaccio) ${bip:-172.17.0.1}:4873"
     else fail "npm cache not responding (HTTP ${c:-000}), npm ci in jobs will fail"; fi
   else
-    skip "npm cache (Verdaccio) not installed"
+    is_runner && skip "npm cache (Verdaccio) not installed"
   fi
 
   if [[ -d /srv/ci-cache ]]; then
@@ -8081,7 +9012,7 @@ check_caches() {
       else ok "no alerts firing"; fi
     fi
   else
-    skip "monitoring stack not installed"
+    is_runner && skip "monitoring stack not installed"
   fi
 
   if [[ -d /opt/logging ]]; then
@@ -8090,7 +9021,7 @@ check_caches() {
     if [[ "$(http_code http://127.0.0.1:12345/-/ready 3)" == "200" ]]; then ok "Alloy ready"
     else fail "Alloy not ready, logs are not collected"; fi
   else
-    skip "logging (Loki + Alloy) not installed"
+    is_runner && skip "logging (Loki + Alloy) not installed"
   fi
   return 0
 }
@@ -8111,17 +9042,29 @@ check_url() {
 check_network() {
   (( QUICK == 1 )) && return 0
   section "Network"
-  local h unresolved=""
-  for h in gitlab.com registry.gitlab.com registry-1.docker.io registry.npmjs.org; do
+  local h unresolved="" hosts
+  if is_runner; then
+    hosts="gitlab.com registry.gitlab.com registry-1.docker.io registry.npmjs.org"
+  else
+    hosts="cloudflare.com"
+    have docker && hosts+=" registry-1.docker.io"
+  fi
+  for h in $hosts; do
     getent ahostsv4 "$h" >/dev/null 2>&1 || unresolved="${unresolved}${h} "
   done
   if [[ -n "$unresolved" ]]; then fail "DNS cannot resolve: ${unresolved}"
-  else ok "DNS resolves GitLab, Docker Hub and npm"; fi
+  elif is_runner; then ok "DNS resolves GitLab, Docker Hub and npm"
+  else ok "DNS resolves ${hosts}"; fi
 
-  check_url "gitlab.com API" "https://gitlab.com/api/v4/version" "200 401"
-  check_url "GitLab registry" "https://registry.gitlab.com/v2/" "200 401"
-  check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"
-  check_url "npm registry" "https://registry.npmjs.org/" "200"
+  if is_runner; then
+    check_url "gitlab.com API" "https://gitlab.com/api/v4/version" "200 401"
+    check_url "GitLab registry" "https://registry.gitlab.com/v2/" "200 401"
+    check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"
+    check_url "npm registry" "https://registry.npmjs.org/" "200"
+  else
+    check_url "internet (HTTPS)" "https://cloudflare.com/" "200 301 302 403"
+    if have docker; then check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"; fi
+  fi
 
   if grep -qE '^precedence ::ffff:0:0/96' /etc/gai.conf 2>/dev/null; then
     info "IPv4 preferred over IPv6 (gai.conf)"
@@ -8130,6 +9073,7 @@ check_network() {
 }
 
 check_trends() {
+  is_runner || return 0
   section "Trends (Prometheus, last 24h)"
   if ! have jq; then
     skip "jq not installed, trend checks skipped"
@@ -8270,15 +9214,23 @@ check_trends() {
   return 0
 }
 
+detect_profile
+detect_firewall
+
 if (( ONLY_CONTAINERS == 1 )); then
-  printf '%scontainer health%s  %s | %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  printf '%scontainer health%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
   check_containers
   print_summary_and_exit
 fi
 
-printf '%shealth report%s  %s | %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+printf '%shealth report%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
+if (( LIMITED )); then info "limited mode: not root and sudo needs a password; root-only checks skipped"; fi
+if (( RUNNER_UNREGISTERED )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
 check_system
 check_security
+check_firewall
+check_updates
+check_serverinit
 check_services
 check_runner
 check_docker
@@ -9227,6 +10179,29 @@ selinux_label_dir() {
 
 restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
 
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -9543,7 +10518,7 @@ chmod 755 "$R/install/grafana-domain.sh"
 install -d "$R/install"
 cat > "$R/install/host-tools.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Install health, cleanup and disk guard scripts plus their systemd timers.
+# Install health (plus the sudo secure_path fix so `sudo health` works), cleanup and disk guard scripts plus their systemd timers.
 # Use on servers built without the cloud-init in this repo, or to update the scripts.
 set -Eeuo pipefail
 # shellcheck source=install/lib.sh
@@ -9559,6 +10534,7 @@ for f in health runner-weekly-cleanup.sh runner-disk-guard.sh; do
   install -m 0755 "$REPO_ROOT/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
+ensure_secure_path
 
 for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer; do
   install -m 0644 "$REPO_ROOT/systemd/$u" "/etc/systemd/system/$u"
@@ -9570,7 +10546,7 @@ systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer
 
 DRY_RUN=1 /usr/local/bin/runner-weekly-cleanup.sh >/dev/null
 systemctl list-timers 'runner-*' --no-pager
-log "OK: run 'health' for a full report"
+log "OK: run 'health' for a full report (it uses sudo itself when needed)"
 __SIC_EOF__
 chmod 755 "$R/install/host-tools.sh"
 
@@ -11038,7 +12014,7 @@ chmod 755 "$R/scripts/ci-image-prewarm.sh"
 install -d "$R/scripts"
 cat > "$R/scripts/health" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# health: one-command health and status report for the CI runner host
+# health: one-command health and status report for this host (GitLab Runner host or general server)
 set -Eeuo pipefail
 
 DISK_WARN=70
@@ -11051,6 +12027,8 @@ LOAD_FAIL=3
 QUICK=0
 ONLY_CONTAINERS=0
 COLOR=1
+PROFILE=auto
+RUNNER_UNREGISTERED=0
 CFG=/etc/gitlab-runner/config.toml
 PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
 FORECAST_MIN_HISTORY_H="${FORECAST_MIN_HISTORY_H:-6}"
@@ -11059,11 +12037,17 @@ usage() {
   cat <<'USAGE'
 Usage: health [options]
 
-One-command health and status report for this CI runner host.
+One-command health and status report for this host. Works on a GitLab Runner
+host and on a general server.
+
+Run it as a normal user: it re-runs itself through sudo when that needs no password.
+Without root and without passwordless sudo it still runs, but skips the root-only
+checks (firewall rules, fail2ban, sshd settings, journal, docker, runner).
 
 Options:
-  -q, --quick       skip slow checks (runner verify, network, pending updates)
+  -q, --quick       skip slow checks (runner verify, network, pending updates, needs-restarting)
   -c, --containers  only show health of running containers
+  --profile P       server|runner (default: auto = server; runner only when a runner is registered)
   --no-color        plain output without colors
   -h, --help        show this help
 
@@ -11071,10 +12055,13 @@ Exit codes: 0 all OK, 1 warnings only, 2 at least one failure
 USAGE
 }
 
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -q|--quick) QUICK=1 ;;
     -c|--containers) ONLY_CONTAINERS=1 ;;
+    --profile) shift; PROFILE="${1:-}" ;;
+    --profile=*) PROFILE="${1#--profile=}" ;;
     --no-color) COLOR=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -11082,7 +12069,20 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ $EUID -eq 0 ]] || { echo "run as root: sudo health" >&2; exit 2; }
+case "$PROFILE" in
+  auto|runner|server) ;;
+  *) echo "invalid --profile '${PROFILE}': use runner or server" >&2; exit 2 ;;
+esac
+
+LIMITED=0
+# Not root: re-run through sudo when that works without a password (HEALTH_REEXEC stops loops);
+# otherwise run in limited mode and skip the checks that need root.
+if [[ $EUID -ne 0 ]]; then
+  if [[ -z "${HEALTH_REEXEC:-}" ]] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    exec sudo -n -- env HEALTH_REEXEC=1 "$(readlink -f "$0")" "${ORIG_ARGS[@]}"
+  fi
+  LIMITED=1
+fi
 
 if [[ -t 1 && "$COLOR" == "1" && -z "${NO_COLOR:-}" ]]; then
   C_OK=$'\e[32m'; C_WARN=$'\e[33m'; C_FAIL=$'\e[31m'; C_B=$'\e[1m'; C_D=$'\e[2m'; C_N=$'\e[0m'
@@ -11091,6 +12091,7 @@ else
 fi
 
 N_OK=0; N_WARN=0; N_FAIL=0
+FW_STATE=unknown
 ok()      { N_OK=$((N_OK + 1));     printf '  %s%-5s%s %s\n' "$C_OK" "OK" "$C_N" "$*"; }
 warn()    { N_WARN=$((N_WARN + 1)); printf '  %s%-5s%s %s\n' "$C_WARN" "WARN" "$C_N" "$*"; }
 fail()    { N_FAIL=$((N_FAIL + 1)); printf '  %s%-5s%s %s\n' "$C_FAIL" "FAIL" "$C_N" "$*"; }
@@ -11102,6 +12103,18 @@ gt()      { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 isnum()   { [[ "${1:-}" =~ ^-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; }
 num()     { awk -v x="$1" -v d="${2:-1}" 'BEGIN { printf "%.*f", d, x }'; }
 unit_exists() { systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q .; }
+is_runner()   { [[ "$PROFILE" == "runner" ]]; }
+detect_profile() {
+  [[ "$PROFILE" == "auto" ]] || return 0
+  # Default is a plain server. Only a host with a registered runner gets the runner checks;
+  # gitlab-runner installed but never registered is still a plain server.
+  if [[ -r "$CFG" ]] && grep -q '^[[:space:]]*\[\[runners\]\]' "$CFG" 2>/dev/null; then
+    PROFILE=runner
+  else
+    PROFILE=server
+    if have gitlab-runner || unit_exists gitlab-runner.service; then RUNNER_UNREGISTERED=1; fi
+  fi
+}
 http_code()   { curl -s -o /dev/null -m "${2:-5}" -w '%{http_code}' "$1" 2>/dev/null || true; }
 
 human_age() {
@@ -11164,19 +12177,28 @@ check_system() {
   swap_total=$(awk '/^SwapTotal:/ { print $2 }' /proc/meminfo)
   swap_free=$(awk '/^SwapFree:/ { print $2 }' /proc/meminfo)
   if (( swap_total > 0 )); then
-    info "swap $(( (swap_total - swap_free) / 1024 ))/$(( swap_total / 1024 )) MB used"
+    local swap_pct=$(( (swap_total - swap_free) * 100 / swap_total ))
+    msg="swap $(( (swap_total - swap_free) / 1024 ))/$(( swap_total / 1024 )) MB used (${swap_pct}%)"
+    if is_runner; then info "$msg"
+    elif (( swap_pct >= 80 )); then warn "$msg, memory pressure"
+    else ok "$msg"; fi
   else
     info "swap: none"
   fi
 
   local kills ooms victims
   # Count kills, not every related kernel line. One kill emits several matches.
-  kills=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep 'Out of memory: Killed process' || true)
+  if (( LIMITED )); then
+    kills=""
+    skip "OOM kills: needs root (kernel log)"
+  else
+    kills=$(journalctl -k -b --no-pager -o cat 2>/dev/null | grep 'Out of memory: Killed process' || true)
+  fi
   if [[ -n "$kills" ]]; then
     ooms=$(grep -c . <<<"$kills")
     victims=$(sed -nE 's/.*Killed process [0-9]+ \(([^)]+)\).*/\1/p' <<<"$kills" | sort | uniq -c | awk '{printf "%s x%s, ", $2, $1}' | sed 's/, $//')
     warn "${ooms} OOM kill(s) since boot${victims:+ (${victims})} (journalctl -k -b | grep 'Killed process')"
-  else
+  elif (( ! LIMITED )); then
     ok "no OOM kills since boot"
   fi
 
@@ -11199,20 +12221,6 @@ check_system() {
     fail "failed units: ${failed}"
   else
     ok "no failed systemd units"
-  fi
-
-  if [[ -f /var/run/reboot-required ]]; then
-    warn "reboot required after package updates"
-  elif have rpm; then
-    local latest
-    latest=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | sort -V | tail -1 || true)
-    if [[ -n "$latest" && "$latest" != *"not installed"* && "$latest" != "$(uname -r)" ]]; then
-      warn "newer kernel installed (${latest}), reboot to apply"
-    else
-      ok "running the latest installed kernel"
-    fi
-  else
-    ok "no reboot required"
   fi
 
   if have timedatectl; then
@@ -11247,7 +12255,9 @@ check_security() {
     esac
     # ausearch treats a pipe on stdin as the audit log and blocks until it closes.
     # health is often started over ssh, so force the on-disk logs and bound the query.
-    if ! have ausearch; then
+    if (( LIMITED )); then
+      skip "SELinux denials: needs root"
+    elif ! have ausearch; then
       skip "ausearch not installed"
     else
       raw=$(timeout 10 ausearch --input-logs -m avc -ts today </dev/null 2>/dev/null) || rc=$?
@@ -11266,24 +12276,35 @@ check_security() {
     fi
   fi
 
-  if have sshd; then
+  if (( LIMITED )); then
+    skip "sshd settings, listening ports, pending updates: need root (run as root for the full report)"
+  elif have sshd; then
     local sshd_t root_login
     sshd_t=$(sshd -T 2>/dev/null || true)
     if grep -qx 'passwordauthentication no' <<<"$sshd_t"; then
       ok "SSH password login disabled"
-    else
+    elif is_runner; then
       fail "SSH password login enabled"
+    else
+      warn "SSH password login enabled (set PasswordAuthentication no)"
     fi
     root_login=$(awk '/^permitrootlogin / { print $2 }' <<<"$sshd_t")
-    case "$root_login" in
-      no)  ok "SSH root login disabled" ;;
-      yes) fail "SSH root login with password allowed" ;;
-      *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo install/users.sh --lock-root" ;;
-    esac
-    if grep -q '^allowgroups ' <<<"$sshd_t"; then
-      ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
+    if is_runner; then
+      case "$root_login" in
+        no)  ok "SSH root login disabled" ;;
+        yes) fail "SSH root login with password allowed" ;;
+        *)   warn "SSH root login by key still allowed (${root_login:-unknown}); disable: sudo install/users.sh --lock-root" ;;
+      esac
+      if grep -q '^allowgroups ' <<<"$sshd_t"; then
+        ok "SSH limited to groups: $(awk '/^allowgroups / { printf "%s ", $2 }' <<<"$sshd_t")"
+      else
+        warn "SSH not limited by AllowGroups (install/users.sh sets it)"
+      fi
     else
-      warn "SSH not limited by AllowGroups (install/users.sh sets it)"
+      case "$root_login" in
+        yes) warn "SSH root login with password allowed (PermitRootLogin yes)" ;;
+        *)   info "SSH root login: ${root_login:-unknown}" ;;
+      esac
     fi
   fi
 
@@ -11292,7 +12313,7 @@ check_security() {
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    ok "docker group: only gitlab-runner"
+    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
   fi
   for u in gitlab-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
@@ -11313,24 +12334,35 @@ check_security() {
   fi
 
   local exposed ssh_ports allowed
-  ssh_ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
-  ssh_ports="${ssh_ports:-22 }"
-  allowed="$(tr ' ' '|' <<<"${ssh_ports% }")|80|443"
-  if [[ " ${ssh_ports}" == *" 22 "* ]]; then
-    info "SSH listens on: ${ssh_ports}(port 22 closes with install/users.sh --lock-root)"
-  else
-    ok "SSH port: ${ssh_ports% }"
-  fi
-  exposed=$(ss -ltnH 2>/dev/null | awk '{ print $4 }' \
-    | grep -vE '^(127\.|\[::1\]|172\.17\.)' \
-    | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE "$allowed" | tr '\n' ' ' || true)
-  if [[ -n "${exposed// /}" ]]; then
-    warn "ports listening on public interfaces: ${exposed}(make sure the Hetzner firewall blocks them)"
-  else
-    ok "only SSH/HTTP/HTTPS listen on public interfaces"
+  if (( LIMITED == 0 )); then
+    ssh_ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+    ssh_ports="${ssh_ports:-22 }"
+    allowed="$(tr ' ' '|' <<<"${ssh_ports% }")|80|443"
+    if ! is_runner; then
+      info "SSH port: ${ssh_ports% }"
+    elif [[ " ${ssh_ports}" == *" 22 "* ]]; then
+      info "SSH listens on: ${ssh_ports}(port 22 closes with install/users.sh --lock-root)"
+    else
+      ok "SSH port: ${ssh_ports% }"
+    fi
+    exposed=$(ss -ltnH 2>/dev/null | awk '{ print $4 }' \
+      | grep -vE '^(127\.|\[::1\]|172\.17\.)' \
+      | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | grep -vxE "$allowed" | tr '\n' ' ' || true)
+    if [[ -n "${exposed// /}" ]]; then
+      if is_runner; then
+        warn "ports listening on public interfaces: ${exposed}(make sure the Hetzner firewall blocks them)"
+      elif [[ "$FW_STATE" == "active" ]]; then
+        info "ports listening on public interfaces: ${exposed}(the host firewall decides what is reachable)"
+      else
+        warn "ports listening on public interfaces: ${exposed}(no active host firewall)"
+      fi
+    else
+      ok "only SSH/HTTP/HTTPS listen on public interfaces"
+    fi
+
   fi
 
-  if (( QUICK == 0 )); then
+  if (( QUICK == 0 && LIMITED == 0 )); then
     local out n
     if have dnf; then
       if out=$(timeout 90 dnf -q updateinfo list --security 2>/dev/null); then
@@ -11355,15 +12387,217 @@ check_security() {
   return 0
 }
 
+# Sets FW_KIND (firewalld|ufw|none) and FW_STATE (active|inactive|none) without printing.
+detect_firewall() {
+  FW_KIND=none; FW_STATE=none
+  (( LIMITED == 0 )) || return 0
+  if have firewall-cmd || unit_exists firewalld.service; then
+    FW_KIND=firewalld; FW_STATE=inactive
+    if have firewall-cmd && [[ "$(firewall-cmd --state 2>/dev/null || true)" == "running" ]]; then FW_STATE=active; fi
+  elif have ufw; then
+    FW_KIND=ufw; FW_STATE=inactive
+    if ufw status 2>/dev/null | grep -qi '^Status: active'; then FW_STATE=active; fi
+  fi
+  return 0
+}
+
+check_firewall() {
+  section "Firewall and brute-force protection"
+  if (( LIMITED )); then
+    skip "firewall and fail2ban: need root (run as root for the full report)"
+    return 0
+  fi
+  local ports p ssh_ok=0 zone svc open ufw_out
+  ports=$(sshd -T 2>/dev/null | awk '/^port / { print $2 }' | sort -un | tr '\n' ' ' || true)
+  ports="${ports:-22}"
+
+  case "$FW_KIND:$FW_STATE" in
+    firewalld:active)
+      zone=$(firewall-cmd --get-default-zone 2>/dev/null || true)
+      svc=$(firewall-cmd --zone="$zone" --list-services 2>/dev/null || true)
+      open=$(firewall-cmd --zone="$zone" --list-ports 2>/dev/null || true)
+      for p in $ports; do
+        if [[ " ${open} " == *" ${p}/tcp "* ]]; then ssh_ok=1; fi
+        if [[ "$p" == "22" && " ${svc} " == *" ssh "* ]]; then ssh_ok=1; fi
+      done
+      if (( ssh_ok )); then
+        ok "firewalld active, default zone ${zone:-?}, SSH allowed"
+      else
+        fail "firewalld active but SSH (${ports% }) is not allowed in zone ${zone:-?}; the next reload can lock you out"
+      fi
+      info "open in ${zone:-?}: services ${svc:-none} | ports ${open:-none}"
+      ;;
+    firewalld:*)
+      if is_runner; then info "firewalld installed but not running (cloud firewall assumed)"
+      else warn "firewalld installed but not running (systemctl enable --now firewalld)"; fi
+      ;;
+    ufw:active)
+      ufw_out=$(ufw status 2>/dev/null || true)
+      for p in $ports; do
+        if grep -Eq "^(${p}(/tcp)?|OpenSSH|SSH)( \\(v6\\))?[[:space:]]+ALLOW" <<<"$ufw_out"; then ssh_ok=1; fi
+      done
+      if (( ssh_ok )); then
+        ok "ufw active, SSH allowed"
+      else
+        fail "ufw active but SSH (${ports% }) is not allowed"
+      fi
+      open=$(awk '/ALLOW/ && !/\(v6\)/ { print $1 }' <<<"$ufw_out" | sort -u | tr '\n' ' ')
+      info "allowed in ufw: ${open:-none}"
+      ;;
+    ufw:*)
+      if is_runner; then info "ufw installed but inactive (cloud firewall assumed)"
+      else warn "ufw installed but inactive (ufw enable)"; fi
+      ;;
+    *)
+      if is_runner; then info "no host firewall (cloud firewall assumed)"
+      else warn "no host firewall found (firewalld or ufw)"; fi
+      ;;
+  esac
+
+  if ! have fail2ban-client && ! unit_exists fail2ban.service; then
+    if is_runner; then skip "fail2ban not installed"; else warn "fail2ban not installed (SSH brute-force protection)"; fi
+    return 0
+  fi
+  if ! systemctl is-active --quiet fail2ban 2>/dev/null && ! { have fail2ban-client && fail2ban-client ping >/dev/null 2>&1; }; then
+    warn "fail2ban not active"
+    return 0
+  fi
+  local st banned total
+  if st=$(fail2ban-client status sshd 2>/dev/null); then
+    banned=$(sed -nE 's/.*Currently banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -1)
+    total=$(sed -nE 's/.*Total banned:[[:space:]]*([0-9]+).*/\1/p' <<<"$st" | head -1)
+    ok "fail2ban active, sshd jail: ${banned:-0} banned now (${total:-0} total)"
+  else
+    warn "fail2ban active but no sshd jail (fail2ban-client status)"
+  fi
+  return 0
+}
+
+check_updates() {
+  section "Updates and reboot"
+  local t found="" n pending="" applies=0 conf
+  for t in dnf5-automatic.timer dnf-automatic-install.timer dnf-automatic.timer apt-daily-upgrade.timer; do
+    unit_exists "$t" || continue
+    systemctl is-enabled --quiet "$t" 2>/dev/null || systemctl is-active --quiet "$t" 2>/dev/null || continue
+    found="$t"; break
+  done
+  if [[ -z "$found" ]]; then
+    # openSUSE and others: any enabled timer that looks like an update job
+    found=$(systemctl list-unit-files '*.timer' --state=enabled --no-legend --plain 2>/dev/null \
+      | awk '{ print $1 }' | grep -E 'zypper|yum-cron|unattended|transactional-update|packagekit-offline' | head -1 || true)
+  fi
+
+  if [[ -z "$found" ]]; then
+    warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
+  elif [[ "$found" == apt-daily-upgrade.timer ]]; then
+    if grep -qsE '^[^/]*APT::Periodic::Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/20auto-upgrades; then
+      ok "unattended-upgrades enabled (${found})"
+    else
+      warn "${found} enabled but APT::Periodic::Unattended-Upgrade is not 1 (/etc/apt/apt.conf.d/20auto-upgrades)"
+    fi
+  elif [[ "$found" == dnf*automatic* ]]; then
+    [[ "$found" == *install* ]] && applies=1
+    for conf in /etc/dnf/automatic.conf /etc/dnf/dnf5-plugins/automatic.conf; do
+      [[ -f "$conf" ]] || continue
+      if grep -qE '^[[:space:]]*apply_updates[[:space:]]*=[[:space:]]*(yes|true|1)' "$conf"; then applies=1; fi
+    done
+    if (( applies )); then
+      ok "automatic updates: ${found} (installs updates)"
+    else
+      warn "${found} enabled but apply_updates is not yes (updates are only downloaded or reported)"
+    fi
+  else
+    ok "automatic updates: ${found}"
+  fi
+
+  local reboot=0 latest running
+  running=$(uname -r)
+  if [[ -f /var/run/reboot-required ]]; then
+    reboot=1
+    pending=$(tr '\n' ' ' < /var/run/reboot-required.pkgs 2>/dev/null || true)
+    warn "reboot required after package updates${pending:+ (${pending% })}"
+  fi
+  if (( QUICK == 0 && LIMITED == 0 && reboot == 0 )); then
+    local out rc=0 cmd=""
+    if have needs-restarting; then cmd="needs-restarting"
+    elif have dnf; then cmd="dnf needs-restarting"; fi
+    if [[ -n "$cmd" ]]; then
+      # shellcheck disable=SC2086
+      out=$(timeout 60 $cmd -r 2>&1 </dev/null) || rc=$?
+      if (( rc == 0 )); then
+        ok "no reboot required (${cmd} -r)"
+      elif (( rc == 1 )) && grep -qi 'reboot is required' <<<"$out"; then
+        reboot=1
+        warn "reboot required (${cmd} -r): core libraries or the kernel were updated since boot"
+      else
+        skip "${cmd} -r not usable (exit ${rc}), reboot state unknown"
+      fi
+    fi
+  fi
+  if have rpm; then
+    latest=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | grep -v 'not installed' | sort -V | tail -1 || true)
+    if [[ -z "$latest" ]]; then
+      info "kernel ${running} (kernel-core not found in rpm)"
+    elif [[ "$latest" != "$running" ]]; then
+      if (( reboot == 0 )); then warn "newer kernel installed (${latest}), running ${running}; reboot to apply"
+      else info "kernel running ${running}, newest installed ${latest}"; fi
+    else
+      info "kernel ${running} is the newest installed"
+    fi
+  elif have dpkg-query && ls /boot/vmlinuz-* >/dev/null 2>&1; then
+    latest=$(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f\n' | sed 's/^vmlinuz-//' | sort -V | tail -1)
+    if [[ "$latest" != "$running" ]]; then info "kernel running ${running}, newest installed ${latest}"
+    else info "kernel ${running} is the newest installed"; fi
+  fi
+  if (( LIMITED == 1 && reboot == 0 )); then
+    info "needs-restarting skipped (needs root)"
+  elif (( QUICK == 1 && reboot == 0 )); then
+    info "needs-restarting skipped (quick mode)"
+  fi
+  return 0
+}
+
+check_serverinit() {
+  local conf=/etc/server-init.conf failed=/var/log/server-init-failed.log
+  [[ -r "$conf" || -r "$failed" ]] || return 0
+  [[ -f "$conf" || -s "$failed" ]] || return 0
+  section "Server setup"
+  if [[ -f "$conf" ]]; then
+    local vals admin
+    vals=$(grep -E '^(ADMIN_USER|EXTRA_PORTS|INSTALL_DOCKER)=' "$conf" | tr '\n' ' ' || true)
+    info "${conf}: ${vals:-no known settings}"
+    admin=$(sed -nE 's/^ADMIN_USER=["]?([A-Za-z0-9_-]+).*/\1/p' "$conf" | tail -1)
+    if [[ -n "$admin" ]]; then
+      if id "$admin" >/dev/null 2>&1; then ok "admin user ${admin} exists"
+      else warn "admin user ${admin} from ${conf} does not exist"; fi
+    fi
+    if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
+      info "sshd hardening drop-in present (sshd_config.d/00-hardening.conf)"
+    fi
+  fi
+  if [[ -s "$failed" ]]; then
+    local n last
+    n=$(grep -c . "$failed" || true)
+    last=$(tail -1 "$failed" | cut -c1-110)
+    warn "${n} failed setup step(s) in ${failed}; last: ${last}"
+  elif [[ -f "$failed" ]]; then
+    ok "no failed setup steps (${failed} is empty)"
+  fi
+  return 0
+}
+
 check_services() {
   section "Services"
   local u
   for u in sshd.service docker.service gitlab-runner.service; do
+    if [[ "$u" == "gitlab-runner.service" ]] && ! is_runner; then continue; fi
     if ! unit_exists "$u"; then
       if [[ "$u" == "sshd.service" ]] && unit_exists ssh.service; then
         u=ssh.service
-      else
+      elif is_runner; then
         skip "${u} not installed"
+        continue
+      else
         continue
       fi
     fi
@@ -11375,7 +12609,8 @@ check_services() {
   done
 
   local t next
-  for t in dnf-automatic.timer unattended-upgrades.service runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+  for t in runner-weekly-cleanup.timer runner-disk-guard.timer ci-image-prewarm.timer; do
+    is_runner || break
     unit_exists "$t" || continue
     if systemctl is-active --quiet "$t" 2>/dev/null; then
       next=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2>/dev/null || true)
@@ -11391,6 +12626,7 @@ check_services() {
 
   local s started result
   for s in runner-weekly-cleanup.service runner-disk-guard.service ci-image-prewarm.service; do
+    is_runner || break
     unit_exists "$s" || continue
     started=$(systemctl show "$s" -p ExecMainStartTimestamp --value 2>/dev/null || true)
     result=$(systemctl show "$s" -p Result --value 2>/dev/null || true)
@@ -11403,7 +12639,7 @@ check_services() {
     fi
   done
 
-  if unit_exists ci-image-prewarm.service; then
+  if is_runner && unit_exists ci-image-prewarm.service; then
     local summary noarm failed_n
     summary=$(journalctl -t ci-image-prewarm --since -2d --no-pager -o cat 2>/dev/null | grep 'summary:' | tail -1 || true)
     if [[ -n "$summary" ]]; then
@@ -11422,6 +12658,14 @@ check_services() {
 }
 
 check_runner() {
+  if ! is_runner; then
+    skip "runner: not a runner host (skipped)"
+    return 0
+  fi
+  if (( LIMITED )); then
+    skip "runner: needs root (skipped)"
+    return 0
+  fi
   section "GitLab Runner"
   if ! have gitlab-runner; then
     skip "gitlab-runner not installed"
@@ -11491,9 +12735,17 @@ check_runner() {
 }
 
 check_docker() {
+  if ! is_runner && ! have docker; then
+    skip "docker: not installed"
+    return 0
+  fi
   section "Docker"
   if ! have docker; then
     skip "docker not installed"
+    return 0
+  fi
+  if (( LIMITED )) && ! docker info >/dev/null 2>&1; then
+    skip "docker: no access (not root, not in the docker group)"
     return 0
   fi
   if ! docker info >/dev/null 2>&1; then
@@ -11516,9 +12768,12 @@ check_docker() {
 }
 
 check_containers() {
+  if ! is_runner && ! have docker; then
+    return 0
+  fi
   section "Containers"
   if ! have docker || ! docker info >/dev/null 2>&1; then
-    skip "docker not available"
+    skip "docker not available (or no access)"
     return 0
   fi
 
@@ -11601,11 +12856,25 @@ check_containers() {
     esac
   done < <(docker inspect -f "$tpl" "${ids[@]}" 2>/dev/null || true)
 
-  info "${n_total} running containers, ${n_jobs} of them CI jobs"
+  if is_runner; then
+    info "${n_total} running containers, ${n_jobs} of them CI jobs"
+  else
+    info "${n_total} running containers"
+  fi
   return 0
 }
 
 check_caches() {
+  if ! is_runner; then
+    local d any=0
+    for d in /opt/registry-cache /opt/npm-cache /opt/monitoring /opt/logging; do
+      [[ -d "$d" ]] && any=1
+    done
+    if (( any == 0 )); then
+      skip "caches, monitoring, logging: not installed"
+      return 0
+    fi
+  fi
   section "Caches and monitoring"
   local c
   if [[ -d /opt/registry-cache ]]; then
@@ -11613,7 +12882,7 @@ check_caches() {
     if [[ "$c" == "200" ]]; then ok "Docker Hub cache 127.0.0.1:5000"
     else fail "Docker Hub cache not responding (HTTP ${c:-000}), pulls fall back to Docker Hub"; fi
   else
-    skip "Docker Hub cache not installed"
+    is_runner && skip "Docker Hub cache not installed"
   fi
 
   if [[ -d /opt/npm-cache ]]; then
@@ -11623,7 +12892,7 @@ check_caches() {
     if [[ "$c" == "200" ]]; then ok "npm cache (Verdaccio) ${bip:-172.17.0.1}:4873"
     else fail "npm cache not responding (HTTP ${c:-000}), npm ci in jobs will fail"; fi
   else
-    skip "npm cache (Verdaccio) not installed"
+    is_runner && skip "npm cache (Verdaccio) not installed"
   fi
 
   if [[ -d /srv/ci-cache ]]; then
@@ -11647,7 +12916,7 @@ check_caches() {
       else ok "no alerts firing"; fi
     fi
   else
-    skip "monitoring stack not installed"
+    is_runner && skip "monitoring stack not installed"
   fi
 
   if [[ -d /opt/logging ]]; then
@@ -11656,7 +12925,7 @@ check_caches() {
     if [[ "$(http_code http://127.0.0.1:12345/-/ready 3)" == "200" ]]; then ok "Alloy ready"
     else fail "Alloy not ready, logs are not collected"; fi
   else
-    skip "logging (Loki + Alloy) not installed"
+    is_runner && skip "logging (Loki + Alloy) not installed"
   fi
   return 0
 }
@@ -11677,17 +12946,29 @@ check_url() {
 check_network() {
   (( QUICK == 1 )) && return 0
   section "Network"
-  local h unresolved=""
-  for h in gitlab.com registry.gitlab.com registry-1.docker.io registry.npmjs.org; do
+  local h unresolved="" hosts
+  if is_runner; then
+    hosts="gitlab.com registry.gitlab.com registry-1.docker.io registry.npmjs.org"
+  else
+    hosts="cloudflare.com"
+    have docker && hosts+=" registry-1.docker.io"
+  fi
+  for h in $hosts; do
     getent ahostsv4 "$h" >/dev/null 2>&1 || unresolved="${unresolved}${h} "
   done
   if [[ -n "$unresolved" ]]; then fail "DNS cannot resolve: ${unresolved}"
-  else ok "DNS resolves GitLab, Docker Hub and npm"; fi
+  elif is_runner; then ok "DNS resolves GitLab, Docker Hub and npm"
+  else ok "DNS resolves ${hosts}"; fi
 
-  check_url "gitlab.com API" "https://gitlab.com/api/v4/version" "200 401"
-  check_url "GitLab registry" "https://registry.gitlab.com/v2/" "200 401"
-  check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"
-  check_url "npm registry" "https://registry.npmjs.org/" "200"
+  if is_runner; then
+    check_url "gitlab.com API" "https://gitlab.com/api/v4/version" "200 401"
+    check_url "GitLab registry" "https://registry.gitlab.com/v2/" "200 401"
+    check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"
+    check_url "npm registry" "https://registry.npmjs.org/" "200"
+  else
+    check_url "internet (HTTPS)" "https://cloudflare.com/" "200 301 302 403"
+    if have docker; then check_url "Docker Hub" "https://registry-1.docker.io/v2/" "200 401"; fi
+  fi
 
   if grep -qE '^precedence ::ffff:0:0/96' /etc/gai.conf 2>/dev/null; then
     info "IPv4 preferred over IPv6 (gai.conf)"
@@ -11696,6 +12977,7 @@ check_network() {
 }
 
 check_trends() {
+  is_runner || return 0
   section "Trends (Prometheus, last 24h)"
   if ! have jq; then
     skip "jq not installed, trend checks skipped"
@@ -11836,15 +13118,23 @@ check_trends() {
   return 0
 }
 
+detect_profile
+detect_firewall
+
 if (( ONLY_CONTAINERS == 1 )); then
-  printf '%scontainer health%s  %s | %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  printf '%scontainer health%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
   check_containers
   print_summary_and_exit
 fi
 
-printf '%shealth report%s  %s | %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+printf '%shealth report%s  %s | %s | profile: %s\n' "$C_B" "$C_N" "$(uname -n)" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$PROFILE"
+if (( LIMITED )); then info "limited mode: not root and sudo needs a password; root-only checks skipped"; fi
+if (( RUNNER_UNREGISTERED )); then info "gitlab-runner is installed but no runner is registered: checked as a plain server (--profile runner to check it)"; fi
 check_system
 check_security
+check_firewall
+check_updates
+check_serverinit
 check_services
 check_runner
 check_docker
