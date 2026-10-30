@@ -435,6 +435,10 @@ apply_settings() {
 # The container user (uid ${TS_UID}) owns data/ and can replace data/config, downloads or torrents with a symlink. Root
 # (install -d chowns, mktemp and mv write) must never follow one: refuse when any of them is not a plain directory
 # inside data/ itself.
+# Check-then-use is not enough against a container that swaps entries while root works, so everything below data/
+# is also written with the container's own identity (as_ts): a symlink followed that way gains nothing.
+as_ts() { setpriv --reuid="$TS_UID" --regid="$TS_GID" --clear-groups "$@"; }
+
 check_data_tree() {
   local d real base
   [[ -e "$DATA" || -L "$DATA" ]] || return 0
@@ -453,13 +457,13 @@ write_accs() { # accs.db: {"user":"password"}, readable by the container user on
   user=$(grep -E '^TS_USER=' "$CREDS" | head -n1 | cut -d= -f2-)
   pass=$(grep -E '^TS_PASS=' "$CREDS" | head -n1 | cut -d= -f2-)
   check_data_tree
-  # Staged in the root-owned install dir, moved into config/ only after the check above.
-  tmp=$(mktemp "${TS_DIR}/.accs.XXXXXX")
+  # Written and moved as the container user, never by root, so a swapped config/ cannot redirect a root write.
+  tmp="${DATA}/config/.accs.$$.${RANDOM}"
   # Through the environment, not argv: /proc/<pid>/cmdline is world readable, environ is not.
-  TS_U="$user" TS_P="$pass" jq -nc '{(env.TS_U): env.TS_P}' > "$tmp"
-  chown "${TS_UID}:${TS_GID}" "$tmp"; chmod 600 "$tmp"
-  if [[ -f "${DATA}/config/accs.db" ]] && cmp -s "$tmp" "${DATA}/config/accs.db"; then rm -f "$tmp"; return 1; fi
-  mv -T "$tmp" "${DATA}/config/accs.db"
+  TS_U="$user" TS_P="$pass" jq -nc '{(env.TS_U): env.TS_P}' | as_ts sh -c 'umask 077; cat > "$1"' _ "$tmp" \
+    || die "cannot write ${DATA}/config (owned by uid ${TS_UID}?)"
+  if as_ts cmp -s "$tmp" "${DATA}/config/accs.db" 2>/dev/null; then as_ts rm -f "$tmp"; return 1; fi
+  as_ts mv -T "$tmp" "${DATA}/config/accs.db"
 }
 
 # Caddy login in front of TorrServer (public mode). TorrServer leaves /play, /subs, /playlist, /stream
@@ -773,7 +777,11 @@ do_install() {
   log "installing TorrServer ${TS_VERSION} into ${TS_DIR} (mode: ${mode})"
   install -d -m 0755 -o root -g root "$TS_DIR"
   check_data_tree
-  install -d -m 0750 -o "$TS_UID" -g "$TS_GID" "$DATA" "${DATA}/config" "${DATA}/downloads" "${DATA}/torrents"
+  # Root only touches data/ itself (its parent is root-owned, so the container cannot replace it); the entries
+  # inside are created and fixed as the container user, never chowned by root.
+  install -d -m 0750 -o "$TS_UID" -g "$TS_GID" "$DATA"
+  as_ts install -d -m 0750 "${DATA}/config" "${DATA}/downloads" "${DATA}/torrents" \
+    || die "cannot create the folders inside ${DATA} as uid ${TS_UID}; check their owner"
   [[ -f "$ENVF" ]] || { (umask 077; : > "$ENVF"); }
   chmod 600 "$ENVF"
 

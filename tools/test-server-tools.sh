@@ -401,6 +401,23 @@ rm -f "$TSD/data/config"; mkdir "$TSD/data/config"; mv "$TSD/data" "$T/ts-real";
 out=$(tsrun); rc=$?
 check "data itself a symlink: refused" '[[ $rc -ne 0 ]] && grep -q "is a symlink" <<<"$out"'
 rm -rf "$TSD" "$T/ts-real" "$T/ts-target"
+# Race: the container user flips data/config between a directory and a symlink to a root-owned target while the
+# installer creates the folders and writes accs.db. The installer acts as the container user, so the target stays root's.
+asfn=$(awk '/^as_ts\(\) \{/ { print; exit }' "$ROOT/other/torrserver/install.sh")
+RD="$T/tsrace"; mkdir -p "$RD/data" "$RD/target"; chown 65534:65534 "$RD/data"; chmod 0755 "$RD" "$RD/target"
+race_flip() { # runs as uid 65534
+  while :; do
+    rm -rf "$RD/data/config"; ln -s "$RD/target" "$RD/data/config"
+    rm -f "$RD/data/config"; mkdir "$RD/data/config"
+  done
+}
+setpriv --reuid=65534 --regid=65534 --clear-groups bash -c "$(declare -f race_flip); RD='$RD'; race_flip" & flip=$!
+for _ in $(seq 1 300); do
+  bash -c "$asfn"'; TS_UID=65534; TS_GID=65534; as_ts install -d -m 0750 "$1/data/config"; echo x | as_ts sh -c "umask 077; cat > \"\$1\"" _ "$1/data/config/.t"; as_ts mv -T "$1/data/config/.t" "$1/data/config/accs.db"' _ "$RD" >/dev/null 2>&1
+done
+kill "$flip" 2>/dev/null; wait "$flip" 2>/dev/null
+check "swap loop: root-owned target is not chowned, chmodded or written" '[[ "$(stat -c %u:%a "$RD/target")" == 0:755 && -z "$(ls -A "$RD/target")" ]]'
+rm -rf "$RD"
 check "caddy ports are published on IPv4 only" 'grep -qF "\"0.0.0.0:\${TS_HTTP_PORT:-80}:80\"" "$ROOT/other/torrserver/docker-compose.yml" && grep -qF "\"0.0.0.0:\${TS_PUBLIC_PORT:-8443}:" "$ROOT/other/torrserver/docker-compose.yml"'
 
 section "runner-engine-update"
