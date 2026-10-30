@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the security audit every Sunday
+
+[Timer]
+OnCalendar=Sun *-*-* 04:20:00
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

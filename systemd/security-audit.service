@@ -1,0 +1,21 @@
+[Unit]
+Description=Weekly security audit (lynis, oscap, aide, rkhunter)
+Documentation=file:///usr/local/sbin/security-audit-run
+
+[Service]
+Type=oneshot
+SyslogIdentifier=security-audit
+EnvironmentFile=-/etc/default/security-audit
+ExecStart=/usr/local/sbin/security-audit-run
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+TimeoutStartSec=4h
+# Audit tools only read the system and write their reports.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/log /var/lib/security-tools -/var/lib/rkhunter -/var/lib/lynis /run
