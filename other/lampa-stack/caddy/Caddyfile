@@ -1,0 +1,80 @@
+# Reverse proxy for the Lampa stack. Site addresses come from the environment (see docker-compose.yml):
+#   local mode:  https://lampa.localhost:8443, https://ts.lampa.localhost:8443, ...  (127.0.0.1 only, local CA)
+#   public mode: example.org, ts.example.org, ...                                   (automatic HTTPS)
+# Auth model per host:
+#   auth.*  Authelia portal (login page)
+#   ts.*    Authelia session (browser) OR TorrServer's own HTTP Basic (the Lampa TV client)
+#   qbt.*   Authelia session, then qBittorrent's own login
+#   main    Lampa app + Lampac API for the TV client (Lampac's accsdb token check); admin paths blocked
+{
+	email {$ACME_EMAIL}
+	servers {
+		protocols h1 h2
+	}
+}
+
+(secure) {
+	# local mode: "tls internal" (Caddy's own CA); public mode: empty, so Caddy gets Let's Encrypt certificates
+	{$TLS_LINE}
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000"
+	}
+	# lcrqpasswd is Lampac's "local request" admin bypass; x-client-ip is trusted only with it. Never let a
+	# client set them.
+	request_header -lcrqpasswd
+	request_header -X-Client-IP
+}
+
+(authelia) {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+	}
+}
+
+{$SITE_AUTH} {
+	import secure
+	reverse_proxy authelia:9091
+}
+
+{$SITE_MAIN} {
+	import secure
+	# Lampac control surfaces. Edit init.conf on the host instead. /ts* is the embedded TorrServer proxy
+	# (module skipped; blocked here as well).
+	@blocked path_regexp (?i)^/+(admin|adminpanel|stats|weblog|ts|dlna)(/|$)
+	handle @blocked {
+		respond 404
+	}
+	handle {
+		reverse_proxy lampac:9118
+	}
+}
+
+{$SITE_TS} {
+	import secure
+	# The TV client sends HTTP Basic (Lampa Settings > TorrServer). TorrServer checks it on every route.
+	@docs path /swagger*
+	handle @docs {
+		respond 404
+	}
+	@tv header Authorization Basic*
+	handle @tv {
+		reverse_proxy torrserver:8090
+	}
+	# Browsers: Authelia session, then Caddy adds the TorrServer credential (one login, not two).
+	handle {
+		import authelia
+		reverse_proxy torrserver:8090 {
+			header_up Authorization "Basic {$TS_BASIC}"
+		}
+	}
+}
+
+{$SITE_QBT} {
+	import secure
+	import authelia
+	reverse_proxy qbittorrent:{$QBT_WEBUI_PORT}
+}
