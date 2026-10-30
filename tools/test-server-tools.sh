@@ -362,6 +362,32 @@ out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "docker not answering is not 'no jobs'" '[[ $rc -eq 0 ]] && grep -q "SKIP docker does not answer" <<<"$out"'
 rm -f "$T/bin/docker" "$T/bin/logger"; unset ENGINE_UPDATE_LOG
 
+section "server lock-root"
+LR="$ROOT/server/lock-root.sh"
+mkdir -p "$T/lr/home/.ssh" "$T/lr/sshd_config.d"
+echo "Include /etc/ssh/sshd_config.d/*.conf" > "$T/lr/sshd_config"
+export LOCK_ROOT_DROPIN="$T/lr/sshd_config.d/00-a-root-lock.conf" LOCK_ROOT_SSHD_CONFIG="$T/lr/sshd_config" ADMIN_USER=ops
+stub id 'exit 0'
+stub getent 'echo "ops:x:1000:1000::'"$T"'/lr/home:/bin/bash"'
+stub runuser 'exit 0'
+stub systemctl 'exit 0'
+stub sshd 'if [[ "$1" == -t ]]; then exit 0; fi; if [[ -f "'"$T"'/lr/sshd_config.d/00-a-root-lock.conf" ]]; then echo "permitrootlogin no"; else echo "permitrootlogin without-password"; fi; echo "port 22"'
+out=$(bash "$LR" 2>&1); rc=$?
+check "no SSH key for the admin: refused, nothing written" '[[ $rc -ne 0 ]] && grep -q "has no SSH key" <<<"$out" && [[ ! -e "$LOCK_ROOT_DROPIN" ]]'
+echo "ssh-ed25519 AAAA test" > "$T/lr/home/.ssh/authorized_keys"
+stub runuser 'exit 1'
+out=$(bash "$LR" 2>&1); rc=$?
+check "sudo -n true fails for the admin: refused" '[[ $rc -ne 0 ]] && grep -q "sudo -n true" <<<"$out" && [[ ! -e "$LOCK_ROOT_DROPIN" ]]'
+stub runuser 'exit 0'
+out=$(bash "$LR" 2>&1); rc=$?
+check "key and sudo ok: drop-in written, effective no" '[[ $rc -eq 0 ]] && grep -qx "PermitRootLogin no" "$LOCK_ROOT_DROPIN"'
+out=$(bash "$LR" --unlock-root 2>&1); rc=$?
+check "--unlock-root removes the drop-in" '[[ $rc -eq 0 && ! -e "$LOCK_ROOT_DROPIN" ]]'
+stub sshd 'if [[ "$1" == -t ]]; then exit 0; fi; echo "permitrootlogin without-password"; echo "port 22"'
+out=$(bash "$LR" 2>&1); rc=$?
+check "another file wins (effective not no): reverted and refused" '[[ $rc -ne 0 && ! -e "$LOCK_ROOT_DROPIN" ]]'
+rm -f "$T"/bin/{id,getent,runuser,sshd,systemctl}; unset LOCK_ROOT_DROPIN LOCK_ROOT_SSHD_CONFIG ADMIN_USER
+
 # ---------------------------------------------------------------- destructive (container) tests
 if [[ $DESTRUCTIVE != 1 ]]; then
   echo
