@@ -274,11 +274,15 @@ PermitTunnel no
 EOF
 chmod 0600 "$new"
 old_backup=""
-if [[ -f "$DROPIN" ]]; then
-  old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
-  cp -a "$DROPIN" "$old_backup"
+if [[ -f "$DROPIN" ]] && cmp -s "$new" "$DROPIN"; then
+  rm -f "$new"   # same content: no backup, no rewrite, a rerun leaves the managed state untouched
+else
+  if [[ -f "$DROPIN" ]]; then
+    old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$DROPIN" "$old_backup"
+  fi
+  mv "$new" "$DROPIN"
 fi
-mv "$new" "$DROPIN"
 legacy=/etc/ssh/sshd_config.d/60-ci-hardening.conf
 [[ -f "$legacy" ]] && mv "$legacy" "${legacy}.disabled"
 if command -v restorecon >/dev/null 2>&1; then restorecon /etc/ssh/sshd_config.d/* 2>/dev/null || true; fi

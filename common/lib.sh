@@ -68,7 +68,15 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
