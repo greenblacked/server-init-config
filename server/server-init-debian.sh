@@ -72,7 +72,7 @@ packages() {
   apt_get update >/dev/null || return 1
   # Required: ufw, fail2ban (+ python3-systemd for the journal backend, nftables for its bans), unattended-upgrades, curl.
   # Ubuntu 26.04 ships sudo-rs as its sudo; the sudo package is added only when no sudo command exists.
-  local required=(openssh-server ufw nftables fail2ban python3-systemd unattended-upgrades curl ca-certificates gnupg)
+  local required=(openssh-server ufw nftables fail2ban python3-systemd unattended-upgrades curl ca-certificates gnupg tzdata)
   command -v sudo >/dev/null && command -v visudo >/dev/null || required+=(sudo)
   apt_get install "${required[@]}" >/dev/null || return 1
   local p

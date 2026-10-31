@@ -108,7 +108,7 @@ write_files:
       }
 
       packages() {
-        zin sudo firewalld chrony curl ca-certificates || return 1
+        zin sudo timezone firewalld chrony curl ca-certificates || return 1
         local p
         # fail2ban is in the openSUSE repositories; without it the fail2ban step is logged and skipped.
         for p in fail2ban fail2ban-firewalld policycoreutils git jq tmux htop btop ncdu iotop mtr bind-utils tcpdump vim nano rsync wget unzip tar bash-completion mc fzf fd ripgrep; do
