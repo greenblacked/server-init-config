@@ -2,16 +2,12 @@ name: security-tools
 
 # common/security-tools.sh for real: release binaries with real downloads and SHA-256 verification (amd64 and arm64), and the
 # --audit / --network package names against real distro mirrors (EPEL and CRB on EL).
-# Runs on pull requests and pushes to main that touch common/ or tools/ci/, weekly (pinned versions can disappear upstream), on demand.
+# Runs on every push to main, on pull requests that touch common/ or tools/ci/, weekly (pinned versions can disappear upstream), on demand.
 # Same run locally: sudo ALLOW_LOCAL=1 tools/ci/security-tools-e2e.sh scan ; tools/ci/security-tools-e2e.sh pkgs debian:13
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'common/**'
-      - 'tools/ci/**'
-      - '.github/workflows/security-tools.yml'
   pull_request:
     paths:
       - 'common/**'
@@ -33,14 +29,14 @@ jobs:
     name: --scan (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
-    # arm64 runners (ubuntu-24.04-arm) are free for public repos; for a private repo they may be unavailable or billed, and a job
-    # with no runner stays queued (timeout-minutes does not count queue time). So arm64 is opt-in: set the repository variable
-    # ARM64_RUNNERS=true (Settings, Secrets and variables, Variables) once such runners exist. amd64 always runs and must pass;
-    # when arm64 is enabled it must pass too.
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(vars.ARM64_RUNNERS == 'true' && '[{"arch":"amd64","runner":"ubuntu-24.04"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"amd64","runner":"ubuntu-24.04"}]') }}
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:

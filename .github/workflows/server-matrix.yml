@@ -1,18 +1,13 @@
 name: server-matrix
 
 # The plain-server init on every supported OS, for real: a systemd container per OS, the real server/bootstrap.sh over its
-# sshd, real package mirrors. Minutes are limited on a private repo, so this runs on pull requests and pushes to main that
-# touch server/, common/ or tools/ci/, plus weekly (to catch a distro mirror or package change), and on demand.
+# sshd, real package mirrors. Runs on every push to main, on pull requests that touch server/, common/ or tools/ci/, weekly
+# (to catch a distro mirror or package change), and on demand. Each OS runs on amd64 and arm64 runners.
 # Same run locally (needs Docker, ~10 min each): tools/ci/server-e2e.sh debian:13
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'server/**'
-      - 'common/**'
-      - 'tools/ci/**'
-      - '.github/workflows/server-matrix.yml'
   pull_request:
     paths:
       - 'server/**'
@@ -32,12 +27,18 @@ concurrency:
 
 jobs:
   e2e:
-    name: ${{ matrix.image }}
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.image }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
         image:
           - quay.io/centos/centos:stream10
           - rockylinux/rockylinux:10
@@ -56,7 +57,7 @@ jobs:
         if: ${{ !cancelled() && failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: server-${{ strategy.job-index }}-logs
+          name: server-${{ matrix.arch }}-${{ strategy.job-index }}-logs
           path: ci-out/
           if-no-files-found: ignore
           retention-days: 7
