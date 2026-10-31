@@ -7,3 +7,4 @@ config.toml
 *.log
 __pycache__/
 .DS_Store
+ci-out/
