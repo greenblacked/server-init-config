@@ -60,6 +60,8 @@ step() {
   local name="$1"; shift
   log "step: ${name}"
   if "$@"; then log "ok: ${name}"; else fail "step failed: ${name}"; FAILED_STEPS+=("$name"); fi
+  # Bisect aid: say which step first breaks the admin's sudo (PAM account errors were seen on EL10 containers).
+  if id "$ADMIN_USER" >/dev/null 2>&1 && ! runuser -u "$ADMIN_USER" -- sudo -n true >/dev/null 2>&1; then fail "after ${name}: ${ADMIN_USER} cannot sudo -n"; fi
 }
 
 packages() {

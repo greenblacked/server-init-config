@@ -35,6 +35,19 @@ if step_failed admin-user; then warn "admin-user step failed (allowed), skipped"
     echo "  shadow state: $(getent shadow "$ADMIN_USER" | cut -d: -f2 | cut -c1)"
     su -s /bin/bash "$ADMIN_USER" -c 'sudo -n true' 2>&1 | sed 's/^/  sudo: /' || true
     journalctl -u sshd -u ssh --no-pager -n 20 2>/dev/null | grep -i "$ADMIN_USER" | sed 's/^/  sshd: /' || true
+    # PAM account-phase failures (PAM_AUTHINFO_UNAVAIL) come from the stack, the NSS order, the shadow entry or a damaged helper.
+    {
+      echo "--- getent passwd/shadow flags, chage"; getent passwd "$ADMIN_USER"; getent shadow "$ADMIN_USER" | cut -d: -f1,3-; chage -l "$ADMIN_USER"
+      echo "--- shadow and PAM helper files"; ls -lZ /etc/shadow /etc/passwd /usr/sbin/unix_chkpwd /usr/bin/sudo /etc/sudoers 2>&1
+      echo "--- account lines of the PAM stacks"; grep -H '^account' /etc/pam.d/system-auth /etc/pam.d/sudo /etc/pam.d/sshd /etc/pam.d/password-auth 2>&1
+      echo "--- authselect"; authselect current 2>&1; ls -l /etc/pam.d/system-auth /etc/authselect 2>&1
+      echo "--- nsswitch"; grep -E '^(passwd|shadow|group):' /etc/nsswitch.conf
+      echo "--- selinux"; getenforce 2>&1; grep -s '^SELINUX=' /etc/selinux/config
+      echo "--- rpm -V of the auth packages"; rpm -V pam shadow-utils sudo openssh-server authselect libselinux 2>&1 | head -20
+      echo "--- pam/sudo/sshd journal"; journalctl --no-pager -n 400 2>/dev/null | grep -Ei "pam_|sudo\[|unix_chkpwd|account" | tail -15
+      echo "--- init-failed.log tail"; tail -n 20 /var/log/server-init-failed.log 2>&1
+      echo "--- date, timezone"; date; timedatectl 2>&1 | head -4
+    } 2>&1 | sed 's/^/  diag: /' || true
   fi
   [[ -s "/home/${ADMIN_USER}/.ssh/authorized_keys" ]] && pass "${ADMIN_USER} has authorized_keys" || fail "${ADMIN_USER} has no authorized_keys"
 fi
