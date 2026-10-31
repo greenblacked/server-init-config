@@ -4,7 +4,8 @@
 # Two generated files are imported (install.sh writes them; they are not part of this repository):
 #   /etc/caddy/mode.caddy       TLS issuer + HSTS for the access mode (Let's Encrypt HTTP-01 / Caddy's local CA)
 #   /run/secrets/keymaps        the per-device keys as `map` blocks and the key of each Authelia user (a Docker secret)
-# Nothing is anonymous. Who may reach what:
+# Nothing is anonymous except two opt-in exceptions: /proxy* (LAMPAC_PROXY_ANON=1) and /startpage.js (SISI enabled).
+# Who may reach what:
 #   auth.*  the Authelia login page (rate limited by Authelia's regulation: failed logins ban the user/IP)
 #   ts.*    /t/<ts token>/...  a per-device token in the PATH (players cannot send headers, so the token rides in the
 #                              URL Lampa uses as its TorrServer address), or an Authelia session (browsers).
@@ -15,10 +16,17 @@
 #   main    Lampa app + Lampac API: a per-device key (query token / account_email / uid / box_mac, the Caddy cookie it
 #           sets, or the /on/js/<key> style loader paths) that Caddy checks against the key list, then Lampac checks it
 #           again (accsdb); or an Authelia session, in which case Caddy adds the user's own key. Lampac's signed
-#           /proxy* media links are the one exception (LAMPAC_PROXY_ANON, see README); admin paths are blocked.
+#           /proxy* media links (LAMPAC_PROXY_ANON=1) and /startpage.js (SISI) are the opt-in exceptions, see README; admin paths are blocked.
 {
 	servers {
 		protocols h1 h2
+	}
+	# Access logs are off, but the default logger still writes http.log.error entries with the full request URI
+	# (upstream down, restarts). Redact device keys and tokens there so they never reach `docker compose logs`.
+	log default {
+		format filter {
+			request>uri regexp "(/t/|/(?:on|online|sisi|dorama)/(?:js|h)/|/on/|[?&](?:token|account_email|uid|box_mac)=)[0-9a-f]{32}" "${1}REDACTED"
+		}
 	}
 }
 
@@ -87,8 +95,9 @@ import /run/secrets/keymaps
 	import keymaps
 	# Lampac control surfaces. Edit init.conf on the host instead. /ts* is the embedded TorrServer proxy (module
 	# skipped; blocked here as well). /extensions is the plugin store (third-party, unpinned plugins).
-	# /api/headers is an anonymous Lampac endpoint that echoes every request header.
-	@blocked path_regexp (?i)^/+(admin|adminpanel|stats|weblog|ts|dlna|extensions|api/headers)(/|$)
+	# /api/headers is an anonymous Lampac endpoint that echoes every request header; /api/chromium/iframe reflects
+	# its src query value into HTML (XSS in the Lampa origin).
+	@blocked path_regexp (?i)^/+(admin|adminpanel|stats|weblog|ts|dlna|extensions|api/headers|api/chromium)(/|$)
 	handle @blocked {
 		respond 404
 	}
@@ -174,6 +183,7 @@ import /run/secrets/keymaps
 		route {
 			import samesite_only
 			import authelia
+			request_header Cookie "(?i)(^|;\s*)lampa_session=[^;]*" "$1"
 			reverse_proxy torrserver:8090 {
 				header_up Authorization "Basic {file./run/secrets/ts_basic}"
 				flush_interval -1
@@ -185,6 +195,9 @@ import /run/secrets/keymaps
 {$SITE_QBT} {
 	import secure
 	import samesite_only
-	import authelia
-	reverse_proxy qbittorrent:{$QBT_WEBUI_PORT}
+	route {
+		import authelia
+		request_header Cookie "(?i)(^|;\s*)lampa_session=[^;]*" "$1"
+		reverse_proxy qbittorrent:{$QBT_WEBUI_PORT}
+	}
 }
