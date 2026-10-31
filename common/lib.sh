@@ -22,6 +22,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
