@@ -42,10 +42,12 @@ scan() {
   echo "-- rerun is a no-op (version markers)"
   bash "$SCRIPT" --scan > "$W/scan-2.log" 2>&1 && pass "second run exit 0" || fail "second run failed"
   grep -q 'installed now (0)' "$W/scan-2.log" && pass "second run installed nothing" || fail "second run reinstalled: $(grep 'installed now' "$W/scan-2.log")"
-  echo "-- a corrupt download is refused (checksum check, offline-safe: wrong version has no release, so nothing is installed)"
+  # Not a checksum-mismatch test (the script has no URL override to serve a tampered asset); the real checksum comparison is
+  # exercised by every download above. This only checks that a version without a release is skipped and replaces nothing.
+  echo "-- an unknown version is skipped and the installed binary is left alone"
   rm -f /var/lib/security-tools/gitleaks.version
-  if GITLEAKS_VERSION=0.0.1 bash "$SCRIPT" --scan > "$W/scan-bad.log" 2>&1; then pass "unknown version: script exits 0 and skips the tool"; else pass "unknown version: refused (exit non-zero)"; fi
-  [[ "$(gitleaks version 2>&1 | head -1)" == *"$(pinned GITLEAKS_VERSION)"* ]] && pass "the working gitleaks binary was not replaced" || warn "gitleaks changed after the bad-version run: $(gitleaks version 2>&1 | head -1)"
+  GITLEAKS_VERSION=0.0.1 bash "$SCRIPT" --scan > "$W/scan-bad.log" 2>&1 || true
+  [[ "$(gitleaks version 2>&1 | head -1)" == *"$(pinned GITLEAKS_VERSION)"* ]] && pass "the working gitleaks binary was not replaced" || fail "gitleaks changed after the unknown-version run: $(gitleaks version 2>&1 | head -1)"
 }
 
 pkgs() {

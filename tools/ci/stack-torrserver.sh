@@ -121,12 +121,15 @@ iptables-save | grep -qi torrserver && fail "iptables rules mention torrserver" 
 endgroup
 
 group "5. public mode again, IP found by the installer (real api.ipify.org)"
-EXPECT_IP=$(curl -fsS -m 10 https://api.ipify.org)
-log "ipify says ${EXPECT_IP}"
+# ipify is asked before and after the install: a runner whose egress address changes between the calls still matches one of them.
+IP_BEFORE=$(curl -fsS -m 10 https://api.ipify.org)
+log "ipify says ${IP_BEFORE}"
 env -u PUBLIC_IP TS_TLS=internal "${INSTALL[@]}" 2>&1 | tee "$W/install-autodetect.log" | tail -14
 grep -qi 'api.ipify.org' "$W/install-autodetect.log" && pass "the log says the IP came from api.ipify.org" || warn "log does not name api.ipify.org (metadata or route may have answered): $(grep -i 'public IP' "$W/install-autodetect.log" | head -2)"
-expect_eq "PUBLIC_IP in .env is what ipify reports" "$(env_get PUBLIC_IP)" "$EXPECT_IP"
-expect_eq "host name built from it" "$(env_get TS_HOSTNAME)" "${EXPECT_IP//./-}.sslip.io"
+IP_AFTER=$(curl -fsS -m 10 https://api.ipify.org || true)
+GOT_IP=$(env_get PUBLIC_IP)
+if [[ -n "$GOT_IP" && ( "$GOT_IP" == "$IP_BEFORE" || "$GOT_IP" == "$IP_AFTER" ) ]]; then pass "PUBLIC_IP in .env is what ipify reports (${GOT_IP})"; else fail "PUBLIC_IP in .env (got '${GOT_IP}', ipify said '${IP_BEFORE}' before and '${IP_AFTER}' after)"; fi
+expect_eq "host name built from it" "$(env_get TS_HOSTNAME)" "${GOT_IP//./-}.sslip.io"
 HOST=$(env_get TS_HOSTNAME); PORT=$(env_get TS_PUBLIC_PORT)
 for _ in $(seq 1 30); do [[ "$(code --resolve "${HOST}:${PORT}:127.0.0.1" "https://${HOST}:${PORT}/echo")" == 200 ]] && break; sleep 2; done
 expect_eq "auto-detected install: 401 without credentials" "$(code --resolve "${HOST}:${PORT}:127.0.0.1" "https://${HOST}:${PORT}/")" 401
