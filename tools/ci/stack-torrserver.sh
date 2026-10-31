@@ -22,7 +22,7 @@ on_exit() { local rc=$?; set +e; collect; exit "$rc"; }   # set +e: a failing do
 trap on_exit EXIT
 
 env_get() { grep -m1 "^$1=" "$TS/.env" | cut -d= -f2-; }
-creds() { TS_USER=$(grep -E '^TS_USER=' "$TS/credentials" | cut -d= -f2-); TS_PASS=$(grep -E '^TS_PASS=' "$TS/credentials" | cut -d= -f2-); }
+creds() { TS_USER=$(grep -E '^TS_USER=' "$TS/credentials" | cut -d= -f2-); TS_PASS=$(grep -E '^TS_PASS=' "$TS/credentials" | cut -d= -f2-); ci_mask "$TS_PASS"; }
 code() { curl -ksS -m 10 -o /dev/null -w '%{http_code}' "$@" || true; }
 settings_json() { # base-url [curl args]
   local url="$1"; shift
@@ -33,7 +33,7 @@ streaming_only() { # json
 }
 
 group "1. --local (fresh install)"
-"${INSTALL[@]}" --local 2>&1 | tee "$W/install-local.log" | tail -12
+ci_run "$W/install-local.log" 12 "${INSTALL[@]}" --local
 creds
 expect_eq ".env records the mode" "$(env_get TS_MODE)" local
 expect_eq "local: 401 without credentials" "$(code http://127.0.0.1:8090/settings -X POST -d '{"action":"get"}')" 401
@@ -52,13 +52,13 @@ echo "-- cleanup safety net, dry run"
 "$TS/cleanup.sh" --dry-run > "$W/cleanup-dry-run.log" 2>&1 && pass "cleanup.sh --dry-run exits 0" || { tail "$W/cleanup-dry-run.log"; fail "cleanup.sh --dry-run"; }
 systemctl is-active --quiet torrserver-cleanup.timer && pass "torrserver-cleanup.timer active" || fail "cleanup timer not active"
 echo "-- rerun changes nothing"
-"${INSTALL[@]}" --local > "$W/install-local-2.log" 2>&1 && pass "rerun exits 0" || fail "rerun failed"
+ci_run "$W/install-local-2.log" 0 "${INSTALL[@]}" --local && pass "rerun exits 0" || fail "rerun failed"
 grep -q 'settings already as wanted' "$W/install-local-2.log" && pass "rerun: settings already as wanted" || warn "rerun did not report 'settings already as wanted'"
 [[ "$(grep -E '^TS_PASS=' "$TS/credentials" | cut -d= -f2-)" == "$TS_PASS" ]] && pass "credentials kept on rerun" || fail "rerun replaced the password"
 endgroup
 
 group "2. switch to public mode (TS_TLS=internal, PUBLIC_IP override: no metadata service involved)"
-PUBLIC_IP=8.8.4.4 TS_TLS=internal "${INSTALL[@]}" --public 2>&1 | tee "$W/install-public.log" | tail -14
+PUBLIC_IP=8.8.4.4 TS_TLS=internal ci_run "$W/install-public.log" 14 "${INSTALL[@]}" --public
 HOST=$(env_get TS_HOSTNAME); PORT=$(env_get TS_PUBLIC_PORT)
 expect_eq "host name from the override IP" "$HOST" "8-8-4-4.sslip.io"
 expect_match "random port in 20000-60000" "$PORT" '^(2[0-9]{4}|[3-5][0-9]{4}|60000)$'
@@ -101,17 +101,17 @@ cat "$TS/.firewall-added" 2>/dev/null | sed 's/^/      firewall-added: /' || tru
 endgroup
 
 group "3. switch back to local: what public mode opened is closed"
-"${INSTALL[@]}" --local 2>&1 | tee "$W/install-switch.log" | tail -6
+ci_run "$W/install-switch.log" 6 "${INSTALL[@]}" --local
 sleep 3
 docker ps --format '{{.Names}}' | grep -qx torrserver-caddy && fail "Caddy still running after switching to local" || pass "Caddy removed"
 ss -ltn | grep -qE ":(${PORT}|80)\b" && fail "port ${PORT} or 80 still listening" || pass "public port and 80 closed"
 fail2ban-client status 2>/dev/null | grep -q torrserver-caddy && fail "jail still configured after leaving public mode" || pass "fail2ban jail removed"
 expect_eq "local again: 200 with credentials" "$(code -u "$TS_USER:$TS_PASS" http://127.0.0.1:8090/settings -X POST -d '{"action":"get"}')" 200
-"${INSTALL[@]}" --status 2>&1 | tee "$W/status.log" | head -8
+ci_run "$W/status.log" 8 "${INSTALL[@]}" --status
 endgroup
 
 group "4. uninstall --purge leaves nothing"
-"${INSTALL[@]}" --uninstall --purge 2>&1 | tail -5
+ci_run "$W/uninstall.log" 5 "${INSTALL[@]}" --uninstall --purge
 [[ ! -e "$TS" ]] && pass "$TS is gone" || fail "$TS still exists"
 [[ -z "$(docker ps -a --filter name=torrserver -q)" ]] && pass "no torrserver containers" || fail "torrserver containers remain"
 [[ -z "$(docker volume ls -q | grep -i torrserver)" ]] && pass "no torrserver volumes" || fail "torrserver volumes remain: $(docker volume ls -q | grep -i torrserver | tr '\n' ' ')"
@@ -124,7 +124,7 @@ group "5. public mode again, IP found by the installer (real api.ipify.org)"
 # ipify is asked before and after the install: a runner whose egress address changes between the calls still matches one of them.
 IP_BEFORE=$(curl -fsS -m 10 https://api.ipify.org)
 log "ipify says ${IP_BEFORE}"
-env -u PUBLIC_IP TS_TLS=internal "${INSTALL[@]}" 2>&1 | tee "$W/install-autodetect.log" | tail -14
+ci_run "$W/install-autodetect.log" 14 env -u PUBLIC_IP TS_TLS=internal "${INSTALL[@]}"
 grep -qi 'api.ipify.org' "$W/install-autodetect.log" && pass "the log says the IP came from api.ipify.org" || warn "log does not name api.ipify.org (metadata or route may have answered): $(grep -i 'public IP' "$W/install-autodetect.log" | head -2)"
 IP_AFTER=$(curl -fsS -m 10 https://api.ipify.org || true)
 GOT_IP=$(env_get PUBLIC_IP)
