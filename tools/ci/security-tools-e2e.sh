@@ -17,7 +17,7 @@ pinned() { sed -n "s/^: \"\${$1:=\\([^}]*\\)}\"\$/\\1/p" "$CI_ROOT/$SCRIPT" | he
 scan() {
   [[ $EUID -eq 0 ]] || die "run as root (sudo)"
   in_ci || [[ "${ALLOW_LOCAL:-0}" == 1 ]] || die "this installs into /usr/local/bin: set ALLOW_LOCAL=1 on a disposable machine"
-  local W
+  local W rc
   W="$CI_OUT/security-scan-$(uname -m)"; mkdir -p "$W"
   log "arch $(uname -m)"
   bash "$SCRIPT" --scan 2>&1 | tee "$W/scan.log" | tail -25
@@ -46,7 +46,8 @@ scan() {
   # exercised by every download above. This only checks that a version without a release is skipped and replaces nothing.
   echo "-- an unknown version is skipped and the installed binary is left alone"
   rm -f /var/lib/security-tools/gitleaks.version
-  GITLEAKS_VERSION=0.0.1 bash "$SCRIPT" --scan > "$W/scan-bad.log" 2>&1 || true
+  rc=0; GITLEAKS_VERSION=0.0.1 bash "$SCRIPT" --scan > "$W/scan-bad.log" 2>&1 || rc=$?
+  [[ "$rc" -ne 0 ]] && pass "--scan exits non-zero when every download it tried failed" || fail "--scan exited 0 although its only download failed"
   [[ "$(gitleaks version 2>&1 | head -1)" == *"$(pinned GITLEAKS_VERSION)"* ]] && pass "the working gitleaks binary was not replaced" || fail "gitleaks changed after the unknown-version run: $(gitleaks version 2>&1 | head -1)"
 }
 
