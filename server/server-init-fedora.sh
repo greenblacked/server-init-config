@@ -266,8 +266,8 @@ fw_perm() {
 }
 
 # firewalld answers D-Bus a moment after systemctl returns: wait for it, then check ssh.
-fw_ok() { local i; for i in $(seq 30); do firewall-cmd --zone=public --query-service=ssh >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
-fw_diag() { { for i in --state --get-default-zone --get-active-zones --list-all; do firewall-cmd $i; done; journalctl -u firewalld --no-pager -n 25; } 2>&1 | sed 's/^/firewalld: /' >> "$FAILED_LOG"; }
+fw_ok() { local _; for _ in $(seq 30); do firewall-cmd --zone=public --query-service=ssh >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+fw_diag() { local c; { for c in --state --get-default-zone --get-active-zones "--zone=public --list-all" "--permanent --zone=public --list-all"; do echo "# $c"; firewall-cmd $c; done; systemctl status firewalld --no-pager; journalctl -u firewalld --no-pager -n 25; } 2>&1 | sed 's/^/firewalld: /' >> "$FAILED_LOG"; }
 
 firewall() {
   local running=0 zone p ssh_ports=""

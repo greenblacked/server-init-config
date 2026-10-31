@@ -43,6 +43,15 @@ if step_failed admin-user; then warn "admin-user step failed (allowed), skipped"
       echo "--- authselect"; authselect current 2>&1; ls -l /etc/pam.d/system-auth /etc/authselect 2>&1
       echo "--- nsswitch"; grep -E '^(passwd|shadow|group):' /etc/nsswitch.conf
       echo "--- selinux"; getenforce 2>&1; grep -s '^SELINUX=' /etc/selinux/config
+      set +e # a failing probe must not end the block
+      echo "--- selinux in the kernel (pam_unix runs the unix_chkpwd helper when is_selinux_enabled)"; selinuxenabled; echo "selinuxenabled rc=$?"; ls /sys/fs/selinux 2>&1 | head -5; grep selinuxfs /proc/filesystems 2>&1
+      echo "--- unix_chkpwd file: mode, setuid, capabilities"; stat -c '%A %a %U:%G %n' /usr/sbin/unix_chkpwd 2>&1; getcap /usr/sbin/unix_chkpwd 2>&1
+      for u in root "$ADMIN_USER"; do
+        echo "--- unix_chkpwd $u chkexpiry, run as root and as $u"
+        /usr/sbin/unix_chkpwd "$u" chkexpiry </dev/null 2>&1; echo "as root rc=$?"
+        runuser -u "$u" -- /usr/sbin/unix_chkpwd "$u" chkexpiry </dev/null 2>&1; echo "as $u rc=$?"
+        echo "shadow fields 3-9 of $u: $(getent shadow "$u" | cut -d: -f3-9)"
+      done
       echo "--- rpm -V of the auth packages"; rpm -V pam shadow-utils sudo openssh-server authselect libselinux 2>&1 | head -20
       echo "--- pam/sudo/sshd journal"; journalctl --no-pager -n 400 2>/dev/null | grep -Ei "pam_|sudo\[|unix_chkpwd|account" | tail -15
       echo "--- init-failed.log tail"; tail -n 20 /var/log/server-init-failed.log 2>&1

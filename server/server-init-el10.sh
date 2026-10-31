@@ -60,9 +60,10 @@ step() {
   local name="$1"; shift
   log "step: ${name}"
   if "$@"; then log "ok: ${name}"; else fail "step failed: ${name}"; FAILED_STEPS+=("$name"); fi
-  # Bisect aid: say which step first breaks the admin's sudo (PAM account errors were seen on EL10 containers).
-  if id "$ADMIN_USER" >/dev/null 2>&1 && ! runuser -u "$ADMIN_USER" -- sudo -n true >/dev/null 2>&1; then fail "after ${name}: ${ADMIN_USER} cannot sudo -n"; fi
 }
+
+# Diagnostic: can the admin sudo? Run once after admin-user and once at the end, not after every step.
+sudo_probe() { local o; [[ " ${FAILED_STEPS[*]} " == *" admin-user "* ]] || o=$(runuser -u "$ADMIN_USER" -- sudo -n true 2>&1) || fail "$1: ${ADMIN_USER} cannot sudo -n: $o"; }
 
 packages() {
   # fail2ban and several tools come from EPEL, which needs CRB enabled.
@@ -273,8 +274,8 @@ fw_perm() {
 }
 
 # firewalld answers D-Bus a moment after systemctl returns: wait for it, then check ssh.
-fw_ok() { local i; for i in $(seq 30); do firewall-cmd --zone=public --query-service=ssh >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
-fw_diag() { { for i in --state --get-default-zone --get-active-zones --list-all; do firewall-cmd $i; done; journalctl -u firewalld --no-pager -n 25; } 2>&1 | sed 's/^/firewalld: /' >> "$FAILED_LOG"; }
+fw_ok() { local _; for _ in $(seq 30); do firewall-cmd --zone=public --query-service=ssh >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+fw_diag() { local c; { for c in --state --get-default-zone --get-active-zones "--zone=public --list-all" "--permanent --zone=public --list-all"; do echo "# $c"; firewall-cmd $c; done; systemctl status firewalld --no-pager; journalctl -u firewalld --no-pager -n 25; } 2>&1 | sed 's/^/firewalld: /' >> "$FAILED_LOG"; }
 
 firewall() {
   local running=0 zone p ssh_ports=""
@@ -591,6 +592,7 @@ step packages packages
 step configs write_configs
 step ssh-hardening ssh_hardening
 step admin-user admin_user
+sudo_probe "after admin-user"
 step system-tuning system_tuning
 step firewall firewall
 step fail2ban fail2ban
@@ -598,6 +600,7 @@ step auto-updates auto_updates
 step docker docker_engine
 step swap swap
 step cleanup cleanup
+sudo_probe "at the end"
 log "open in firewall: $(firewall-cmd --zone=public --list-services 2>/dev/null) $(firewall-cmd --zone=public --list-ports 2>/dev/null)"
 if (( ${#FAILED_STEPS[@]} )); then
   log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"

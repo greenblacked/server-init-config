@@ -38,8 +38,8 @@ write_files:
     content: |
       #!/usr/bin/env bash
       # Base setup for a general (non-runner) openSUSE Leap 16.0 server, x86_64 or ARM64:
-      # SSH keys only, admin user with sudo, firewalld, fail2ban for SSH, automatic security updates (zypper patch),
-      # Docker (openSUSE packages) + Compose, swap + sysctl, journald limit, chrony, admin tools, shell history, weekly cleanup.
+      # SSH keys only, admin user with sudo, firewalld, fail2ban for SSH, security updates (zypper patch), Docker + Compose,
+      # swap + sysctl, journald limit, chrony, admin tools, shell history, weekly cleanup.
       # Root keeps login by SSH key on port 22, so nothing here can lock you out.
       #
       # Self-contained and idempotent: it writes its own config files, so it runs the same from a paste
@@ -110,7 +110,7 @@ write_files:
       packages() {
         zin sudo timezone firewalld chrony curl ca-certificates || return 1
         local p
-        # fail2ban is in the openSUSE repositories; without it the fail2ban step is logged and skipped.
+        # Without fail2ban in the repositories the fail2ban step is logged and skipped.
         for p in fail2ban fail2ban-firewalld policycoreutils git jq tmux htop btop ncdu iotop mtr bind-utils tcpdump vim nano rsync wget unzip tar bash-completion mc fzf fd ripgrep; do
           zin "$p" || fail "optional package not installed: $p"
         done
@@ -317,8 +317,8 @@ write_files:
       }
 
       # firewalld answers D-Bus a moment after systemctl returns: wait for it, then check ssh.
-      fw_ok() { local i; for i in $(seq 30); do firewall-cmd --zone=public --query-service=ssh >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
-      fw_diag() { { for i in --state --get-default-zone --get-active-zones --list-all; do firewall-cmd $i; done; journalctl -u firewalld --no-pager -n 25; } 2>&1 | sed 's/^/firewalld: /' >> "$FAILED_LOG"; }
+      fw_ok() { local _; for _ in $(seq 30); do firewall-cmd --zone=public --query-service=ssh >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+      fw_diag() { local c; { for c in --state --get-default-zone --get-active-zones "--zone=public --list-all" "--permanent --zone=public --list-all"; do echo "# $c"; firewall-cmd $c; done; systemctl status firewalld --no-pager; journalctl -u firewalld --no-pager -n 25; } 2>&1 | sed 's/^/firewalld: /' >> "$FAILED_LOG"; }
 
       firewall() {
         local running=0 zone p ssh_ports=""
@@ -376,8 +376,8 @@ write_files:
       }
 
       auto_updates() {
-        # No unattended-upgrade package on Leap: a daily zypper patch of security patches, never a reboot.
-        # zypper exit codes 100-103 mean "patches applied / restart or reboot advised", not failure.
+        # No unattended-upgrade on Leap: a daily zypper patch of security patches, never a reboot.
+        # zypper exit codes 100-103 mean patches applied or restart advised, not failure.
         put /etc/systemd/system/server-security-updates.service 0644 <<'EOF'
       [Unit]
       Description=Install security patches (zypper patch --category security)
@@ -424,8 +424,7 @@ write_files:
         mem_mb=$(awk '/MemTotal/ { print int($2 / 1024) }' /proc/meminfo)
         size_mb=$(( mem_mb < 1024 ? 1024 : (mem_mb > 4096 ? 4096 : mem_mb) ))
         if [[ "$(stat -f -c %T /)" == btrfs ]]; then
-          # The root subvolume is snapshotted by snapper, and a swap file cannot live in a snapshotted
-          # subvolume: use a dedicated subvolume (snapshots do not descend into nested subvolumes).
+          # snapper snapshots the root subvolume and a swap file cannot live in one: use a dedicated subvolume.
           swapfile=/swap/swapfile
           if [[ ! -f $swapfile ]]; then
             # After a snapper rollback /swap is an empty plain directory (snapshots keep nested subvolumes
