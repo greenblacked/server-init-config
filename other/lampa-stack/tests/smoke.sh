@@ -107,7 +107,7 @@ done
 expect "Lampa host with a wrong key is refused" "$(req "$D" "/lite/events?token=00000000000000000000000000000000")" "$LOGIN"
 expect "Lampa host: the TorrServer token is not a Lampa key" "$(req "$D" "/lite/events?token=${TOK}")" "$LOGIN"
 expect "Lampa host: key in a cookie of the wrong name is refused" "$(req "$D" /app.min.js -H "Cookie: token=${KEY}")" "$LOGIN"
-for p in /admin /adminpanel /stats /weblog /ts /ADMIN /dlna /extensions /api/headers; do
+for p in /admin /adminpanel /stats /weblog /ts /ADMIN /dlna /extensions /api/headers /api/chromium/iframe; do
   expect "Lampac control / plugin-store path ${p} blocked even with a key" "$(req "$D" "$p?token=${KEY}")" '^404'
 done
 expect "lcrqpasswd header cannot open admin" "$(req "$D" /admin -H 'lcrqpasswd: x')" '^404'
@@ -161,6 +161,8 @@ if [[ "$SKIP_LAMPAC" != 1 ]]; then
   if grep -q '"accsdb":true' <<<"$ok_body"; then bad "Lampac refused a valid key"; else ok "Lampac accepts a key from users.json"; fi
 fi
 
+# Secrets never in the Caddy log (error entries carry the request URI; the default logger redacts keys and tokens)
+if docker logs "${PROJECT}-caddy-1" 2>&1 | grep -qF -e "${KEY}" -e "${TOK}"; then bad "a device key or TorrServer token appears in the Caddy log"; else ok "no device key or token in the Caddy log"; fi
 # Only Caddy (and the qBittorrent peer port, loopback by default) may publish host ports.
 ports=$(docker ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Names}} {{.Ports}}')
 echo "$ports" | sed 's/^/      /'
