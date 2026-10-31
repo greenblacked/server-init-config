@@ -1,0 +1,87 @@
+name: security-tools
+
+# common/security-tools.sh for real: release binaries with real downloads and SHA-256 verification (amd64 and arm64), and the
+# --audit / --network package names against real distro mirrors (EPEL and CRB on EL).
+# Runs on pull requests and pushes to main that touch common/ or tools/ci/, weekly (pinned versions can disappear upstream), on demand.
+# Same run locally: sudo ALLOW_LOCAL=1 tools/ci/security-tools-e2e.sh scan ; tools/ci/security-tools-e2e.sh pkgs debian:13
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'common/**'
+      - 'tools/ci/**'
+      - '.github/workflows/security-tools.yml'
+  pull_request:
+    paths:
+      - 'common/**'
+      - 'tools/ci/**'
+      - '.github/workflows/security-tools.yml'
+  schedule:
+    - cron: '37 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-tools-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  scan:
+    name: --scan (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    # arm64 runners (ubuntu-24.04-arm) are free for public repos; for a private repo they may be unavailable or billed, so a
+    # failure there (including "no runner picked up the job") must not turn the workflow red. amd64 must pass.
+    continue-on-error: ${{ matrix.arch == 'arm64' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install the release binaries and run each one
+        run: sudo -E tools/ci/security-tools-e2e.sh scan
+      - name: Upload logs on failure
+        if: ${{ !cancelled() && failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-scan-${{ matrix.arch }}-logs
+          path: ci-out/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  pkgs:
+    name: --audit --network (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - rockylinux/rockylinux:10
+          - fedora:44
+          - debian:13
+          - ubuntu:26.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install audit and network packages (${{ matrix.image }})
+        run: tools/ci/security-tools-e2e.sh pkgs "${{ matrix.image }}"
+      - name: Upload logs on failure
+        if: ${{ !cancelled() && failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-pkgs-${{ strategy.job-index }}-logs
+          path: ci-out/
+          if-no-files-found: ignore
+          retention-days: 7
