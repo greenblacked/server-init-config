@@ -225,8 +225,12 @@ if [[ "$SSH_PORT" != 22 ]] && command -v selinuxenabled >/dev/null 2>&1 && selin
   fi
 fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then
-  firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
-  log "firewalld: port ${SSH_PORT}/tcp allowed"
+  if [[ "$SSH_PORT" == 22 ]] && firewall-cmd -q --permanent --zone=public --query-service=ssh; then
+    log "firewalld: port 22 is covered by the ssh service"   # no extra 22/tcp rule: it would differ from the first run
+  else
+    firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
+    log "firewalld: port ${SSH_PORT}/tcp allowed"
+  fi
 fi
 # Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
 # firewall drops (and --lock-root, which closes port 22, would then lock you out).
