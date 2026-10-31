@@ -4,7 +4,7 @@
 # Two generated files are imported (install.sh writes them; they are not part of this repository):
 #   /etc/caddy/mode.caddy       TLS issuer + HSTS for the access mode (Let's Encrypt HTTP-01 / Caddy's local CA)
 #   /run/secrets/keymaps        the per-device keys as `map` blocks and the key of each Authelia user (a Docker secret)
-# Nothing is anonymous except two opt-in exceptions: /proxy* (LAMPAC_PROXY_ANON=1) and /startpage.js (SISI enabled).
+# Nothing is anonymous except two exceptions: /proxy* signed media links (LAMPAC_PROXY_ANON=1, the default; 0 closes them) and /startpage.js (SISI enabled).
 # Who may reach what:
 #   auth.*  the Authelia login page (rate limited by Authelia's regulation: failed logins ban the user/IP)
 #   ts.*    /t/<ts token>/...  a per-device token in the PATH (players cannot send headers, so the token rides in the
@@ -16,7 +16,7 @@
 #   main    Lampa app + Lampac API: a per-device key (query token / account_email / uid / box_mac, the Caddy cookie it
 #           sets, or the /on/js/<key> style loader paths) that Caddy checks against the key list, then Lampac checks it
 #           again (accsdb); or an Authelia session, in which case Caddy adds the user's own key. Lampac's signed
-#           /proxy* media links (LAMPAC_PROXY_ANON=1) and /startpage.js (SISI) are the opt-in exceptions, see README; admin paths are blocked.
+#           /proxy* media links (LAMPAC_PROXY_ANON=1, default) and /startpage.js (SISI) are the exceptions, see README; admin paths are blocked.
 {
 	servers {
 		protocols h1 h2

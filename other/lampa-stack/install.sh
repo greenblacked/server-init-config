@@ -286,7 +286,7 @@ ensure_env() {
   for k in LAMPAC_ONLINE LAMPAC_SISI LAMPAC_PROXY_ANON; do
     [[ "$(env_get "$k")" =~ ^[01]$ ]] || die "${k} must be 0 or 1"
   done
-  [[ "$(env_get LAMPAC_PROXY_ANON)" == 1 ]] && warn "LAMPAC_PROXY_ANON=1: /proxy* media links are reachable without a key; set it to 0 in .env to close them"
+  [[ "$(env_get LAMPAC_PROXY_ANON)" == 1 ]] && log "LAMPAC_PROXY_ANON=1 (default): signed /proxy* media links are reachable without a key; set it to 0 in .env to close them"
   [[ "$(env_get AUTHELIA_POLICY)" =~ ^(one_factor|two_factor)$ ]] || die "AUTHELIA_POLICY must be one_factor or two_factor"
   [[ "$(env_get QBT_MAX_RATIO)" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid QBT_MAX_RATIO"
   [[ "$(env_get QBT_MAX_SEED_MINUTES)" =~ ^[0-9]+$ ]] || die "invalid QBT_MAX_SEED_MINUTES"
