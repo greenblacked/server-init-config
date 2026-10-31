@@ -3968,6 +3968,8 @@ esac
 
 INSTALLED=() PRESENT=() MISSING=() SKIPPED=()
 CHECKSUM_FAIL=0
+DL_TRIED=0   # downloads attempted in this run: release binaries, the testssl git clone, the ssh-audit pip install (tools already present are not counted)
+DL_FAILED=0  # of those, how many were not installed (a scan run with no usable curl or architecture counts as one failure)
 
 have_systemd() { [[ -d /run/systemd/system ]]; }
 
@@ -4150,6 +4152,7 @@ setup_ssh_audit() {
   command -v python3 >/dev/null 2>&1 || pkg_ensure python3 || { MISSING+=("ssh-audit (no package, no python3)"); return 0; }
   [[ $FAMILY == debian ]] && { pkg_ensure python3-venv || true; }
   local req
+  DL_TRIED=$((DL_TRIED + 1))
   req=$(mktemp)
   printf 'ssh-audit==%s --hash=sha256:%s\n' "$SSH_AUDIT_VERSION" "$SSH_AUDIT_WHEEL_SHA256" > "$req"
   if rm -rf /opt/ssh-audit/venv && install -d /opt/ssh-audit && python3 -m venv /opt/ssh-audit/venv >/dev/null 2>&1 \
@@ -4161,6 +4164,7 @@ setup_ssh_audit() {
     echo "$SSH_AUDIT_VERSION" > "${SEC_STATE}/ssh-audit.version"
     INSTALLED+=("ssh-audit ${SSH_AUDIT_VERSION} (venv)")
   else
+    DL_FAILED=$((DL_FAILED + 1))
     MISSING+=("ssh-audit (pip install failed)")
   fi
   rm -f "$req"
@@ -4179,8 +4183,10 @@ setup_testssl() {
   fi
   command -v git >/dev/null 2>&1 || pkg_ensure git || { SKIPPED+=("testssl.sh (no package, no git)"); return 0; }
   local tmp
+  DL_TRIED=$((DL_TRIED + 1))
   tmp=$(mktemp -d)
   if ! git clone -q --depth 1 --branch "v${TESTSSL_VERSION}" https://github.com/testssl/testssl.sh.git "$tmp/t" 2>/dev/null; then
+    DL_FAILED=$((DL_FAILED + 1))
     SKIPPED+=("testssl.sh ${TESTSSL_VERSION} (git clone failed)")
   elif [[ "$(git -C "$tmp/t" rev-parse HEAD)" != "$TESTSSL_COMMIT" ]]; then
     log "ERROR: testssl.sh v${TESTSSL_VERSION} is not commit ${TESTSSL_COMMIT}, refusing to install"
@@ -4262,13 +4268,14 @@ release_tool() {
     PRESENT+=("${name} ${ver}")
     return 0
   fi
+  DL_TRIED=$((DL_TRIED + 1))
   tmp=$(mktemp -d)
   release_fetch_install "$tmp" "$name" "$ver" "$repo" "$asset" "$sums_list" "$mode" "$bin" || rc=$?
   rm -rf "$tmp"
   case "$rc" in
     0) INSTALLED+=("${name} ${ver}"); install -d "$SEC_STATE"; echo "$ver" > "$marker" ;;
-    2) CHECKSUM_FAIL=1; SKIPPED+=("${name} ${ver} (CHECKSUM MISMATCH, not installed)") ;;
-    *) SKIPPED+=("${name} ${ver} (not downloaded)") ;;
+    2) CHECKSUM_FAIL=1; DL_FAILED=$((DL_FAILED + 1)); SKIPPED+=("${name} ${ver} (CHECKSUM MISMATCH, not installed)") ;;
+    *) DL_FAILED=$((DL_FAILED + 1)); SKIPPED+=("${name} ${ver} (not downloaded)") ;;
   esac
   return 0
 }
@@ -4331,10 +4338,11 @@ release_fetch_install() {
 install_scan() {
   log "=== scanners (release binaries, SHA256 verified) ==="
   if [[ -z "$ARCH" ]]; then
+    DL_TRIED=$((DL_TRIED + 1)); DL_FAILED=$((DL_FAILED + 1))
     SKIPPED+=("scan tools (unsupported architecture $(uname -m))")
     return 0
   fi
-  command -v curl >/dev/null 2>&1 || pkg_ensure curl || { SKIPPED+=("scan tools (curl missing)"); return 0; }
+  command -v curl >/dev/null 2>&1 || pkg_ensure curl || { DL_TRIED=$((DL_TRIED + 1)); DL_FAILED=$((DL_FAILED + 1)); SKIPPED+=("scan tools (curl missing)"); return 0; }
   local a="$ARCH" big small x
   if [[ $ARCH == amd64 ]]; then big=64bit; small=x86_64; x=x64; else big=ARM64; small=arm64; x=arm64; fi
   if (( WANT_SCAN )); then
@@ -4418,6 +4426,12 @@ done
 log "Use these tools only on systems you own or are authorized to test."
 if (( CHECKSUM_FAIL )); then
   die "at least one download failed its SHA256 check and was not installed (see ERROR lines above)"
+fi
+if (( DL_TRIED > 0 && DL_FAILED == DL_TRIED )); then
+  die "every download failed (${DL_FAILED} of ${DL_TRIED}), nothing was installed (see WARN lines above)"
+fi
+if (( DL_FAILED > 0 )); then
+  log "WARN: ${DL_FAILED} of ${DL_TRIED} downloads failed, the others were installed"
 fi
 log "OK"
 __SIC_EOF__
