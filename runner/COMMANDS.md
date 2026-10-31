@@ -737,8 +737,12 @@ if [[ "$SSH_PORT" != 22 ]] && command -v selinuxenabled >/dev/null 2>&1 && selin
   fi
 fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then
-  firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
-  log "firewalld: port ${SSH_PORT}/tcp allowed"
+  if [[ "$SSH_PORT" == 22 ]] && firewall-cmd -q --permanent --zone=public --query-service=ssh; then
+    log "firewalld: port 22 is covered by the ssh service"   # no extra 22/tcp rule: it would differ from the first run
+  else
+    firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
+    log "firewalld: port ${SSH_PORT}/tcp allowed"
+  fi
 fi
 # Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
 # firewall drops (and --lock-root, which closes port 22, would then lock you out).
@@ -3602,7 +3606,7 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p zone set_zone
+  local running=0 changed=0 p zone set_zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
   # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
@@ -3646,6 +3650,17 @@ firewalld_setup() {
       die "ssh port ${p} not allowed after start; firewalld stopped"
     fi
   done
+  # The default public zone opens cockpit (and mdns on some images); a runner host needs neither. Only these services
+  # are removed, never ssh.
+  for p in cockpit mdns; do
+    if firewall-cmd --permanent --zone=public --query-service="$p" >/dev/null 2>&1; then
+      if firewall-cmd --permanent --zone=public --remove-service="$p" >/dev/null; then changed=1; else log "WARN: could not remove $p from the public zone"; fi
+    fi
+  done
+  if (( changed )); then
+    firewall-cmd --reload >/dev/null || die "firewalld reload failed"
+    if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then systemctl stop firewalld; die "ssh not allowed after reload; firewalld stopped"; fi
+  fi
   log "firewalld: active, public zone: $(firewall-cmd --zone=public --list-services) $(firewall-cmd --zone=public --list-ports)"
   docker_zone
 }
@@ -9049,8 +9064,12 @@ if [[ "$SSH_PORT" != 22 ]] && command -v selinuxenabled >/dev/null 2>&1 && selin
   fi
 fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then
-  firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
-  log "firewalld: port ${SSH_PORT}/tcp allowed"
+  if [[ "$SSH_PORT" == 22 ]] && firewall-cmd -q --permanent --zone=public --query-service=ssh; then
+    log "firewalld: port 22 is covered by the ssh service"   # no extra 22/tcp rule: it would differ from the first run
+  else
+    firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
+    log "firewalld: port ${SSH_PORT}/tcp allowed"
+  fi
 fi
 # Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
 # firewall drops (and --lock-root, which closes port 22, would then lock you out).
@@ -9540,7 +9559,7 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p zone set_zone
+  local running=0 changed=0 p zone set_zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
   # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
@@ -9584,6 +9603,17 @@ firewalld_setup() {
       die "ssh port ${p} not allowed after start; firewalld stopped"
     fi
   done
+  # The default public zone opens cockpit (and mdns on some images); a runner host needs neither. Only these services
+  # are removed, never ssh.
+  for p in cockpit mdns; do
+    if firewall-cmd --permanent --zone=public --query-service="$p" >/dev/null 2>&1; then
+      if firewall-cmd --permanent --zone=public --remove-service="$p" >/dev/null; then changed=1; else log "WARN: could not remove $p from the public zone"; fi
+    fi
+  done
+  if (( changed )); then
+    firewall-cmd --reload >/dev/null || die "firewalld reload failed"
+    if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then systemctl stop firewalld; die "ssh not allowed after reload; firewalld stopped"; fi
+  fi
   log "firewalld: active, public zone: $(firewall-cmd --zone=public --list-services) $(firewall-cmd --zone=public --list-ports)"
   docker_zone
 }
@@ -11238,8 +11268,12 @@ if [[ "$SSH_PORT" != 22 ]] && command -v selinuxenabled >/dev/null 2>&1 && selin
   fi
 fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then
-  firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
-  log "firewalld: port ${SSH_PORT}/tcp allowed"
+  if [[ "$SSH_PORT" == 22 ]] && firewall-cmd -q --permanent --zone=public --query-service=ssh; then
+    log "firewalld: port 22 is covered by the ssh service"   # no extra 22/tcp rule: it would differ from the first run
+  else
+    firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
+    log "firewalld: port ${SSH_PORT}/tcp allowed"
+  fi
 fi
 # Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
 # firewall drops (and --lock-root, which closes port 22, would then lock you out).
@@ -14418,7 +14452,7 @@ put_jail() {
 }
 
 firewalld_setup() {
-  local running=0 p zone set_zone
+  local running=0 changed=0 p zone set_zone
   command -v firewall-cmd >/dev/null 2>&1 || dnf -y -q install firewalld || die "cannot install firewalld"
   systemctl is-active --quiet firewalld && running=1
   # SSH is allowed in the public zone, so the uplink must be in it: make it the default zone (as server-init does).
@@ -14462,6 +14496,17 @@ firewalld_setup() {
       die "ssh port ${p} not allowed after start; firewalld stopped"
     fi
   done
+  # The default public zone opens cockpit (and mdns on some images); a runner host needs neither. Only these services
+  # are removed, never ssh.
+  for p in cockpit mdns; do
+    if firewall-cmd --permanent --zone=public --query-service="$p" >/dev/null 2>&1; then
+      if firewall-cmd --permanent --zone=public --remove-service="$p" >/dev/null; then changed=1; else log "WARN: could not remove $p from the public zone"; fi
+    fi
+  done
+  if (( changed )); then
+    firewall-cmd --reload >/dev/null || die "firewalld reload failed"
+    if ! firewall-cmd --zone=public --query-service=ssh >/dev/null; then systemctl stop firewalld; die "ssh not allowed after reload; firewalld stopped"; fi
+  fi
   log "firewalld: active, public zone: $(firewall-cmd --zone=public --list-services) $(firewall-cmd --zone=public --list-ports)"
   docker_zone
 }
@@ -16116,8 +16161,12 @@ if [[ "$SSH_PORT" != 22 ]] && command -v selinuxenabled >/dev/null 2>&1 && selin
   fi
 fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then
-  firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
-  log "firewalld: port ${SSH_PORT}/tcp allowed"
+  if [[ "$SSH_PORT" == 22 ]] && firewall-cmd -q --permanent --zone=public --query-service=ssh; then
+    log "firewalld: port 22 is covered by the ssh service"   # no extra 22/tcp rule: it would differ from the first run
+  else
+    firewall-cmd -q --permanent --add-port="${SSH_PORT}/tcp" && firewall-cmd -q --reload
+    log "firewalld: port ${SSH_PORT}/tcp allowed"
+  fi
 fi
 # Debian runner hosts get ufw from host-firewall.sh: the new port must be open there too, or sshd listens on a port the
 # firewall drops (and --lock-root, which closes port 22, would then lock you out).
