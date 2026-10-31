@@ -22,7 +22,7 @@ unless you switch it on.
 Docker with the compose plugin must be installed (the script does not install it). On a fresh server:
 
 ```bash
-git clone <this repo> && cd server-init-config/other/lampa-stack
+git clone https://github.com/greenblacked/server-init-config && cd server-init-config/other/lampa-stack
 sudo ./install.sh
 ```
 

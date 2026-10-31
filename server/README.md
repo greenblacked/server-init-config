@@ -32,7 +32,7 @@ All run on x86_64 and ARM64 and refuse to run on any other OS.
    ssh ops@SERVER_IP 'sudo -n true && echo ok'
    ```
 
-The bootstrap waits for cloud-init, streams `server/` and `common/` of `git HEAD` to `/root/server-init-config` over SSH (the repo is private, so it is never cloned on the server and no credential goes there), runs the `server-init-*.sh` for the OS in `/etc/os-release`, installs `health` (plus the maintenance tools on Fedora and EL) and ends with `health`. It never installs a runner. Options: `--user`, `--port`, `--os`, `--allow-dirty`, `--continue-degraded`, `--dry-run`. `ADMIN_USER`, `EXTRA_PORTS` (for example `"80/tcp 443/tcp"`), `TIMEZONE`, `INSTALL_DOCKER`, `INSTALL_SWAP`, `INSTALL_CLEANUP` and `APP` in the environment are saved to `/etc/server-init.conf` on the first run; edit that file and rerun the bootstrap to change them. An existing conf is never rewritten: missing keys use the defaults.
+The bootstrap waits for cloud-init, streams `server/` and `common/` of `git HEAD` to `/root/server-init-config` over SSH (nothing is cloned on the server and no credential goes there; the alternative is a bootstrap-free local install on the server, as root: `git clone https://github.com/greenblacked/server-init-config /root/server-init-config`, then the `server-init-*.sh` for your OS from `/root/server-init-config/server`, then `server/install-tools.sh` on Fedora and EL or `server/install-health.sh` elsewhere, which install `health`, `srv`, `server-update`, the disk guard and the timers), runs the `server-init-*.sh` for the OS in `/etc/os-release`, installs `health` (plus the maintenance tools on Fedora and EL) and ends with `health`. It never installs a runner. Options: `--user`, `--port`, `--os`, `--allow-dirty`, `--continue-degraded`, `--dry-run`. `ADMIN_USER`, `EXTRA_PORTS` (for example `"80/tcp 443/tcp"`), `TIMEZONE`, `INSTALL_DOCKER`, `INSTALL_SWAP`, `INSTALL_CLEANUP` and `APP` in the environment are saved to `/etc/server-init.conf` on the first run; edit that file and rerun the bootstrap to change them. An existing conf is never rewritten: missing keys use the defaults.
 
 Example with open web ports. Laptop, repo root:
 
@@ -197,7 +197,7 @@ The first installs the default groups; the second adds the Kali helper. `--help`
 |---|---|
 | `--audit` | lynis, OpenSCAP (EL/Fedora, evaluation only), auditd with a small ruleset, ssh-audit, testssl.sh |
 | `--network` | nmap, tcpdump, tshark, iperf3, socat, ncat, whois, dig, lsof, mtr, traceroute, iftop, nethogs, bmon |
-| `--scan` | trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: release binaries at pinned versions, checked against the checksums file of the same release (catches corrupt downloads, not a replaced release); a mismatch is refused |
+| `--scan` | trivy, gitleaks, hadolint, cosign, osv-scanner, trufflehog, dockle: release binaries at pinned versions, checked against the checksums file of the same release (catches corrupt downloads, not a replaced release); a mismatch is refused; the script exits non-zero if every download it tried failed (release binaries, the testssl clone, the ssh-audit pip install) |
 | opt-in | `--aide`, `--clamav` (no clamd), `--rkhunter`, `--chkrootkit`, `--arp-scan`, `--grype`, `--syft`, `--k8s` |
 | `--kali` | the `kali` command: Kali Linux in a Docker container, built on first use (2 to 3 GB); needs Docker |
 | `--audit-timer` | weekly lynis, oscap, aide and rkhunter reports in `/var/log/security-audit` (idle priority) |

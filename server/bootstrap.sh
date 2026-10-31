@@ -3,7 +3,7 @@
 # already ran a server cloud-init file. Waits for cloud-init, streams server/ and common/ of this repo (git HEAD)
 # to the server over SSH, runs the server-init script that matches the detected OS, installs `health` and, on
 # Fedora and EL, the maintenance tools, and finishes with `health`. It never installs or registers a GitLab Runner.
-# Nothing secret is stored on the server: the repo is private, so it is never cloned there, and no credential
+# Nothing secret is stored on the server: the repo is streamed, not cloned there (git clone of the public repo on the server also works), and no credential
 # goes into a command line, the environment or a file. For a runner host use runner/bootstrap.sh.
 # Written for bash 3.2 (macOS): no associative arrays, no mapfile, no ${var,,}.
 set -Eeuo pipefail

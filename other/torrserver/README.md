@@ -6,11 +6,13 @@ Works on Rocky/Alma/CentOS Stream 10, Fedora 44, Debian 13, Ubuntu 26.04 and ope
 
 ## Get it onto the server
 
-The repo is private and is not cloned on the server, and `server/bootstrap.sh` does not copy `other/`. Copy only this folder, once and again for every new version. On your laptop, in the repo root (needs SSH access as `ops`):
+`server/bootstrap.sh` does not copy `other/`, and by default the repo is not cloned on the server. Copy only this folder, once and again for every new version. On your laptop, in the repo root (needs SSH access as `ops`), stream it to the server:
 
 ```bash
 git archive --format=tar HEAD:other/torrserver | ssh ops@SERVER_IP 'sudo bash -c "rm -rf /usr/local/src/torrserver.new && install -d -m 0755 /usr/local/src/torrserver.new && tar -x -C /usr/local/src/torrserver.new && rm -rf /usr/local/src/torrserver && mv /usr/local/src/torrserver.new /usr/local/src/torrserver"'
 ```
+
+Alternatively run `git clone https://github.com/greenblacked/server-init-config` on the server and use `other/torrserver` from the clone.
 
 Every command below runs on the server, as `ops` (an admin, not in the `docker` group, so Docker and journal commands use `sudo`), in that folder (it holds `install.sh` next to the compose files it installs):
 

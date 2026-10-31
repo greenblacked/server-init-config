@@ -3,7 +3,7 @@
 # For a plain server without a runner use server/bootstrap.sh.
 # Waits for cloud-init, streams this repo (git HEAD) to the server over SSH, runs the safe components
 # through runner/setup.sh and finishes with `health`. Nothing secret is stored on the server
-# beforehand: the repo is private, so it is never cloned there, and the runner token is typed at the
+# beforehand: the repo is streamed, not cloned there (git clone of the public repo on the server also works), and the runner token is typed at the
 # prompt of an interactive ssh -t session (never on a command line, in the environment or in a file).
 set -Eeuo pipefail
 
