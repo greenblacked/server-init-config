@@ -2,6 +2,8 @@
 # common/security-tools.sh for real (real downloads, real distro mirrors).
 #   tools/ci/security-tools-e2e.sh scan             on THIS machine (root): --scan, SHA-256 verified release binaries; each binary
 #                                                  must run and report the pinned version. Works on x86_64 and aarch64.
+#   tools/ci/security-tools-e2e.sh scan-in IMAGE    "scan" inside a throwaway container of IMAGE (a supported OS) on this
+#                                                  machine's own arch; the GitHub runners are Ubuntu 24.04, which the script refuses.
 #   tools/ci/security-tools-e2e.sh pkgs IMAGE       in a throwaway container of IMAGE: --audit --network with the distro's own
 #                                                  mirrors (EPEL and CRB on EL); the package names must resolve.
 # "scan" installs into /usr/local/bin and /var/lib/security-tools: CI runner only (or ALLOW_LOCAL=1 on a VM).
@@ -51,6 +53,18 @@ scan() {
   [[ "$(gitleaks version 2>&1 | head -1)" == *"$(pinned GITLEAKS_VERSION)"* ]] && pass "the working gitleaks binary was not replaced" || fail "gitleaks changed after the unknown-version run: $(gitleaks version 2>&1 | head -1)"
 }
 
+scan_in() {
+  local image="${1:?image}"
+  need docker || die "docker is required"
+  log "== scan inside $image ($(uname -m))"
+  # rw mount: ci-out/ is written from inside; file is used to print each binary's arch
+  docker run --rm -v "$CI_ROOT:/repo" -w /repo -e GITHUB_ACTIONS -e CI=true -e CI_OUT=/repo/ci-out "$image" bash -c '
+    set -e
+    if command -v apt-get >/dev/null 2>&1; then apt-get update -q >/dev/null && apt-get install -y -q --no-install-recommends ca-certificates curl file tar gzip >/dev/null
+    else dnf -y -q install ca-certificates curl file tar gzip >/dev/null; fi
+    tools/ci/security-tools-e2e.sh scan'
+}
+
 pkgs() {
   local image="${1:?image}" slug W
   slug=$(tr -c 'A-Za-z0-9\n' '_' <<<"$image"); W="$CI_OUT/security-pkgs-${slug}"; mkdir -p "$W"
@@ -85,7 +99,8 @@ pkgs() {
 
 case "$MODE" in
   scan) scan ;;
+  scan-in) scan_in "${2:-}"; exit $? ;;
   pkgs) pkgs "${2:-}" ;;
-  *) die "usage: $0 scan | pkgs IMAGE" ;;
+  *) die "usage: $0 scan | scan-in IMAGE | pkgs IMAGE" ;;
 esac
 finish
