@@ -1,7 +1,7 @@
 name: stacks
 
 # other/torrserver and other/lampa-stack on a real Docker host with internet (ubuntu runner VM), real pinned images.
-# Runs on pull requests and pushes to main that touch other/ or tools/ci/, weekly (image digests, upstream changes), on demand.
+# Runs on every push to main, on pull requests that touch other/ or tools/ci/, weekly (image digests, upstream changes), on demand.
 # Public mode with Let's Encrypt is not covered: the runner has no inbound port 80 from the internet (TorrServer uses Caddy's
 # own CA through TS_TLS=internal; the lampa stack is tested in --local and --vpn mode). See the header of each script.
 # Same run on a disposable VM: sudo ALLOW_LOCAL=1 tools/ci/stack-torrserver.sh ; sudo ALLOW_LOCAL=1 tools/ci/stack-lampa.sh
@@ -9,10 +9,6 @@ name: stacks
 on:
   push:
     branches: [main]
-    paths:
-      - 'other/**'
-      - 'tools/ci/**'
-      - '.github/workflows/stacks.yml'
   pull_request:
     paths:
       - 'other/**'

@@ -5,17 +5,12 @@ name: runner-matrix
 #   host        Docker-dependent parts directly on the runner VM: registry cache, job isolation (DOCKER-USER), npm cache stack.
 #               They cannot be tested inside a container: the rules belong to the netfilter of the machine that runs dockerd.
 #   cloud-init  the runner cloud-init files against the real cloud-init schema
-# Runs on pull requests and pushes to main that touch runner/, common/ or tools/ci/, weekly, and on demand.
+# Runs on every push to main, on pull requests that touch runner/, common/ or tools/ci/, weekly, and on demand.
 # Same run locally: tools/ci/runner-e2e.sh debian:13 ; sudo ALLOW_LOCAL=1 tools/ci/runner-host-e2e.sh (disposable VM only)
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'runner/**'
-      - 'common/**'
-      - 'tools/ci/**'
-      - '.github/workflows/runner-matrix.yml'
   pull_request:
     paths:
       - 'runner/**'
