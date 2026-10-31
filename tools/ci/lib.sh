@@ -39,7 +39,19 @@ ci_mask() {
   done
   return 0
 }
-ci_redact() { sed -E 's/.*(password|token|secret|private ?key|preshared ?key).*/    [line hidden: it may hold a secret]/I'; }
+# Also hidden: the WireGuard client config together with its QR code (a scannable private key), and the plugin URLs that
+# carry a Lampac device key in the path (/on/js/KEY, /online/js/KEY, /sisi/js/KEY).
+ci_redact() {
+  awk '
+    function qr(s) { gsub(/\033\[[0-9;]*m/, "", s); return s ~ /^( |▀|▄|█)*$/ }
+    st == 2 && qr($0) { next }
+    { st = (st == 2 ? 0 : st) }
+    st == 1 { if ($0 ~ /^PersistentKeepalive/) st = 2; next }
+    /^\[Interface\]/ { st = 1; print "    [WireGuard client config and QR code hidden]"; next }
+    { print }
+  ' | sed -E -e 's/.*(password|token|secret|private ?key|preshared ?key).*/    [line hidden: it may hold a secret]/I' \
+    -e 's#.*/(on|online|sisi)/js/.*#    [line hidden: it may hold a device key]#'
+}
 ci_redact_file() { local t; t=$(mktemp); ci_redact < "$1" > "$t" && cat "$t" > "$1"; rm -f "$t"; }
 # ci_run LOG TAIL_LINES cmd...   runs cmd; the raw output (it may hold generated passwords) stays in a private temp file
 # (path in CI_RAW, removed unless CI_KEEP_RAW=1, then the caller removes it); LOG and the console only get the redacted view. Returns cmd's exit code.
