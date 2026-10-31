@@ -18,7 +18,7 @@ TS=/opt/torrserver
 INSTALL=(./install.sh)
 
 collect() { docker ps -a > "$W/docker-ps.txt" 2>&1; docker logs torrserver > "$W/torrserver.log" 2>&1; docker logs torrserver-caddy > "$W/caddy.log" 2>&1; iptables-save > "$W/iptables.txt" 2>&1; cp "$TS/.env" "$W/env.txt" 2>/dev/null; true; }
-on_exit() { local rc=$?; collect; exit "$rc"; }
+on_exit() { local rc=$?; set +e; collect; exit "$rc"; }   # set +e: a failing docker logs (container purged) must not replace the exit code
 trap on_exit EXIT
 
 env_get() { grep -m1 "^$1=" "$TS/.env" | cut -d= -f2-; }
