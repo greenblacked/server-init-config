@@ -62,7 +62,9 @@ step() {
 }
 
 packages() {
-  dnf -y -q install diffutils tzdata firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
+  dnf -y -q install diffutils tzdata dbus-broker firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
+  # firewall-cmd and timedatectl need the D-Bus system bus; minimal images have none.
+  systemctl is-active --quiet dbus.service || systemctl start dbus.service || return 1
   local p
   for p in git jq tmux htop btop ncdu iotop mtr bind-utils tcpdump vim-enhanced nano rsync wget unzip tar bash-completion mc fzf fd-find ripgrep; do
     rpm -q --whatprovides "$p" >/dev/null 2>&1 || dnf -y -q install "$p" || fail "optional package not installed: $p"
@@ -254,7 +256,8 @@ admin_user() {
 }
 
 system_tuning() {
-  timedatectl set-timezone "$TIMEZONE" || fail "unknown TIMEZONE: $TIMEZONE"
+  # Fallback without D-Bus: the symlink timedatectl would make.
+  timedatectl set-timezone "$TIMEZONE" 2>/dev/null || { [[ "$TIMEZONE" != *..* && -f "/usr/share/zoneinfo/$TIMEZONE" ]] && ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime; } || fail "unknown TIMEZONE: $TIMEZONE"
   systemctl restart systemd-journald || return 1
   sysctl --system >/dev/null || return 1
   systemctl enable --now chronyd
@@ -265,8 +268,8 @@ fw_perm() {
   if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi
 }
 
-# firewalld answers D-Bus a moment after systemctl returns: wait for it, then check ssh.
-fw_ok() { local _; for _ in $(seq 30); do firewall-cmd --zone=public --query-service=ssh >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+# Short wait for firewalld on D-Bus (packages() starts the bus), then check ssh.
+fw_ok() { local _; for _ in $(seq 10); do firewall-cmd --zone=public --query-service=ssh >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
 fw_diag() { local c; { for c in --state --get-default-zone --get-active-zones "--zone=public --list-all" "--permanent --zone=public --list-all"; do echo "# $c"; firewall-cmd $c; done; systemctl status firewalld --no-pager; journalctl -u firewalld --no-pager -n 25; } 2>&1 | sed 's/^/firewalld: /' >> "$FAILED_LOG"; }
 
 firewall() {
