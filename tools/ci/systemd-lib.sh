@@ -58,14 +58,28 @@ DOCKER
 # Idempotent; does nothing outside CI unless ALLOW_LOCAL=1, and never touches a developer's machine silently.
 sd_relax_host_apparmor() {
   local profiles=/sys/kernel/security/apparmor/profiles
-  [[ -r "$profiles" ]] || return 0
-  grep -q '^unix-chkpwd ' "$profiles" 2>/dev/null || return 0
+  [[ -e "$profiles" ]] || return 0
+  # The file is mode 0444 but the kernel refuses unprivileged reads of the policy (EACCES), so read it with $SUDO.
+  # SUDO is "" for root, so this also works without sudo installed.
+  # shellcheck disable=SC2086
+  $SUDO grep -q '^unix-chkpwd ' "$profiles" 2>/dev/null || return 0
   if ! in_ci && [[ "${ALLOW_LOCAL:-0}" != 1 ]]; then
     log "WARN: host AppArmor profile unix-chkpwd is loaded and breaks sudo/ssh in EL10 containers; set ALLOW_LOCAL=1 to unload it"
     return 0
   fi
   log "unloading host AppArmor profile unix-chkpwd (CI runner only, see systemd-lib.sh)"
-  sudo apparmor_parser -R /etc/apparmor.d/unix-chkpwd || log "WARN: could not unload unix-chkpwd; EL10 sudo/ssh tests may fail"
+  # shellcheck disable=SC2086
+  if ! { [[ -f /etc/apparmor.d/unix-chkpwd ]] && $SUDO apparmor_parser -R /etc/apparmor.d/unix-chkpwd; }; then
+    # No profile file or no apparmor_parser: remove it by name through securityfs.
+    # shellcheck disable=SC2086
+    echo -n unix-chkpwd | $SUDO tee /sys/kernel/security/apparmor/.remove >/dev/null || true
+  fi
+  # shellcheck disable=SC2086
+  if $SUDO grep -q '^unix-chkpwd ' "$profiles" 2>/dev/null; then
+    log "WARN: unix-chkpwd is still loaded; EL10 sudo/ssh tests may fail"
+  else
+    log "host AppArmor profile unix-chkpwd unloaded"
+  fi
 }
 
 # sd_run NAME TAG [extra docker run args...]
