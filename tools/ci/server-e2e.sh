@@ -81,7 +81,10 @@ check_failed() { # desc logfile -> sets FAILED_LIST
   FAILED_LIST=$(failed_steps "$2")
   local s bad=""
   for s in $FAILED_LIST; do [[ " $ALLOWED " == *" $s "* ]] || bad+=" $s"; done
-  if [[ -z "$bad" ]]; then pass "$1: no unexpected failed step (failed: ${FAILED_LIST:-none})"; else fail "$1: steps failed that a container can do:${bad}"; fi
+  if [[ -z "$bad" ]]; then pass "$1: no unexpected failed step (failed: ${FAILED_LIST:-none})"; else
+    fail "$1: steps failed that a container can do:${bad}"
+    docker exec "$NAME" sh -c 'tail -n 40 /var/log/server-init-failed.log' 2>&1 | sed 's/^/    init-failed: /' || true
+  fi
 }
 snapshot() { # config files the init manages, hashed inside the container
   docker exec "$NAME" sh -c 'find /etc/ssh/sshd_config.d /etc/sysctl.d /etc/sudoers.d /etc/fail2ban/jail.d /etc/server-init.conf /etc/profile.d /etc/systemd/system /usr/local/bin /usr/local/sbin /etc/security /etc/systemd/journald.conf.d /etc/apt/apt.conf.d /etc/dnf/automatic.conf -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null; echo ---; ufw show added 2>/dev/null; firewall-cmd --permanent --list-all 2>/dev/null; true'
