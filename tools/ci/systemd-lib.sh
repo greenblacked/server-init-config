@@ -50,9 +50,28 @@ DOCKER
   rm -rf "$dir"
 }
 
+# sd_relax_host_apparmor: the Ubuntu 24.04 runner host loads an AppArmor profile "unix-chkpwd" that attaches by path to
+# /usr/sbin/unix_chkpwd. The kernel applies it inside our privileged containers too, so on EL10 (helper at that path) it
+# denies dac_read_search/dac_override, pam_unix gets PAM_AUTHINFO_UNAVAIL and both sudo and sshd refuse the admin user
+# ("could not obtain user info"). Fedora uses /usr/bin/unix_chkpwd and is not hit; real EL10 servers have no AppArmor.
+# So this is a CI-environment artifact: drop the profile from the runner kernel (the VM is thrown away after the job).
+# Idempotent; does nothing outside CI unless ALLOW_LOCAL=1, and never touches a developer's machine silently.
+sd_relax_host_apparmor() {
+  local profiles=/sys/kernel/security/apparmor/profiles
+  [[ -r "$profiles" ]] || return 0
+  grep -q '^unix-chkpwd ' "$profiles" 2>/dev/null || return 0
+  if ! in_ci && [[ "${ALLOW_LOCAL:-0}" != 1 ]]; then
+    log "WARN: host AppArmor profile unix-chkpwd is loaded and breaks sudo/ssh in EL10 containers; set ALLOW_LOCAL=1 to unload it"
+    return 0
+  fi
+  log "unloading host AppArmor profile unix-chkpwd (CI runner only, see systemd-lib.sh)"
+  sudo apparmor_parser -R /etc/apparmor.d/unix-chkpwd || log "WARN: could not unload unix-chkpwd; EL10 sudo/ssh tests may fail"
+}
+
 # sd_run NAME TAG [extra docker run args...]
 sd_run() {
   local name="$1" tag="$2"; shift 2
+  sd_relax_host_apparmor
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /tmp --tmpfs /run --tmpfs /run/lock -e container=docker "$@" "$tag" >/dev/null
