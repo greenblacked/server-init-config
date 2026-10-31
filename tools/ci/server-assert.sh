@@ -28,8 +28,10 @@ if step_failed admin-user; then warn "admin-user step failed (allowed), skipped"
   # openSUSE Leap 16 keeps the vendor sudoers in /usr/etc; a bare visudo -c only reads the compiled-in /etc/sudoers.
   sudoers_main=/etc/sudoers; [[ -f $sudoers_main ]] || sudoers_main=/usr/etc/sudoers
   check "visudo -c on the whole sudoers" visudo -cf "$sudoers_main"
-  if ! check "${ADMIN_USER} has passwordless sudo" su -s /bin/bash "$ADMIN_USER" -c 'sudo -n true'; then
-    # check() hides stderr; show why (locked account, PAM, sudoers) so the log is enough to diagnose
+  # Not check(): it returns 0 even after fail(), so an `if ! check` branch would never run.
+  if su -s /bin/bash "$ADMIN_USER" -c 'sudo -n true' >/dev/null 2>&1; then pass "${ADMIN_USER} has passwordless sudo"; else
+    fail "${ADMIN_USER} has passwordless sudo"
+    # show why (locked account, PAM, sudoers, SELinux) so the log is enough to diagnose
     echo "  shadow state: $(getent shadow "$ADMIN_USER" | cut -d: -f2 | cut -c1)"
     su -s /bin/bash "$ADMIN_USER" -c 'sudo -n true' 2>&1 | sed 's/^/  sudo: /' || true
     journalctl -u sshd -u ssh --no-pager -n 20 2>/dev/null | grep -i "$ADMIN_USER" | sed 's/^/  sshd: /' || true
