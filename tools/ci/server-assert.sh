@@ -90,4 +90,5 @@ if [[ "$KIND" == el10 || "$KIND" == fedora ]]; then
   out=$(server-cleanup --dry-run 2>&1); rc=$?
   (( rc == 0 )) && pass "server-cleanup --dry-run" || fail "server-cleanup --dry-run exit ${rc}: $(tail -3 <<<"$out")"
 fi
+echo "ASSERT-DONE"
 exit $(( fails > 0 ))

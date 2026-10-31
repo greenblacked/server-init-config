@@ -33,17 +33,14 @@ jobs:
     name: --scan (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
-    # arm64 runners (ubuntu-24.04-arm) are free for public repos; for a private repo they may be unavailable or billed, so a
-    # failure there (including "no runner picked up the job") must not turn the workflow red. amd64 must pass.
-    continue-on-error: ${{ matrix.arch == 'arm64' }}
+    # arm64 runners (ubuntu-24.04-arm) are free for public repos; for a private repo they may be unavailable or billed, and a job
+    # with no runner stays queued (timeout-minutes does not count queue time). So arm64 is opt-in: set the repository variable
+    # ARM64_RUNNERS=true (Settings, Secrets and variables, Variables) once such runners exist. amd64 always runs and must pass;
+    # when arm64 is enabled it must pass too.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJSON(vars.ARM64_RUNNERS == 'true' && '[{"arch":"amd64","runner":"ubuntu-24.04"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"amd64","runner":"ubuntu-24.04"}]') }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:

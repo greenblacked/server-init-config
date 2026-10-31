@@ -4,6 +4,7 @@
 #   Usage: tools/ci/server-e2e.sh IMAGE        e.g. rockylinux/rockylinux:10, debian:13, opensuse/leap:16.0
 #   Env:   KEEP=1 keep the container for debugging; ALLOW_DIRTY=1 test HEAD although the tree has changes;
 #          STRICT=1 empty the allow-list of container-only failures (shows what a container really cannot do).
+# Container-only failures: server-init exits 1, bootstrap.sh stops before step 2, so the test runs step 2 itself (see boot()).
 # Steps: 1 bootstrap --dry-run (no target); 2 bootstrap as root (first run); 3 assertions; 4 bootstrap again (idempotency:
 # the managed config files must be byte-identical afterwards); 5 bootstrap as the admin user over sudo.
 set -Eeuo pipefail
@@ -86,6 +87,30 @@ snapshot() { # config files the init manages, hashed inside the container
   docker exec "$NAME" sh -c 'find /etc/ssh/sshd_config.d /etc/sysctl.d /etc/sudoers.d /etc/fail2ban/jail.d /etc/server-init.conf /etc/profile.d /etc/systemd/system /usr/local/bin /usr/local/sbin /etc/security /etc/systemd/journald.conf.d /etc/apt/apt.conf.d /etc/dnf/automatic.conf -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null; echo ---; ufw show added 2>/dev/null; firewall-cmd --permanent --list-all 2>/dev/null; true'
 }
 
+# boot LOG [bootstrap options...] -> BOOT_RC. Runs the real bootstrap against the container.
+# server-init exits 1 when any step fails, and bootstrap.sh then stops before step 2 (install-tools.sh / install-health.sh), so
+# a container-only failure would leave out health, srv and server-cleanup. When every failed step is in the allow-list, step 2
+# is run here over the same ssh wrapper, exactly as bootstrap.sh would, and the run counts as successful. A failure outside the
+# allow-list (or any STRICT=1 failure) keeps bootstrap's non-zero exit code.
+boot() {
+  local logf="$1" sudo="" user=root step2 failed s
+  shift
+  [[ " $* " == *" --user "* ]] && { sudo="sudo -n "; user=ops; }
+  BOOT_RC=0
+  "${BOOT[@]}" "$@" "$IP" > "$logf" 2>&1 || BOOT_RC=$?
+  (( BOOT_RC != 0 )) || return 0
+  grep -q 'server-init failed' "$logf" || return 0
+  failed=$(failed_steps "$logf")
+  [[ -n "$failed" ]] || return 0
+  for s in $failed; do [[ " $ALLOWED " == *" $s "* ]] || return 0; done
+  case "$KIND" in fedora | el10) step2=server/install-tools.sh ;; *) step2=server/install-health.sh ;; esac
+  log "init failed only in allowed steps (${failed}); running ${step2} as bootstrap would have"
+  BOOT_RC=0
+  { echo "== ${step2} (run by the test: bootstrap stops after a failed init step)"
+    ssh -p 22 -o BatchMode=yes "${user}@${IP}" "${sudo}bash -c 'cd /root/server-init-config && bash ${step2}'"
+  } >> "$logf" 2>&1 || BOOT_RC=$?
+}
+
 group "1. bootstrap --dry-run (nothing is touched)"
 if "${BOOT[@]}" --dry-run --os "$KIND" 192.0.2.10 > "$W/dry-run.log" 2>&1; then pass "bootstrap --dry-run exits 0"; else tail -20 "$W/dry-run.log"; fail "bootstrap --dry-run"; fi
 grep -q '\[dry-run\]' "$W/dry-run.log" && pass "dry-run prints the planned ssh commands" || fail "dry-run printed nothing planned"
@@ -93,7 +118,7 @@ grep -q "server/server-init-${KIND}.sh" "$W/dry-run.log" && pass "dry-run plans 
 endgroup
 
 group "2. bootstrap, first run (real mirrors)"
-rc=0; "${BOOT[@]}" "$IP" > "$W/bootstrap-1.log" 2>&1 || rc=$?
+boot "$W/bootstrap-1.log"; rc=$BOOT_RC
 tail -40 "$W/bootstrap-1.log"
 # health exits 1 or 2 on a container (warnings); bootstrap only warns about that, so rc is 0 when the init worked.
 expect_eq "bootstrap run 1 exit code" "$rc" 0
@@ -104,13 +129,16 @@ FIRST_FAILED="$FAILED_LIST"
 endgroup
 
 group "3. assertions inside the machine"
-docker exec -i "$NAME" bash -s -- "$KIND" "$FIRST_FAILED" < tools/ci/server-assert.sh | tee "$W/assert.log" || true
-grep -q '  FAIL  ' "$W/assert.log" && fail "assertions inside the machine failed (see above)" || pass "assertions inside the machine"
+docker exec -i "$NAME" bash -s -- "$KIND" "$FIRST_FAILED" < tools/ci/server-assert.sh 2>&1 | tee "$W/assert.log" || true
+assert_rc=${PIPESTATUS[0]}
+if ! grep -q '^ASSERT-DONE$' "$W/assert.log"; then fail "assertions did not run to the end (no ASSERT-DONE marker, docker exec exit ${assert_rc})"
+elif grep -q '  FAIL  ' "$W/assert.log" || (( assert_rc != 0 )); then fail "assertions inside the machine failed (exit ${assert_rc}, see above)"
+else pass "assertions inside the machine"; fi
 endgroup
 
 group "4. bootstrap again: idempotent"
 snapshot > "$W/state-1.txt"
-rc=0; "${BOOT[@]}" "$IP" > "$W/bootstrap-2.log" 2>&1 || rc=$?
+boot "$W/bootstrap-2.log"; rc=$BOOT_RC
 tail -15 "$W/bootstrap-2.log"
 expect_eq "bootstrap run 2 exit code" "$rc" 0
 check_failed "run 2" "$W/bootstrap-2.log"
@@ -120,7 +148,7 @@ if diff -u "$W/state-1.txt" "$W/state-2.txt" > "$W/state.diff"; then pass "rerun
 endgroup
 
 group "5. bootstrap as the admin user (ssh + sudo -n)"
-rc=0; "${BOOT[@]}" --user ops "$IP" > "$W/bootstrap-3.log" 2>&1 || rc=$?
+boot "$W/bootstrap-3.log" --user ops; rc=$BOOT_RC
 tail -15 "$W/bootstrap-3.log"
 expect_eq "bootstrap --user ops exit code" "$rc" 0
 check_failed "run 3 (ops)" "$W/bootstrap-3.log"

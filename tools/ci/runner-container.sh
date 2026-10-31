@@ -14,8 +14,9 @@ warn() { echo "  WARN  $*"; echo "::warning::$*"; }
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$d"; else fail "$d"; fi; }
 BAD_RE='unbound variable|syntax error|bad substitution|: line [0-9]+: |unexpected EOF'
 run() { # name command... ; log to /tmp/runner-NAME.log
-  local n="$1"; shift
-  if "$@" > "/tmp/runner-${n}.log" 2>&1; then pass "${n}: exit 0"; else tail -15 "/tmp/runner-${n}.log"; fail "${n}: exit $?"; fi
+  local n="$1" rc=0; shift
+  "$@" > "/tmp/runner-${n}.log" 2>&1 || rc=$?
+  if (( rc == 0 )); then pass "${n}: exit 0"; else tail -15 "/tmp/runner-${n}.log"; fail "${n}: exit ${rc}"; fi
   grep -Eq "$BAD_RE" "/tmp/runner-${n}.log" && fail "${n}: shell error in output ($(grep -Em2 "$BAD_RE" "/tmp/runner-${n}.log" | tr '\n' '|'))"
   return 0
 }
