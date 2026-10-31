@@ -62,9 +62,6 @@ step() {
   if "$@"; then log "ok: ${name}"; else fail "step failed: ${name}"; FAILED_STEPS+=("$name"); fi
 }
 
-# Diagnostic: can the admin sudo? Run once after admin-user and once at the end, not after every step.
-sudo_probe() { local o; [[ " ${FAILED_STEPS[*]} " == *" admin-user "* ]] || o=$(runuser -u "$ADMIN_USER" -- sudo -n true 2>&1) || fail "$1: ${ADMIN_USER} cannot sudo -n: $o"; }
-
 packages() {
   # fail2ban and several tools come from EPEL, which needs CRB enabled.
   rpm -q dnf-plugins-core >/dev/null 2>&1 || dnf -y -q install dnf-plugins-core || return 1
@@ -592,7 +589,6 @@ step packages packages
 step configs write_configs
 step ssh-hardening ssh_hardening
 step admin-user admin_user
-sudo_probe "after admin-user"
 step system-tuning system_tuning
 step firewall firewall
 step fail2ban fail2ban
@@ -600,7 +596,6 @@ step auto-updates auto_updates
 step docker docker_engine
 step swap swap
 step cleanup cleanup
-sudo_probe "at the end"
 log "open in firewall: $(firewall-cmd --zone=public --list-services 2>/dev/null) $(firewall-cmd --zone=public --list-ports 2>/dev/null)"
 if (( ${#FAILED_STEPS[@]} )); then
   log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"
