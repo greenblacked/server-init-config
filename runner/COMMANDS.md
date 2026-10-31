@@ -383,6 +383,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -915,6 +925,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -1311,6 +1331,16 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -3386,6 +3416,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -3773,6 +3813,16 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -4834,6 +4884,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -5241,6 +5301,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -5582,6 +5652,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -5913,6 +5993,16 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -6423,6 +6513,16 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -6950,6 +7050,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -7101,8 +7211,7 @@ curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "ver
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
-backup "$CFG"
-runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
+edit_with_backup "$CFG" runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
 systemctl restart gitlab-runner
 sleep 3
 
@@ -7280,6 +7389,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -7420,12 +7539,14 @@ if selinux_on; then
   restorecon -R "$HOST_DIR"
 fi
 
-backup "$CFG"
-if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
-  grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
-  sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
-fi
-runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+add_shared_cache() {
+  if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
+    grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
+    sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
+  fi
+  runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+}
+edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
@@ -7534,6 +7655,16 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -7913,6 +8044,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -8068,16 +8209,18 @@ elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status
   log "ufw: 80/tcp and 443/tcp opened"
 fi
 
-backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
 }
-set_env GF_SERVER_DOMAIN "$DOMAIN"
-set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
-set_env GF_SECURITY_COOKIE_SECURE "true"
-set_env GF_SECURITY_COOKIE_SAMESITE "lax"
-set_env GF_SECURITY_DISABLE_GRAVATAR "true"
-set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+set_grafana_env() {
+  set_env GF_SERVER_DOMAIN "$DOMAIN"
+  set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
+  set_env GF_SECURITY_COOKIE_SECURE "true"
+  set_env GF_SECURITY_COOKIE_SAMESITE "lax"
+  set_env GF_SECURITY_DISABLE_GRAVATAR "true"
+  set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+}
+edit_with_backup "$DIR/.env" set_grafana_env
 chmod 600 "$DIR/.env"
 
 install -d -m 0755 "$DIR/caddy"
@@ -8253,6 +8396,16 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -8495,6 +8648,16 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -9045,6 +9208,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -9200,16 +9373,18 @@ elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status
   log "ufw: 80/tcp and 443/tcp opened"
 fi
 
-backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
 }
-set_env GF_SERVER_DOMAIN "$DOMAIN"
-set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
-set_env GF_SECURITY_COOKIE_SECURE "true"
-set_env GF_SECURITY_COOKIE_SAMESITE "lax"
-set_env GF_SECURITY_DISABLE_GRAVATAR "true"
-set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+set_grafana_env() {
+  set_env GF_SERVER_DOMAIN "$DOMAIN"
+  set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
+  set_env GF_SECURITY_COOKIE_SECURE "true"
+  set_env GF_SECURITY_COOKIE_SAMESITE "lax"
+  set_env GF_SECURITY_DISABLE_GRAVATAR "true"
+  set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+}
+edit_with_backup "$DIR/.env" set_grafana_env
 chmod 600 "$DIR/.env"
 
 install -d -m 0755 "$DIR/caddy"
@@ -9947,8 +10122,7 @@ curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "ver
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
-backup "$CFG"
-runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
+edit_with_backup "$CFG" runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
 systemctl restart gitlab-runner
 sleep 3
 
@@ -10162,12 +10336,14 @@ if selinux_on; then
   restorecon -R "$HOST_DIR"
 fi
 
-backup "$CFG"
-if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
-  grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
-  sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
-fi
-runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+add_shared_cache() {
+  if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
+    grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
+    sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
+  fi
+  runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+}
+edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
@@ -13907,6 +14083,16 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 snap; shift
+  snap=$(mktemp)
+  cp -a "$f" "$snap"
+  "$@"
+  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+}
+
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
   cat <<'YAML'
@@ -14062,16 +14248,18 @@ elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status
   log "ufw: 80/tcp and 443/tcp opened"
 fi
 
-backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
 }
-set_env GF_SERVER_DOMAIN "$DOMAIN"
-set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
-set_env GF_SECURITY_COOKIE_SECURE "true"
-set_env GF_SECURITY_COOKIE_SAMESITE "lax"
-set_env GF_SECURITY_DISABLE_GRAVATAR "true"
-set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+set_grafana_env() {
+  set_env GF_SERVER_DOMAIN "$DOMAIN"
+  set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
+  set_env GF_SECURITY_COOKIE_SECURE "true"
+  set_env GF_SECURITY_COOKIE_SAMESITE "lax"
+  set_env GF_SECURITY_DISABLE_GRAVATAR "true"
+  set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+}
+edit_with_backup "$DIR/.env" set_grafana_env
 chmod 600 "$DIR/.env"
 
 install -d -m 0755 "$DIR/caddy"
@@ -14809,8 +14997,7 @@ curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "ver
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
-backup "$CFG"
-runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
+edit_with_backup "$CFG" runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
 systemctl restart gitlab-runner
 sleep 3
 
@@ -15024,12 +15211,14 @@ if selinux_on; then
   restorecon -R "$HOST_DIR"
 fi
 
-backup "$CFG"
-if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
-  grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
-  sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
-fi
-runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+add_shared_cache() {
+  if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
+    grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
+    sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
+  fi
+  runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+}
+edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 

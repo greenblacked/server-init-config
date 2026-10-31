@@ -35,8 +35,7 @@ curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "ver
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
-backup "$CFG"
-runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
+edit_with_backup "$CFG" runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
 systemctl restart gitlab-runner
 sleep 3
 
