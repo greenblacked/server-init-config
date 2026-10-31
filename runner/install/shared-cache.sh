@@ -24,12 +24,14 @@ if selinux_on; then
   restorecon -R "$HOST_DIR"
 fi
 
-backup "$CFG"
-if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
-  grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
-  sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
-fi
-runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+add_shared_cache() {
+  if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
+    grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
+    sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
+  fi
+  runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+}
+edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 

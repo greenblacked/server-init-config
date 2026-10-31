@@ -39,16 +39,18 @@ elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status
   log "ufw: 80/tcp and 443/tcp opened"
 fi
 
-backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
 }
-set_env GF_SERVER_DOMAIN "$DOMAIN"
-set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
-set_env GF_SECURITY_COOKIE_SECURE "true"
-set_env GF_SECURITY_COOKIE_SAMESITE "lax"
-set_env GF_SECURITY_DISABLE_GRAVATAR "true"
-set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+set_grafana_env() {
+  set_env GF_SERVER_DOMAIN "$DOMAIN"
+  set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
+  set_env GF_SECURITY_COOKIE_SECURE "true"
+  set_env GF_SECURITY_COOKIE_SAMESITE "lax"
+  set_env GF_SECURITY_DISABLE_GRAVATAR "true"
+  set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+}
+edit_with_backup "$DIR/.env" set_grafana_env
 chmod 600 "$DIR/.env"
 
 install -d -m 0755 "$DIR/caddy"
