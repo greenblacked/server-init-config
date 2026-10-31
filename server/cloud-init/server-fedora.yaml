@@ -100,7 +100,7 @@ write_files:
       }
 
       packages() {
-        dnf -y -q install diffutils firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
+        dnf -y -q install diffutils tzdata firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
         local p
         for p in git jq tmux htop btop ncdu iotop mtr bind-utils tcpdump vim-enhanced nano rsync wget unzip tar bash-completion mc fzf fd-find ripgrep; do
           rpm -q --whatprovides "$p" >/dev/null 2>&1 || dnf -y -q install "$p" || fail "optional package not installed: $p"
