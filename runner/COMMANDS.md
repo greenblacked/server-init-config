@@ -386,11 +386,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -928,11 +929,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -1336,11 +1338,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -3419,11 +3422,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -3818,11 +3822,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -4887,11 +4892,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -5304,11 +5310,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -5655,11 +5662,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -5998,11 +6006,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -6518,11 +6527,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -7053,11 +7063,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -7392,11 +7403,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -7660,11 +7672,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -8047,11 +8060,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -8401,11 +8415,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -8653,11 +8668,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -9211,11 +9227,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
@@ -14086,11 +14103,12 @@ backup() {
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
-  local f=$1 snap; shift
-  snap=$(mktemp)
-  cp -a "$f" "$snap"
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$bak"
   "$@"
-  if cmp -s "$f" "$snap"; then rm -f "$snap"; else mv "$snap" "${f}.bak.$(date +%Y%m%d-%H%M%S)"; fi
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
 }
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
