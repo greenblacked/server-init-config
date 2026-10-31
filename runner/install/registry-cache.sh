@@ -17,7 +17,11 @@ fi
 require_root
 command -v jq >/dev/null || pkg_install jq
 require_runner_idle
-if ss -ltn | awk '$4 ~ /:(5000|5001)$/' | grep -q .; then die "port 5000 or 5001 already in use"; fi
+if [[ -f "$DIR/docker-compose.yml" ]]; then
+  log "${DIR} exists: re-applying the repo files and finishing the setup (safe to rerun)"
+elif ss -ltn | awk '$4 ~ /:(5000|5001)$/' | grep -q .; then
+  die "port 5000 or 5001 already in use"
+fi
 
 selinux_label_dir "$DIR"
 cp -a "$REPO_ROOT/runner/stacks/registry-cache/config.yml" "$REPO_ROOT/runner/stacks/registry-cache/docker-compose.yml" "$DIR/"
@@ -41,7 +45,7 @@ if ! jq -e --arg m "$MIRROR" '(.["registry-mirrors"] // []) | index($m)' "$DAEMO
   log "restarting docker"
   systemctl restart docker
   sleep 5
-  systemctl restart gitlab-runner || true
+  if systemctl cat gitlab-runner >/dev/null 2>&1; then systemctl restart gitlab-runner || true; fi
   for _ in $(seq 1 20); do curl -fsS "$MIRROR/v2/" >/dev/null 2>&1 && break; sleep 2; done
 fi
 

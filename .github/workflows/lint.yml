@@ -1,0 +1,67 @@
+name: lint
+
+# Static checks and the offline test suites. Cheap (a few minutes), so it runs on every pull request and on pushes to main (a pull request branch is covered by the pull_request run, not twice).
+# Same checks locally: tools/ci/lint.sh [shell|render|cloud-init|server-tools|yaml|dockerfiles|compose|actionlint]
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install lint tools (pinned, checksum-verified)
+        run: tools/ci/install-lint-tools.sh
+      - name: shellcheck, bash -n
+        run: tools/ci/lint.sh shell
+      - name: Generated files are current
+        run: tools/ci/lint.sh render
+      - name: yamllint
+        run: tools/ci/lint.sh yaml
+      - name: hadolint
+        run: tools/ci/lint.sh dockerfiles
+      - name: docker compose config
+        run: tools/ci/lint.sh compose
+      - name: actionlint
+        run: tools/ci/lint.sh actionlint
+
+  tests:
+    name: cloud-init and server tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install cloud-init, sshd and PyYAML
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q cloud-init openssh-server python3-yaml
+          cloud-init --version
+      - name: tools/test-cloud-init.py (schema check with the real CLI, live SSH test as root)
+        run: tools/ci/lint.sh cloud-init
+      - name: tools/test-server-tools.sh (hermetic on the host, destructive in a container)
+        run: tools/ci/lint.sh server-tools
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lint-logs
+          path: ci-out/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -62,7 +62,7 @@ step() {
 }
 
 packages() {
-  dnf -y -q install firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
+  dnf -y -q install diffutils firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
   local p
   for p in git jq tmux htop btop ncdu iotop mtr bind-utils tcpdump vim-enhanced nano rsync wget unzip tar bash-completion mc fzf fd-find ripgrep; do
     rpm -q --whatprovides "$p" >/dev/null 2>&1 || dnf -y -q install "$p" || fail "optional package not installed: $p"
@@ -238,6 +238,8 @@ admin_user() {
   [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { fail "invalid ADMIN_USER: $ADMIN_USER"; return 1; }
   id "$ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash -G wheel "$ADMIN_USER" || return 1
   usermod -aG wheel "$ADMIN_USER" || return 1
+  # useradd leaves "!" (locked); use "*" (no password, keys only) like runner/install/users.sh.
+  if [[ "$(getent shadow "$ADMIN_USER" | cut -d: -f2)" == '!'* ]]; then usermod -p '*' "$ADMIN_USER" || return 1; fi
   if [[ -s /root/.ssh/authorized_keys ]]; then
     install -d -m 0700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/${ADMIN_USER}/.ssh" || return 1
     install -m 0600 -o "$ADMIN_USER" -g "$ADMIN_USER" /root/.ssh/authorized_keys "/home/${ADMIN_USER}/.ssh/authorized_keys" || return 1

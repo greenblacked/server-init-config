@@ -373,7 +373,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -765,11 +786,15 @@ PermitTunnel no
 EOF
 chmod 0600 "$new"
 old_backup=""
-if [[ -f "$DROPIN" ]]; then
-  old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
-  cp -a "$DROPIN" "$old_backup"
+if [[ -f "$DROPIN" ]] && cmp -s "$new" "$DROPIN"; then
+  rm -f "$new"   # same content: no backup, no rewrite, a rerun leaves the managed state untouched
+else
+  if [[ -f "$DROPIN" ]]; then
+    old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$DROPIN" "$old_backup"
+  fi
+  mv "$new" "$DROPIN"
 fi
-mv "$new" "$DROPIN"
 legacy=/etc/ssh/sshd_config.d/60-ci-hardening.conf
 [[ -f "$legacy" ]] && mv "$legacy" "${legacy}.disabled"
 if command -v restorecon >/dev/null 2>&1; then restorecon /etc/ssh/sshd_config.d/* 2>/dev/null || true; fi
@@ -893,7 +918,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -1283,7 +1329,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -3348,7 +3415,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -3729,7 +3817,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -3968,6 +4077,8 @@ esac
 
 INSTALLED=() PRESENT=() MISSING=() SKIPPED=()
 CHECKSUM_FAIL=0
+DL_TRIED=0   # downloads attempted in this run: release binaries, the testssl git clone, the ssh-audit pip install (tools already present are not counted)
+DL_FAILED=0  # of those, how many were not installed (a scan run with no usable curl or architecture counts as one failure)
 
 have_systemd() { [[ -d /run/systemd/system ]]; }
 
@@ -4150,6 +4261,7 @@ setup_ssh_audit() {
   command -v python3 >/dev/null 2>&1 || pkg_ensure python3 || { MISSING+=("ssh-audit (no package, no python3)"); return 0; }
   [[ $FAMILY == debian ]] && { pkg_ensure python3-venv || true; }
   local req
+  DL_TRIED=$((DL_TRIED + 1))
   req=$(mktemp)
   printf 'ssh-audit==%s --hash=sha256:%s\n' "$SSH_AUDIT_VERSION" "$SSH_AUDIT_WHEEL_SHA256" > "$req"
   if rm -rf /opt/ssh-audit/venv && install -d /opt/ssh-audit && python3 -m venv /opt/ssh-audit/venv >/dev/null 2>&1 \
@@ -4161,6 +4273,7 @@ setup_ssh_audit() {
     echo "$SSH_AUDIT_VERSION" > "${SEC_STATE}/ssh-audit.version"
     INSTALLED+=("ssh-audit ${SSH_AUDIT_VERSION} (venv)")
   else
+    DL_FAILED=$((DL_FAILED + 1))
     MISSING+=("ssh-audit (pip install failed)")
   fi
   rm -f "$req"
@@ -4179,8 +4292,10 @@ setup_testssl() {
   fi
   command -v git >/dev/null 2>&1 || pkg_ensure git || { SKIPPED+=("testssl.sh (no package, no git)"); return 0; }
   local tmp
+  DL_TRIED=$((DL_TRIED + 1))
   tmp=$(mktemp -d)
   if ! git clone -q --depth 1 --branch "v${TESTSSL_VERSION}" https://github.com/testssl/testssl.sh.git "$tmp/t" 2>/dev/null; then
+    DL_FAILED=$((DL_FAILED + 1))
     SKIPPED+=("testssl.sh ${TESTSSL_VERSION} (git clone failed)")
   elif [[ "$(git -C "$tmp/t" rev-parse HEAD)" != "$TESTSSL_COMMIT" ]]; then
     log "ERROR: testssl.sh v${TESTSSL_VERSION} is not commit ${TESTSSL_COMMIT}, refusing to install"
@@ -4262,13 +4377,14 @@ release_tool() {
     PRESENT+=("${name} ${ver}")
     return 0
   fi
+  DL_TRIED=$((DL_TRIED + 1))
   tmp=$(mktemp -d)
   release_fetch_install "$tmp" "$name" "$ver" "$repo" "$asset" "$sums_list" "$mode" "$bin" || rc=$?
   rm -rf "$tmp"
   case "$rc" in
     0) INSTALLED+=("${name} ${ver}"); install -d "$SEC_STATE"; echo "$ver" > "$marker" ;;
-    2) CHECKSUM_FAIL=1; SKIPPED+=("${name} ${ver} (CHECKSUM MISMATCH, not installed)") ;;
-    *) SKIPPED+=("${name} ${ver} (not downloaded)") ;;
+    2) CHECKSUM_FAIL=1; DL_FAILED=$((DL_FAILED + 1)); SKIPPED+=("${name} ${ver} (CHECKSUM MISMATCH, not installed)") ;;
+    *) DL_FAILED=$((DL_FAILED + 1)); SKIPPED+=("${name} ${ver} (not downloaded)") ;;
   esac
   return 0
 }
@@ -4331,10 +4447,11 @@ release_fetch_install() {
 install_scan() {
   log "=== scanners (release binaries, SHA256 verified) ==="
   if [[ -z "$ARCH" ]]; then
+    DL_TRIED=$((DL_TRIED + 1)); DL_FAILED=$((DL_FAILED + 1))
     SKIPPED+=("scan tools (unsupported architecture $(uname -m))")
     return 0
   fi
-  command -v curl >/dev/null 2>&1 || pkg_ensure curl || { SKIPPED+=("scan tools (curl missing)"); return 0; }
+  command -v curl >/dev/null 2>&1 || pkg_ensure curl || { DL_TRIED=$((DL_TRIED + 1)); DL_FAILED=$((DL_FAILED + 1)); SKIPPED+=("scan tools (curl missing)"); return 0; }
   local a="$ARCH" big small x
   if [[ $ARCH == amd64 ]]; then big=64bit; small=x86_64; x=x64; else big=ARM64; small=arm64; x=arm64; fi
   if (( WANT_SCAN )); then
@@ -4418,6 +4535,12 @@ done
 log "Use these tools only on systems you own or are authorized to test."
 if (( CHECKSUM_FAIL )); then
   die "at least one download failed its SHA256 check and was not installed (see ERROR lines above)"
+fi
+if (( DL_TRIED > 0 && DL_FAILED == DL_TRIED )); then
+  die "every download failed (${DL_FAILED} of ${DL_TRIED}), nothing was installed (see WARN lines above)"
+fi
+if (( DL_FAILED > 0 )); then
+  log "WARN: ${DL_FAILED} of ${DL_TRIED} downloads failed, the others were installed"
 fi
 log "OK"
 __SIC_EOF__
@@ -4766,7 +4889,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -5165,7 +5309,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -5498,7 +5663,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -5633,7 +5819,11 @@ fi
 require_root
 command -v jq >/dev/null || pkg_install jq
 require_runner_idle
-if ss -ltn | awk '$4 ~ /:(5000|5001)$/' | grep -q .; then die "port 5000 or 5001 already in use"; fi
+if [[ -f "$DIR/docker-compose.yml" ]]; then
+  log "${DIR} exists: re-applying the repo files and finishing the setup (safe to rerun)"
+elif ss -ltn | awk '$4 ~ /:(5000|5001)$/' | grep -q .; then
+  die "port 5000 or 5001 already in use"
+fi
 
 selinux_label_dir "$DIR"
 cp -a "$REPO_ROOT/runner/stacks/registry-cache/config.yml" "$REPO_ROOT/runner/stacks/registry-cache/docker-compose.yml" "$DIR/"
@@ -5657,7 +5847,7 @@ if ! jq -e --arg m "$MIRROR" '(.["registry-mirrors"] // []) | index($m)' "$DAEMO
   log "restarting docker"
   systemctl restart docker
   sleep 5
-  systemctl restart gitlab-runner || true
+  if systemctl cat gitlab-runner >/dev/null 2>&1; then systemctl restart gitlab-runner || true; fi
   for _ in $(seq 1 20); do curl -fsS "$MIRROR/v2/" >/dev/null 2>&1 && break; sleep 2; done
 fi
 
@@ -5819,7 +6009,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -6321,7 +6532,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -6838,7 +7070,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -6991,8 +7244,7 @@ curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "ver
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
-backup "$CFG"
-runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
+edit_with_backup "$CFG" runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
 systemctl restart gitlab-runner
 sleep 3
 
@@ -7160,7 +7412,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -7302,12 +7575,14 @@ if selinux_on; then
   restorecon -R "$HOST_DIR"
 fi
 
-backup "$CFG"
-if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
-  grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
-  sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
-fi
-runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+add_shared_cache() {
+  if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
+    grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
+    sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
+  fi
+  runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+}
+edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
@@ -7408,7 +7683,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -7777,7 +8073,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -7934,16 +8251,18 @@ elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status
   log "ufw: 80/tcp and 443/tcp opened"
 fi
 
-backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
 }
-set_env GF_SERVER_DOMAIN "$DOMAIN"
-set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
-set_env GF_SECURITY_COOKIE_SECURE "true"
-set_env GF_SECURITY_COOKIE_SAMESITE "lax"
-set_env GF_SECURITY_DISABLE_GRAVATAR "true"
-set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+set_grafana_env() {
+  set_env GF_SERVER_DOMAIN "$DOMAIN"
+  set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
+  set_env GF_SECURITY_COOKIE_SECURE "true"
+  set_env GF_SECURITY_COOKIE_SAMESITE "lax"
+  set_env GF_SECURITY_DISABLE_GRAVATAR "true"
+  set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+}
+edit_with_backup "$DIR/.env" set_grafana_env
 chmod 600 "$DIR/.env"
 
 install -d -m 0755 "$DIR/caddy"
@@ -8111,7 +8430,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -8345,7 +8685,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -8737,11 +9098,15 @@ PermitTunnel no
 EOF
 chmod 0600 "$new"
 old_backup=""
-if [[ -f "$DROPIN" ]]; then
-  old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
-  cp -a "$DROPIN" "$old_backup"
+if [[ -f "$DROPIN" ]] && cmp -s "$new" "$DROPIN"; then
+  rm -f "$new"   # same content: no backup, no rewrite, a rerun leaves the managed state untouched
+else
+  if [[ -f "$DROPIN" ]]; then
+    old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$DROPIN" "$old_backup"
+  fi
+  mv "$new" "$DROPIN"
 fi
-mv "$new" "$DROPIN"
 legacy=/etc/ssh/sshd_config.d/60-ci-hardening.conf
 [[ -f "$legacy" ]] && mv "$legacy" "${legacy}.disabled"
 if command -v restorecon >/dev/null 2>&1; then restorecon /etc/ssh/sshd_config.d/* 2>/dev/null || true; fi
@@ -8881,7 +9246,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -9038,16 +9424,18 @@ elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status
   log "ufw: 80/tcp and 443/tcp opened"
 fi
 
-backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
 }
-set_env GF_SERVER_DOMAIN "$DOMAIN"
-set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
-set_env GF_SECURITY_COOKIE_SECURE "true"
-set_env GF_SECURITY_COOKIE_SAMESITE "lax"
-set_env GF_SECURITY_DISABLE_GRAVATAR "true"
-set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+set_grafana_env() {
+  set_env GF_SERVER_DOMAIN "$DOMAIN"
+  set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
+  set_env GF_SECURITY_COOKIE_SECURE "true"
+  set_env GF_SECURITY_COOKIE_SAMESITE "lax"
+  set_env GF_SECURITY_DISABLE_GRAVATAR "true"
+  set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+}
+edit_with_backup "$DIR/.env" set_grafana_env
 chmod 600 "$DIR/.env"
 
 install -d -m 0755 "$DIR/caddy"
@@ -9785,8 +10173,7 @@ curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "ver
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
-backup "$CFG"
-runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
+edit_with_backup "$CFG" runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
 systemctl restart gitlab-runner
 sleep 3
 
@@ -9888,7 +10275,11 @@ fi
 require_root
 command -v jq >/dev/null || pkg_install jq
 require_runner_idle
-if ss -ltn | awk '$4 ~ /:(5000|5001)$/' | grep -q .; then die "port 5000 or 5001 already in use"; fi
+if [[ -f "$DIR/docker-compose.yml" ]]; then
+  log "${DIR} exists: re-applying the repo files and finishing the setup (safe to rerun)"
+elif ss -ltn | awk '$4 ~ /:(5000|5001)$/' | grep -q .; then
+  die "port 5000 or 5001 already in use"
+fi
 
 selinux_label_dir "$DIR"
 cp -a "$REPO_ROOT/runner/stacks/registry-cache/config.yml" "$REPO_ROOT/runner/stacks/registry-cache/docker-compose.yml" "$DIR/"
@@ -9912,7 +10303,7 @@ if ! jq -e --arg m "$MIRROR" '(.["registry-mirrors"] // []) | index($m)' "$DAEMO
   log "restarting docker"
   systemctl restart docker
   sleep 5
-  systemctl restart gitlab-runner || true
+  if systemctl cat gitlab-runner >/dev/null 2>&1; then systemctl restart gitlab-runner || true; fi
   for _ in $(seq 1 20); do curl -fsS "$MIRROR/v2/" >/dev/null 2>&1 && break; sleep 2; done
 fi
 
@@ -9996,12 +10387,14 @@ if selinux_on; then
   restorecon -R "$HOST_DIR"
 fi
 
-backup "$CFG"
-if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
-  grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
-  sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
-fi
-runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+add_shared_cache() {
+  if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
+    grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
+    sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
+  fi
+  runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+}
+edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
@@ -10894,11 +11287,15 @@ PermitTunnel no
 EOF
 chmod 0600 "$new"
 old_backup=""
-if [[ -f "$DROPIN" ]]; then
-  old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
-  cp -a "$DROPIN" "$old_backup"
+if [[ -f "$DROPIN" ]] && cmp -s "$new" "$DROPIN"; then
+  rm -f "$new"   # same content: no backup, no rewrite, a rerun leaves the managed state untouched
+else
+  if [[ -f "$DROPIN" ]]; then
+    old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$DROPIN" "$old_backup"
+  fi
+  mv "$new" "$DROPIN"
 fi
-mv "$new" "$DROPIN"
 legacy=/etc/ssh/sshd_config.d/60-ci-hardening.conf
 [[ -f "$legacy" ]] && mv "$legacy" "${legacy}.disabled"
 if command -v restorecon >/dev/null 2>&1; then restorecon /etc/ssh/sshd_config.d/* 2>/dev/null || true; fi
@@ -13727,7 +14124,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
@@ -13884,16 +14302,18 @@ elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status
   log "ufw: 80/tcp and 443/tcp opened"
 fi
 
-backup "$DIR/.env"
 set_env() {
   if grep -q "^$1=" "$DIR/.env"; then sed -i "s|^$1=.*|$1=$2|" "$DIR/.env"; else echo "$1=$2" >> "$DIR/.env"; fi
 }
-set_env GF_SERVER_DOMAIN "$DOMAIN"
-set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
-set_env GF_SECURITY_COOKIE_SECURE "true"
-set_env GF_SECURITY_COOKIE_SAMESITE "lax"
-set_env GF_SECURITY_DISABLE_GRAVATAR "true"
-set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+set_grafana_env() {
+  set_env GF_SERVER_DOMAIN "$DOMAIN"
+  set_env GF_SERVER_ROOT_URL "https://${DOMAIN}/"
+  set_env GF_SECURITY_COOKIE_SECURE "true"
+  set_env GF_SECURITY_COOKIE_SAMESITE "lax"
+  set_env GF_SECURITY_DISABLE_GRAVATAR "true"
+  set_env GF_SECURITY_CONTENT_SECURITY_POLICY "true"
+}
+edit_with_backup "$DIR/.env" set_grafana_env
 chmod 600 "$DIR/.env"
 
 install -d -m 0755 "$DIR/caddy"
@@ -14631,8 +15051,7 @@ curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "ver
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
 
-backup "$CFG"
-runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
+edit_with_backup "$CFG" runner_env_merge "npm_config_registry=${REG}" "YARN_NPM_REGISTRY_SERVER=${REG}" "YARN_UNSAFE_HTTP_WHITELIST=${BRIDGE_IP}"
 systemctl restart gitlab-runner
 sleep 3
 
@@ -14734,7 +15153,11 @@ fi
 require_root
 command -v jq >/dev/null || pkg_install jq
 require_runner_idle
-if ss -ltn | awk '$4 ~ /:(5000|5001)$/' | grep -q .; then die "port 5000 or 5001 already in use"; fi
+if [[ -f "$DIR/docker-compose.yml" ]]; then
+  log "${DIR} exists: re-applying the repo files and finishing the setup (safe to rerun)"
+elif ss -ltn | awk '$4 ~ /:(5000|5001)$/' | grep -q .; then
+  die "port 5000 or 5001 already in use"
+fi
 
 selinux_label_dir "$DIR"
 cp -a "$REPO_ROOT/runner/stacks/registry-cache/config.yml" "$REPO_ROOT/runner/stacks/registry-cache/docker-compose.yml" "$DIR/"
@@ -14758,7 +15181,7 @@ if ! jq -e --arg m "$MIRROR" '(.["registry-mirrors"] // []) | index($m)' "$DAEMO
   log "restarting docker"
   systemctl restart docker
   sleep 5
-  systemctl restart gitlab-runner || true
+  if systemctl cat gitlab-runner >/dev/null 2>&1; then systemctl restart gitlab-runner || true; fi
   for _ in $(seq 1 20); do curl -fsS "$MIRROR/v2/" >/dev/null 2>&1 && break; sleep 2; done
 fi
 
@@ -14842,12 +15265,14 @@ if selinux_on; then
   restorecon -R "$HOST_DIR"
 fi
 
-backup "$CFG"
-if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
-  grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
-  sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
-fi
-runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+add_shared_cache() {
+  if ! grep -q "${HOST_DIR}:${MOUNT}" "$CFG"; then
+    grep -qE '^    volumes = \["/cache"\]' "$CFG" || die "unexpected volumes line in [runners.docker], edit manually"
+    sed -i -E "s|^    volumes = \[\"/cache\"\]|    volumes = [\"/cache\", \"${HOST_DIR}:${MOUNT}:rw\"]|" "$CFG"
+  fi
+  runner_env_merge "npm_config_cache=${MOUNT}/npm" "SONAR_USER_HOME=${MOUNT}/sonar"
+}
+edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
@@ -15740,11 +16165,15 @@ PermitTunnel no
 EOF
 chmod 0600 "$new"
 old_backup=""
-if [[ -f "$DROPIN" ]]; then
-  old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
-  cp -a "$DROPIN" "$old_backup"
+if [[ -f "$DROPIN" ]] && cmp -s "$new" "$DROPIN"; then
+  rm -f "$new"   # same content: no backup, no rewrite, a rerun leaves the managed state untouched
+else
+  if [[ -f "$DROPIN" ]]; then
+    old_backup="${DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$DROPIN" "$old_backup"
+  fi
+  mv "$new" "$DROPIN"
 fi
-mv "$new" "$DROPIN"
 legacy=/etc/ssh/sshd_config.d/60-ci-hardening.conf
 [[ -f "$legacy" ]] && mv "$legacy" "${legacy}.disabled"
 if command -v restorecon >/dev/null 2>&1; then restorecon /etc/ssh/sshd_config.d/* 2>/dev/null || true; fi

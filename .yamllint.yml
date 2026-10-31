@@ -1,0 +1,8 @@
+# yamllint config: the built-in "relaxed" rules, with line length off (generated cloud-init files and
+# compose files carry long commands) and the document-start marker not required.
+extends: relaxed
+rules:
+  line-length: disable
+  document-start: disable
+  truthy:
+    check-keys: false

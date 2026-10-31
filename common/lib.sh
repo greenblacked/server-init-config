@@ -68,7 +68,28 @@ require_runner_idle() {
   (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
 }
 
-backup() { cp -a "$1" "${1}.bak.$(date +%Y%m%d-%H%M%S)"; }
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
 
 # Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
 prom_jobs_logging() {
