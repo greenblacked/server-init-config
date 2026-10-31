@@ -83,7 +83,9 @@ backup() {
 edit_with_backup() {
   local f=$1 bak; shift
   # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
-  bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
   cp -a "$f" "$bak"
   "$@"
   if cmp -s "$f" "$bak"; then rm -f "$bak"; fi

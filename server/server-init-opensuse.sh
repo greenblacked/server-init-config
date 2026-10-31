@@ -251,7 +251,7 @@ admin_user() {
   getent group wheel >/dev/null || groupadd -r wheel || return 1
   id "$ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash -G wheel "$ADMIN_USER" || return 1
   usermod -aG wheel "$ADMIN_USER" || return 1
-  # useradd leaves the password field locked ("!"); sshd and PAM can refuse a locked account even for key logins and sudo. "*" = no password, keys only.
+  # useradd leaves "!" (locked); use "*" (no password, keys only) like runner/install/users.sh.
   if [[ "$(getent shadow "$ADMIN_USER" | cut -d: -f2)" == '!'* ]]; then usermod -p '*' "$ADMIN_USER" || return 1; fi
   if [[ -s /root/.ssh/authorized_keys ]]; then
     install -d -m 0700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/${ADMIN_USER}/.ssh" || return 1
