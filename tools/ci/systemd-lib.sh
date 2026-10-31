@@ -31,12 +31,12 @@ RUN apt-get update -q && apt-get install -y -q --no-install-recommends systemd s
 DOCKER
     zypper) cat > "$dir/Dockerfile" <<DOCKER ;;
 FROM ${image}
-RUN zypper -n install --no-recommends systemd openssh-server sudo iproute2 procps curl ca-certificates tar gzip findutils kmod \
+RUN zypper -n install --no-recommends systemd openssh-server sudo iproute2 procps curl ca-certificates tar gzip findutils diffutils kmod \
  && zypper clean -a && ssh-keygen -A && systemctl enable sshd
 DOCKER
     dnf) cat > "$dir/Dockerfile" <<DOCKER ;;
 FROM ${image}
-RUN dnf -y install --setopt=install_weak_deps=False systemd openssh-server sudo iproute procps-ng ca-certificates tar gzip findutils kmod \
+RUN dnf -y install --setopt=install_weak_deps=False systemd openssh-server sudo iproute procps-ng ca-certificates tar gzip findutils diffutils kmod \
  && dnf clean all && ssh-keygen -A && systemctl enable sshd
 DOCKER
   esac
