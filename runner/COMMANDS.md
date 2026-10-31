@@ -327,6 +327,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -576,6 +579,8 @@ while (( $# )); do
 done
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo $0)"
+# cmp (diffutils) is missing on minimal hosts; this script is self-contained, so it installs it itself.
+if ! command -v cmp >/dev/null 2>&1; then { dnf -y -q install diffutils || apt-get install -y -q diffutils; } >/dev/null 2>&1 || die "cmp missing and diffutils not installable"; fi
 (( LOCK_ROOT && UNLOCK_ROOT )) && die "--lock-root and --unlock-root exclude each other"
 if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then die "invalid SSH_PORT: ${SSH_PORT}"; fi
 [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid ADMIN_USER: '${ADMIN_USER}'"
@@ -875,6 +880,9 @@ pkg_install() {
     die "no supported package manager"
   fi
 }
+
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
 
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
@@ -1286,6 +1294,9 @@ pkg_install() {
     die "no supported package manager"
   fi
 }
+
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
 
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
@@ -3373,6 +3384,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -3785,6 +3799,9 @@ pkg_install() {
     die "no supported package manager"
   fi
 }
+
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
 
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
@@ -4858,6 +4875,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -5278,6 +5298,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -5632,6 +5655,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -5977,6 +6003,9 @@ pkg_install() {
     die "no supported package manager"
   fi
 }
+
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
 
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
@@ -6500,6 +6529,9 @@ pkg_install() {
     die "no supported package manager"
   fi
 }
+
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
 
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
@@ -7039,6 +7071,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -7381,6 +7416,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -7651,6 +7689,9 @@ pkg_install() {
     die "no supported package manager"
   fi
 }
+
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
 
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
@@ -8042,6 +8083,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -8399,6 +8443,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -8654,6 +8701,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -8903,6 +8953,8 @@ while (( $# )); do
 done
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo $0)"
+# cmp (diffutils) is missing on minimal hosts; this script is self-contained, so it installs it itself.
+if ! command -v cmp >/dev/null 2>&1; then { dnf -y -q install diffutils || apt-get install -y -q diffutils; } >/dev/null 2>&1 || die "cmp missing and diffutils not installable"; fi
 (( LOCK_ROOT && UNLOCK_ROOT )) && die "--lock-root and --unlock-root exclude each other"
 if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then die "invalid SSH_PORT: ${SSH_PORT}"; fi
 [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid ADMIN_USER: '${ADMIN_USER}'"
@@ -9218,6 +9270,9 @@ pkg_install() {
     die "no supported package manager"
   fi
 }
+
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
 
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
@@ -11107,6 +11162,8 @@ while (( $# )); do
 done
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo $0)"
+# cmp (diffutils) is missing on minimal hosts; this script is self-contained, so it installs it itself.
+if ! command -v cmp >/dev/null 2>&1; then { dnf -y -q install diffutils || apt-get install -y -q diffutils; } >/dev/null 2>&1 || die "cmp missing and diffutils not installable"; fi
 (( LOCK_ROOT && UNLOCK_ROOT )) && die "--lock-root and --unlock-root exclude each other"
 if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then die "invalid SSH_PORT: ${SSH_PORT}"; fi
 [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid ADMIN_USER: '${ADMIN_USER}'"
@@ -14112,6 +14169,9 @@ pkg_install() {
   fi
 }
 
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
 # Label a directory so containers may read files in it (no-op without SELinux).
 selinux_label_dir() {
   local dir="$1"
@@ -16000,6 +16060,8 @@ while (( $# )); do
 done
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo $0)"
+# cmp (diffutils) is missing on minimal hosts; this script is self-contained, so it installs it itself.
+if ! command -v cmp >/dev/null 2>&1; then { dnf -y -q install diffutils || apt-get install -y -q diffutils; } >/dev/null 2>&1 || die "cmp missing and diffutils not installable"; fi
 (( LOCK_ROOT && UNLOCK_ROOT )) && die "--lock-root and --unlock-root exclude each other"
 if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then die "invalid SSH_PORT: ${SSH_PORT}"; fi
 [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid ADMIN_USER: '${ADMIN_USER}'"

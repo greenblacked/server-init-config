@@ -64,6 +64,8 @@ while (( $# )); do
 done
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo $0)"
+# cmp (diffutils) is missing on minimal hosts; this script is self-contained, so it installs it itself.
+if ! command -v cmp >/dev/null 2>&1; then { dnf -y -q install diffutils || apt-get install -y -q diffutils; } >/dev/null 2>&1 || die "cmp missing and diffutils not installable"; fi
 (( LOCK_ROOT && UNLOCK_ROOT )) && die "--lock-root and --unlock-root exclude each other"
 if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then die "invalid SSH_PORT: ${SSH_PORT}"; fi
 [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid ADMIN_USER: '${ADMIN_USER}'"
