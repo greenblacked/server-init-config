@@ -1,0 +1,190 @@
+# Reverse proxy for the Lampa stack. Site addresses come from the environment (see docker-compose.yml):
+#   https://<DOMAIN>:<SITE_PORT>, https://auth.<DOMAIN>:<SITE_PORT>, https://ts.<DOMAIN>:<SITE_PORT>, https://qbt.<DOMAIN>:<SITE_PORT>
+#   DOMAIN is <public-ip-dashed>.sslip.io by default, your own domain if you set one, lampa.localhost in --local mode.
+# Two generated files are imported (install.sh writes them; they are not part of this repository):
+#   /etc/caddy/mode.caddy       TLS issuer + HSTS for the access mode (Let's Encrypt HTTP-01 / Caddy's local CA)
+#   /run/secrets/keymaps        the per-device keys as `map` blocks and the key of each Authelia user (a Docker secret)
+# Nothing is anonymous. Who may reach what:
+#   auth.*  the Authelia login page (rate limited by Authelia's regulation: failed logins ban the user/IP)
+#   ts.*    /t/<ts token>/...  a per-device token in the PATH (players cannot send headers, so the token rides in the
+#                              URL Lampa uses as its TorrServer address), or an Authelia session (browsers).
+#                              Caddy adds TorrServer's own Basic credential, so TorrServer authenticates it a second time.
+#                              A token opens only the player endpoints and a read-only /settings, not /shutdown (see the ts site).
+#           EVERY other path, including /settings, /subs and CORS preflights outside the token route, needs the Authelia session.
+#   qbt.*   Authelia session, then qBittorrent's own login
+#   main    Lampa app + Lampac API: a per-device key (query token / account_email / uid / box_mac, the Caddy cookie it
+#           sets, or the /on/js/<key> style loader paths) that Caddy checks against the key list, then Lampac checks it
+#           again (accsdb); or an Authelia session, in which case Caddy adds the user's own key. Lampac's signed
+#           /proxy* media links are the one exception (LAMPAC_PROXY_ANON, see README); admin paths are blocked.
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+(secure) {
+	# TLS issuer and, in public mode, HSTS (generated per access mode)
+	import /etc/caddy/mode.caddy
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+	}
+	# lcrqpasswd is Lampac's "local request" admin bypass; x-client-ip is trusted only with it. xhost and
+	# xscheme make Lampac build its links from client-chosen values. Never let a client set them.
+	request_header -lcrqpasswd
+	request_header -X-Client-IP
+	request_header -xhost
+	request_header -xscheme
+	# Identity headers that only forward_auth may set (Lampac does not read them today; defense in depth)
+	request_header -Remote-User
+	request_header -Remote-Groups
+	request_header -Remote-Name
+	request_header -Remote-Email
+	request_header -X-Real-IP
+}
+
+# State-changing requests from a sibling site (a script on the main host, e.g. a third-party Lampa plugin)
+# must not ride on the Authelia session cookie, which is scoped to the whole domain.
+(samesite_only) {
+	@xsite {
+		not method GET HEAD OPTIONS
+		header_regexp Sec-Fetch-Site ^(same-site|cross-site)$
+	}
+	respond @xsite 403
+}
+
+# Dot segments and empty segments in the path. Caddy decides on the path as sent, but Lampac (Kestrel) removes
+# `..` before routing: /proxy/../online.js would pass the anonymous /proxy rule here and reach /online.js there.
+# {path} is already percent-decoded, so /proxy/%2e%2e/x shows up as /proxy/../x. Nothing legitimate needs either.
+(nodotseg) {
+	@dotseg expression `{path}.matches("(^|/)\\.\\.?(/|$)") || {path}.contains("//")`
+	handle @dotseg {
+		respond 400
+	}
+}
+
+(authelia) {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+	}
+}
+
+# Access logs are off on purpose: device keys travel in URLs.
+import /run/secrets/keymaps
+
+{$SITE_AUTH} {
+	import secure
+	reverse_proxy authelia:9091
+}
+
+{$SITE_MAIN} {
+	import secure
+	import nodotseg
+	import keymaps
+	# Lampac control surfaces. Edit init.conf on the host instead. /ts* is the embedded TorrServer proxy (module
+	# skipped; blocked here as well). /extensions is the plugin store (third-party, unpinned plugins).
+	# /api/headers is an anonymous Lampac endpoint that echoes every request header.
+	@blocked path_regexp (?i)^/+(admin|adminpanel|stats|weblog|ts|dlna|extensions|api/headers)(/|$)
+	handle @blocked {
+		respond 404
+	}
+	@keyed expression {k_token} == "1" || {k_email} == "1" || {k_uid} == "1" || {k_mac} == "1" || {k_cookie} == "1" || {k_path} == "1"
+	handle @keyed {
+		# A valid ?token= also becomes a cookie, so the Lampa page's own assets (script/css/img, no token in their
+		# URLs) pass the same check. Neither it nor the Authelia cookie is passed on to Lampac.
+		@setkey expression {k_token} == "1"
+		header @setkey +Set-Cookie "lampa_key={query.token}; Path=/; Max-Age=31536000; Secure; HttpOnly; SameSite=Lax"
+		# Lampac identifies a device only by the query (token / account_email / uid / box_mac), never by a cookie. A
+		# request that Caddy let in on the cookie alone gets the key as ?token= (the map already checked it), so
+		# Lampa's own calls (/testaccsdb, /online.js ...) are accepted without typing the key on a TV remote.
+		@cookieonly expression {k_cookie} == "1" && {k_token} != "1" && {k_email} != "1" && {k_uid} != "1" && {k_mac} != "1" && {k_path} != "1"
+		uri @cookieonly query token {http.request.cookie.lampa_key}
+		request_header Cookie "(?i)(^|;\s*)(lampa_session|lampa_key)=[^;]*" "$1"
+		reverse_proxy lampac:9118
+	}
+	# No key: a browser with an Authelia session gets its own key added (?token=) for Lampac; anyone else is sent to
+	# the login portal (browsers) or refused (401, API calls).
+	handle {
+		route {
+			import samesite_only
+			import authelia
+			map {http.request.header.Remote-User} {user_key} {
+				import userkeys
+				default ""
+			}
+			@nokey expression {user_key} == ""
+			respond @nokey "no access key for this user" 403
+			uri query token {user_key}
+			request_header Cookie "(?i)(^|;\s*)(lampa_session|lampa_key)=[^;]*" "$1"
+			reverse_proxy lampac:9118
+		}
+	}
+}
+
+{$SITE_TS} {
+	import secure
+	import nodotseg
+	import keymaps
+	@docs path_regexp (?i)^(/t/[0-9a-f]{32})?/swagger
+	handle @docs {
+		respond 404
+	}
+	# Lampa / players: the per-device token is the first path segment, /t/<32 hex>/... ; it is removed before the
+	# request reaches TorrServer. Because it is in the path, CORS preflights, <video> tags and external players
+	# need nothing else. Only tokens from the generated list match.
+	# A token opens only what Lampa and players use: /echo /torrents /stream /play /cache /viewed /playlist /ffp
+	# /subs (subtitles) /download (Lampa's speed test), plus /settings in read-only form (below).
+	# Writing /settings (UseDisk, TorrentsSavePath), /shutdown and the rest of the admin API need the Authelia session.
+	@tstok expression {ts_ok} == "1"
+	@tsset {
+		method POST
+		path_regexp ^/t/[0-9a-f]{32}/settings$
+	}
+	@tsallowed path_regexp ^/t/[0-9a-f]{32}/(echo|torrents|stream|play|cache|viewed|playlist|ffp|subs|download)(/|$)
+	handle @tstok {
+		# Lampa starts every torrent with POST /settings {"action":"get"} and fails unless the reply holds CacheSize.
+		# The body is replaced, so a token can read the settings but never send action=set.
+		handle @tsset {
+			request_body {
+				set `{"action":"get"}`
+			}
+			uri path_regexp ^/t/[0-9a-f]{32}/settings$ /settings
+			reverse_proxy torrserver:8090 {
+				header_up Authorization "Basic {file./run/secrets/ts_basic}"
+			}
+		}
+		handle @tsallowed {
+			uri path_regexp ^/t/[0-9a-f]{32}(/|$) /
+			reverse_proxy torrserver:8090 {
+				header_up Authorization "Basic {file./run/secrets/ts_basic}"
+				flush_interval -1
+			}
+		}
+		handle {
+			respond 403
+		}
+	}
+	# Browsers: Authelia session, then Caddy adds the TorrServer credential (one login, not two). Without a session
+	# nothing else is served: no /stream, /play, /subs, /playlist, no OPTIONS.
+	handle {
+		route {
+			import samesite_only
+			import authelia
+			reverse_proxy torrserver:8090 {
+				header_up Authorization "Basic {file./run/secrets/ts_basic}"
+				flush_interval -1
+			}
+		}
+	}
+}
+
+{$SITE_QBT} {
+	import secure
+	import samesite_only
+	import authelia
+	reverse_proxy qbittorrent:{$QBT_WEBUI_PORT}
+}

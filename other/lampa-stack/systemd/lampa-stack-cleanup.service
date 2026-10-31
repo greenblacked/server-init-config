@@ -1,0 +1,18 @@
+[Unit]
+Description=Lampa stack cleanup (TorrServer cache; optional qBittorrent old files)
+Documentation=file:///opt/lampa-stack/README.md
+ConditionPathExists=/opt/lampa-stack/data
+
+[Service]
+Type=oneshot
+ExecStart=/opt/lampa-stack/scripts/cleanup.sh
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/lampa-stack/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

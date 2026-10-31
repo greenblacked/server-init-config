@@ -151,6 +151,7 @@ Stop a stack without deleting data: `sudo docker compose -f /opt/monitoring/dock
 | `common/` | shared: `health`, `shell-history.sh`, `lib.sh`, `admin-tools.sh`, security tools. See [common/README.md](common/README.md). |
 | `tools/` | `render-cloud-init.py`, `render-paste-commands.py` (both with `--check`), `test-cloud-init.py`, `test-server-tools.sh` |
 | `other/` | standalone extras, not copied by the bootstrap scripts (each README says how to get it onto a server); `other/torrserver/` installs TorrServer in Docker for streaming only: HTTPS with login on a random port (sslip.io, no domain needed), or localhost, or optional WireGuard (see its README) |
+| `other/lampa-stack/` | Lampa + Lampac (online sources, optional 18+) + TorrServer (streaming) + qBittorrent behind Caddy and Authelia; public HTTPS on a random port (sslip.io, Let's Encrypt) by default, `--local` tunnel or optional `--vpn` WireGuard; every path needs a login or a per-device key; installed by its own `install.sh` (see its README) |
 
 ### Supported systems
 
