@@ -22,6 +22,13 @@ req() { # host path [curl args...] -> prints "code redirect-target"
   local host="$1" path="$2"; shift 2
   curl -ksS --noproxy '*' -o /dev/null --max-time 10 --resolve "${host}:${PORT}:127.0.0.1" -w '%{http_code} %{redirect_url}' "$@" "https://${host}:${PORT}${path}"
 }
+# reach HOST PATH: like req, but a request that connected and then timed out counts as reached. TorrServer holds a request for an
+# unknown infohash while it looks for metadata; a token Caddy rejected is answered at once with a redirect, so a timeout proves the token passed.
+reach() {
+  local out rc=0
+  out=$(req "$@") || rc=$?
+  if (( rc == 28 )); then echo "200 timeout-waiting-for-upstream"; else echo "$out"; fi
+}
 body() { local host="$1" path="$2"; shift 2; curl -ksS --noproxy '*' --max-time 10 --resolve "${host}:${PORT}:127.0.0.1" "$@" "https://${host}:${PORT}${path}"; }
 expect() { # description, got, regex
   if [[ "$2" =~ $3 ]]; then ok "$1 ($2)"; else bad "$1 (got: $2, wanted: $3)"; fi
@@ -70,8 +77,8 @@ if grep -Eq '"UseDisk" *: *true' <<<"$got"; then bad "ts.* UseDisk became true t
 # the same order Lampa uses: settings, then the torrent list, then the player endpoints
 expect "ts.* Lampa order: /settings get" "$(req "ts.$D" "/t/${TOK}/settings" -X POST -d '{"action":"get"}')" '^200'
 expect "ts.* Lampa order: /torrents list" "$(req "ts.$D" "/t/${TOK}/torrents" -X POST -d '{"action":"list"}')" '^200'
-expect "ts.* Lampa order: /stream is reached" "$(req "ts.$D" "/t/${TOK}/stream?link=0000000000000000000000000000000000000000&index=1&stat")" '^[2-5][0-9][0-9] '
-expect "ts.* token reaches /subs (subtitle list)" "$(req "ts.$D" "/t/${TOK}/subs/0000000000000000000000000000000000000000/1")" '^[2-5][0-9][0-9] '
+expect "ts.* Lampa order: /stream is reached" "$(reach "ts.$D" "/t/${TOK}/stream?link=0000000000000000000000000000000000000000&index=1&stat")" '^[2-5][0-9][0-9] '
+expect "ts.* token reaches /subs (subtitle list)" "$(reach "ts.$D" "/t/${TOK}/subs/0000000000000000000000000000000000000000/1")" '^[2-5][0-9][0-9] '
 expect "ts.* token reaches /download (speed test)" "$(req "ts.$D" "/t/${TOK}/download/1" --max-time 5 || true)" '^(200|[45][0-9][0-9]) '
 # dot segments never get past Caddy (Lampac would remove them and route somewhere else)
 for p in "/t/${TOK}/echo/../settings" "/t/${TOK}/stream/%2e%2e/settings" "/t/${TOK}//settings"; do
@@ -125,7 +132,7 @@ if [[ "$SKIP_LAMPAC" == 1 ]]; then
 elif grep -q '"accsdb":true' <<<"$seen"; then bad "a cookie-only /testaccsdb is denied by Lampac"; else ok "a cookie-only /testaccsdb is accepted by Lampac"; fi
 if [[ "$(env_get LAMPAC_PROXY_ANON)" == 1 ]]; then
   got=$(req "$D" /proxy/zzz)
-  expect "/proxy/ with a path that is not a Lampac link shape needs a key" "$(req "$D" '/proxy/a b')" "$LOGIN|^400"
+  expect "/proxy/ with a path that is not a Lampac link shape needs a key" "$(req "$D" '/proxy/a%20b')" "$LOGIN|^400"
   if [[ "$got" =~ $LOGIN ]]; then bad "/proxy/ should be open (LAMPAC_PROXY_ANON=1): $got"; else ok "signed /proxy links are open as configured (LAMPAC_PROXY_ANON=1) ($got)"; fi
 else
   expect "/proxy/ needs a key (LAMPAC_PROXY_ANON=0)" "$(req "$D" /proxy/zzz)" "$LOGIN"
