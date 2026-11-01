@@ -108,8 +108,9 @@ write_files:
       packages() {
         zin sudo timezone firewalld chrony curl ca-certificates || return 1
         local p
-        # Without fail2ban in the repositories the fail2ban step is logged and skipped.
-        for p in fail2ban fail2ban-firewalld policycoreutils git jq tmux htop btop ncdu iotop mtr bind-utils tcpdump vim nano rsync wget unzip tar bash-completion mc fzf fd ripgrep; do
+        # Without fail2ban in the repositories the fail2ban step is logged and skipped. Leap 16 has no fail2ban-firewalld: the
+        # firewallcmd actions come with fail2ban.
+        for p in fail2ban policycoreutils git jq tmux htop btop ncdu iotop mtr bind-utils tcpdump vim nano rsync wget unzip tar bash-completion mc fzf fd ripgrep; do
           zin "$p" || fail "optional package not installed: $p"
         done
       }
