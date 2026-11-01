@@ -8,6 +8,7 @@
 #   dockerfiles  hadolint on every Dockerfile
 #   compose      docker compose config on every compose file, with generated test .env files
 #   actionlint   actionlint on .github/workflows
+#   pins         tools/ci/check-pins.sh: workflow actions pinned to a commit SHA, top-level permissions
 #   unit         tests/unit/run.sh, fast unit tests of the shell helpers (temp dirs only, no root)
 # Locally a missing tool is skipped with a note; in CI it fails.
 set -Eeuo pipefail
@@ -158,6 +159,13 @@ check_actionlint() {
   endgroup
 }
 
+check_pins() {
+  group "workflow pins and permissions"
+  if tools/ci/check-pins.sh > "$CI_OUT/check-pins.log" 2>&1; then tail -n 1 "$CI_OUT/check-pins.log"; pass "workflows: actions pinned by SHA, permissions set"
+  else grep -v '^  PASS ' "$CI_OUT/check-pins.log"; fail "workflows: unpinned action or missing permissions (tools/ci/check-pins.sh)"; fi
+  endgroup
+}
+
 check_unit() {
   group "unit tests"
   if tests/unit/run.sh > "$CI_OUT/unit-tests.log" 2>&1; then tail -n 1 "$CI_OUT/unit-tests.log"; pass "unit tests (tests/unit)"
@@ -167,7 +175,7 @@ check_unit() {
 
 main() {
   local checks=("$@")
-  [[ ${#checks[@]} -gt 0 ]] || checks=(shell render cloud-init server-tools yaml dockerfiles compose actionlint unit)
+  [[ ${#checks[@]} -gt 0 ]] || checks=(shell render cloud-init server-tools yaml dockerfiles compose actionlint pins unit)
   local c
   for c in "${checks[@]}"; do
     case "$c" in
@@ -179,6 +187,7 @@ main() {
       dockerfiles) check_dockerfiles ;;
       compose) check_compose ;;
       actionlint) check_actionlint ;;
+      pins) check_pins ;;
       unit) check_unit ;;
       -h | --help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
       *) die "unknown check: $c" ;;
