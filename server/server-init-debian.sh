@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Base setup for a general (non-runner) server on Ubuntu 26.04 (also 24.04) or Debian 13, x86_64 or ARM64:
 # SSH keys only, admin user with sudo, ufw, fail2ban, auto security updates, Docker + Compose, swap, sysctl, tools.
-# Also safe on Hetzner Apps images (Coolify, GitLab CE, ...): existing Docker, firewall rules and app config stay
-# untouched; only the app's ports are added to ufw.
+# Also safe on Hetzner Apps images (Coolify, GitLab CE, ...): Docker, firewall rules and app config stay; only the
+# app's ports are added to ufw.
 # Root keeps login by SSH key on port 22, so nothing here can lock you out.
 #
 # Self-contained and idempotent; rerun as root any time: /usr/local/sbin/server-init.sh (settings: /etc/server-init.conf).
@@ -17,7 +17,7 @@ CONF_FILE=/etc/server-init.conf
 case "${ID:-}:${VERSION_ID:-}" in
   ubuntu:24.04 | ubuntu:26.04) DOCKER_DISTRO=ubuntu; CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}" ;;
   debian:13) DOCKER_DISTRO=debian; CODENAME="${VERSION_CODENAME:-}" ;;
-  # return when sourced into an interactive shell by mistake, so the shell is not closed
+  # return, not exit, when sourced by mistake
   *) echo "this script is for Ubuntu 26.04 / Ubuntu 24.04 / Debian 13, found ${PRETTY_NAME:-unknown}" >&2; return 1 2>/dev/null || exit 1 ;;
 esac
 # No prompts from apt, dpkg or needrestart.
@@ -87,10 +87,16 @@ put() {
   rm -f "$tmp"
 }
 
-# ufw runs sysctl -p on its conffile (log_martians=0) at every start and "ufw reload". It is left as shipped; ours
-# is re-applied by a ufw.service drop-in (boot, restart) and /etc/ufw/after.init (also on reload).
+# ufw applies its own sysctl.conf (log_martians=0) on start and "ufw reload"; that file stays as shipped. Ours is
+# re-applied by a ufw.service drop-in (boot, restart) and /etc/ufw/after.init (reload).
+UFW_HOOK_MARK='# server-init: ufw-reload-hook (re-applies sysctl.d/90-server.conf)'
+# Stock after.init: only comments and ufw's empty start|stop|status|flush-all case skeleton, no commands.
+ufw_hook_stock() {
+  [[ -f $1 && ! -L $1 && $(grep -Evc '^[[:space:]]*(#.*|set -e|case "\$1" in|(start|stop|status|flush-all|\*)\)|;;|esac|echo "[^"`(]*")?[[:space:]]*$' "$1") == 0 ]]
+}
+
 ufw_sysctl_keep() {
-  local hook=/etc/ufw/after.init conf=/etc/ufw/sysctl.conf want sub='s#^\(net/ipv4/conf/[a-z]*/log_martians\)=1#\1=0#'
+  local hook=/etc/ufw/after.init conf=/etc/ufw/sysctl.conf want how sub='s#^\(net/ipv4/conf/[a-z]*/log_martians\)=1#\1=0#'
   # Undo an older run's edit, only if it is the sole change from dpkg's md5.
   if grep -q '^net/ipv4/conf/.*/log_martians=1' "$conf" 2>/dev/null; then
     want=$(dpkg-query -W -f='${Conffiles}\n' ufw | awk -v f="$conf" '$1 == f { print $2 }') || true
@@ -101,14 +107,18 @@ ufw_sysctl_keep() {
 ExecStartPost=-/usr/sbin/sysctl -q -p /etc/sysctl.d/90-server.conf
 EOF
   systemctl daemon-reload || fail "daemon-reload failed"
-  # The package makes after.init a 640 (not run) copy of its template: take it only while unchanged or ours.
-  if [[ ! -e "$hook" ]] || cmp -s /usr/share/ufw/after.init "$hook" || grep -q 90-server.conf "$hook"; then
-    put "$hook" 0750 <<'EOF'
-#!/bin/sh
-[ "$1" = start ] && /usr/sbin/sysctl -q -p /etc/sysctl.d/90-server.conf >/dev/null 2>&1; exit 0
-EOF
-    chmod 0750 "$hook"
-  else log "$hook is customised: 'ufw reload' resets log_martians until sysctl --system"; fi
+  # Replace only ufw's stock copy (640, not run), a missing file or our own hook.
+  if [[ ! -e $hook ]]; then how=missing
+  elif grep -qxF "$UFW_HOOK_MARK" "$hook"; then how=ours
+  elif cmp -s /usr/share/ufw/after.init "$hook" || ufw_hook_stock "$hook"; then how=stock
+  else how=custom; fi
+  if [[ $how == custom ]]; then
+    log "kept customised $hook: 'ufw reload' resets log_martians until sysctl --system"
+    return 0
+  fi
+  printf '#!/bin/sh\n%s\n%s\n' "$UFW_HOOK_MARK" '[ "$1" = start ] && /usr/sbin/sysctl -q -p /etc/sysctl.d/90-server.conf >/dev/null 2>&1; exit 0' | put "$hook" 0750
+  chmod 0750 "$hook"
+  [[ $how == ours ]] || log "installed ufw reload hook $hook (was $how)"
 }
 
 write_configs() {
@@ -156,7 +166,7 @@ EOF
 Storage=none
 ProcessSizeMax=0
 EOF
-  # Debian 13 has no /var/log/auth.log, hence the journal backend; nftables bans work with or without ufw.
+  # Debian 13 has no /var/log/auth.log: journal backend; nftables bans work with or without ufw.
   # The jail must watch the port sshd really listens on (bootstrap --port), not only 22.
   sshd_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -un | paste -sd, -) || true
   put /etc/fail2ban/jail.d/50-sshd.local 0644 <<EOF
@@ -172,7 +182,7 @@ maxretry = 5
 findtime = 10m
 bantime  = 1h
 EOF
-  # Security updates only, no automatic reboot. #clear drops the distro's wider origin list.
+  # Security updates only, no auto reboot; #clear drops the distro's wider origin list.
   put /etc/apt/apt.conf.d/20auto-upgrades 0644 <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -273,7 +283,7 @@ if command -v fzf >/dev/null 2>&1; then
   unset __f __fzf_done __fzf_b
 fi
 EOF
-  # Docker settings are only seeded without Docker; an existing install (Apps image) or daemon.json is untouched.
+  # Seeded only without Docker; an existing install or daemon.json is untouched.
   if (( INSTALL_DOCKER == 1 )) && ! command -v docker >/dev/null && [[ ! -f /etc/docker/daemon.json ]]; then
     put /etc/docker/daemon.json 0644 <<'EOF'
 {
@@ -329,29 +339,26 @@ system_tuning() {
   fi
 }
 
-# Hetzner Apps (github.com/hetznercloud/apps, apps/hetzner/<app>), Ubuntu 24.04 (template.pkr.hcl), no ufw rules:
-# the ports each serves. detect_app sets APP_PORTS and APP_NAME.
+# Hetzner Apps (github.com/hetznercloud/apps, Ubuntu 24.04), no ufw rules: the ports each serves.
 APP_NAME=""
 APP_PORTS=""
 APP_OWN_FW=0   # 1 when the image owns the firewall (ufw must not be enabled)
 APP_BAD=0   # 1 when APP in the config names no known app (a typo): firewall() then leaves ufw alone
 app_ports() {
   case "$1" in
-    # coolify/test.sh checks the dashboard on :8000; the rest is Coolify's own installer (use EXTRA_PORTS).
+    # coolify: dashboard on :8000, the rest is its own installer (EXTRA_PORTS).
     coolify) APP_PORTS="8000/tcp" ;;
-    # docker-ce/scripts/docker.sh only installs Docker.
     docker-ce) APP_PORTS="" ;;
-    # gitlab/files/etc/apache2/sites-available/000-default.conf serves 80; gitlab/README.md enables HTTPS.
+    # gitlab: Apache on 80, HTTPS per its README.
     gitlab) APP_PORTS="80/tcp 443/tcp" ;;
-    # jitsi/files/etc/nginx/sites-available/hetzner serves 80, jitsi_setup.sh adds 443; media is 10000/udp
-    # (Jitsi quick-install guide); coturn (3478/udp, 5349/tcp) is added in firewall() when installed.
+    # jitsi: nginx 80, 443 from jitsi_setup.sh, media 10000/udp; coturn is added in firewall() when installed.
     jitsi) APP_PORTS="80/tcp 443/tcp 10000/udp" ;;
     # lamp, wordpress, nextcloud: native Apache.
     lamp|wordpress|nextcloud) APP_PORTS="80/tcp 443/tcp" ;;
-    # wireguard: 51820/udp (WGUI_SERVER_LISTEN_PORT) plus Caddy on 80/443. Its /etc/nftables.conf starts with
-    # "flush ruleset" and nftables.service is enabled, so the image owns the firewall: ufw is not enabled.
+    # wireguard: 51820/udp plus Caddy on 80/443. Its nftables.conf has "flush ruleset" and nftables.service is
+    # enabled, so the image owns the firewall: ufw is not enabled.
     wireguard) APP_PORTS="51820/udp 80/tcp 443/tcp"; APP_OWN_FW=1 ;;
-    # apps/hetzner/<app>/files/opt/containers/<app>/docker-compose.yml, "ports:" of traefik/caddy/services.
+    # The rest: "ports:" of the app's docker-compose.yml.
     owncast) APP_PORTS="80/tcp 443/tcp 1935/tcp" ;;
     photoprism) APP_PORTS="80/tcp 443/tcp 2342/tcp" ;;
     prometheus-grafana) APP_PORTS="80/tcp 443/tcp" ;;
@@ -369,8 +376,7 @@ detect_app() {
        fail "unknown APP in $CONF_FILE: $APP"; APP_PORTS=""; APP_BAD=1; return 0 ;;
   esac
   local a
-  # Markers: /opt/containers/<app>/docker-compose.yml, the first-login script /opt/hcloud/<app>_setup.sh
-  # (files/var/lib/cloud/scripts/per-instance/001_onboot), the gitlab-ce / jitsi-meet packages, /data/coolify.
+  # Markers: /opt/containers/<app>/docker-compose.yml, /opt/hcloud/<app>_setup.sh, the gitlab-ce / jitsi-meet packages.
   for a in owncast photoprism prometheus-grafana rustdesk; do
     [[ -f "/opt/containers/${a}/docker-compose.yml" ]] && { APP_NAME="$a"; break; }
   done
@@ -452,8 +458,7 @@ firewall() {
     ufw --force enable >/dev/null || return 1
     systemctl enable ufw >/dev/null 2>&1 || true
   fi
-  # ufw has just applied its own sysctl.conf (log_martians=0): put ours back. A rule added to an active ufw
-  # applies at once; here SSH must still be allowed.
+  # ufw has just applied its sysctl.conf (log_martians=0): put ours back. Rules apply at once, so SSH must be allowed.
   sysctl -q -p /etc/sysctl.d/90-server.conf || true
   local live=1
   ufw_ssh_live || live=0
@@ -511,18 +516,18 @@ docker_start() {
 docker_engine() {
   (( INSTALL_DOCKER == 1 )) || { log "Docker disabled in /etc/server-init.conf"; return 0; }
   if command -v docker >/dev/null; then
-    # Installed already (earlier run, Apps image): keep its repo, packages and daemon.json.
+    # Installed already (earlier run, Apps image): keep its repo and daemon.json.
     log "Docker present ($(docker --version 2>/dev/null)); not reinstalled or reconfigured"
     docker info >/dev/null 2>&1 || docker_start
     return
   fi
   local arch repo_ok=0 src compose_pkg=docker-compose
-  # Compose v2 is docker-compose-v2 on Ubuntu, docker-compose on Debian.
+  # Compose v2: docker-compose-v2 on Ubuntu, docker-compose on Debian.
   [[ "$DOCKER_DISTRO" != ubuntu ]] || compose_pkg=docker-compose-v2
   arch=$(dpkg --print-architecture)
   src="https://download.docker.com/linux/${DOCKER_DISTRO}"
-  # Use Docker's repo only when its index exists for this codename and arch. Only a definite 404 means "no
-  # repo"; a network error must not downgrade the host to docker.io for good.
+  # Docker's repo only when its index exists for this codename and arch; only a definite 404 means "no repo"
+  # (a network error must not downgrade the host to docker.io).
   if [[ -n "$CODENAME" ]]; then
     local code=""
     for _ in 1 2 3; do

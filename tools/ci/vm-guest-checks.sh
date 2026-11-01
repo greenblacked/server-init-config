@@ -65,6 +65,25 @@ docker_works() {
   fail "docker run hello-world failed on both registries: $(tail -3 <<<"$out" | tr '\n' ' ')"
 }
 
+# "ufw reload" re-runs ufw's own sysctl.conf (log_martians=0): our after.init hook must put the values back, and ufw's
+# conffile must still be what dpkg shipped. Runs in both phases (after the first boot and after the reboot).
+ufw_reload_checks() {
+  local k out
+  ok "ufw's stock sysctl.conf sets log_martians=0 (so the reload really resets them)" grep -Eq '^net/ipv4/conf/(all|default)/log_martians=0' /etc/ufw/sysctl.conf
+  ok "/etc/ufw/after.init is our executable hook" bash -c "[[ -x /etc/ufw/after.init ]] && grep -qxF '# server-init: ufw-reload-hook (re-applies sysctl.d/90-server.conf)' /etc/ufw/after.init"
+  ok "ufw reload succeeds" ufw reload
+  for k in all default; do
+    [[ $(sysctl -n "net.ipv4.conf.${k}.log_martians" 2>/dev/null) == 1 ]] && pass "log_martians (${k}) is 1 after ufw reload" || fail "log_martians (${k}) is not 1 after ufw reload"
+  done
+  ok "ufw is still active after the reload" bash -c "ufw status | grep -q '^Status: active'"
+  # dpkg --verify lists changed files; "??5" means the md5 differs. Its exit status is 1 for any change (our after.init is one),
+  # so only the /etc/ufw/sysctl.conf line counts; the conffile must also be known to dpkg or the test proves nothing.
+  out=$(dpkg --verify ufw 2>&1)
+  if grep -q '^..5.*/etc/ufw/sysctl\.conf$' <<<"$out"; then fail "/etc/ufw/sysctl.conf differs from dpkg's md5"; else pass "/etc/ufw/sysctl.conf is unmodified (dpkg --verify ufw)"; fi
+  ok "dpkg knows /etc/ufw/sysctl.conf as a ufw conffile" bash -c "dpkg-query -W -f='\${Conffiles}\n' ufw | grep -q '^ /etc/ufw/sysctl\.conf '"
+  if command -v debsums >/dev/null; then ok "debsums -ce ufw reports no changed conffile" bash -c "! debsums -ce ufw 2>&1 | grep -q 'sysctl\.conf'"; fi
+}
+
 timers_enabled() { local u; for u in "$@"; do ok "${u} is enabled" systemctl is-enabled --quiet "$u"; done; }
 
 server_checks() {
@@ -84,6 +103,7 @@ server_checks() {
       ok "ufw is active" bash -c "ufw status | grep -q '^Status: active'"
       ok "ufw allows 22/tcp" bash -c "ufw status | grep -qE '^22(/tcp)? +ALLOW'"
       ok "ufw is enabled at boot" systemctl is-enabled --quiet ufw
+      ufw_reload_checks
       timers_enabled apt-daily.timer apt-daily-upgrade.timer ;;
     *)
       okw "firewalld is active" 60 systemctl is-active --quiet firewalld
