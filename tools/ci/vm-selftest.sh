@@ -45,9 +45,21 @@ vm_catalogue fedora44
 expect_eq "Fedora: highest version, not string order" "$(vm_pick "$T/list" "$VM_LIST_RE")" Fedora-Cloud-Base-Generic-44-1.10.x86_64.qcow2
 expect_eq "Fedora: checksum file" "$(vm_pick "$T/list" "$VM_SUMS_RE")" Fedora-Cloud-44-1.10-x86_64-CHECKSUM
 vm_catalogue opensuse16
-expect_eq "openSUSE: highest build when no unversioned name" "$(vm_pick "$T/list" "$VM_LIST_RE")" Leap-16.0-Minimal-VM.x86_64-Cloud-Build1.10.qcow2
+expect_eq "openSUSE: highest build when no unversioned name" "$(vm_pick_any "$T/list" "$VM_LIST_RE")" Leap-16.0-Minimal-VM.x86_64-Cloud-Build1.10.qcow2
 echo '<a href="Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2">x</a>' >> "$T/list"
-expect_eq "openSUSE: unversioned name wins" "$(vm_pick "$T/list" "$VM_LIST_RE")" Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2
+expect_eq "openSUSE: unversioned name wins" "$(vm_pick_any "$T/list" "$VM_LIST_RE")" Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2
+cat > "$T/list2" <<'LST'
+<a href="/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.aarch64-Cloud.qcow2">x</a>
+<a href="/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-kvm-and-xen.qcow2">x</a>
+<a href="/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-kvm-and-xen.qcow2.sha256">x</a>
+<a href="/distribution/leap/16.0/appliances/Leap-16.0-Base-Cloud.x86_64-Cloud-Build2.1.qcow2">x</a>
+<a href="/distribution/leap/16.0/appliances/">dir</a>
+LST
+expect_eq "openSUSE: absolute hrefs, a wider Cloud name beats kvm, other arch ignored" "$(vm_pick_any "$T/list2" "$VM_LIST_RE")" Leap-16.0-Base-Cloud.x86_64-Cloud-Build2.1.qcow2
+sed -i '/Base-Cloud/d' "$T/list2"
+expect_eq "openSUSE: kvm image is the last resort" "$(vm_pick_any "$T/list2" "$VM_LIST_RE")" Leap-16.0-Minimal-VM.x86_64-kvm-and-xen.qcow2
+sed -i '/kvm/d' "$T/list2"
+expect_eq "openSUSE: nothing usable, nothing picked" "$(vm_pick_any "$T/list2" "$VM_LIST_RE" || true)" ""
 endgroup
 
 group "catalogue"

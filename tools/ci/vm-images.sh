@@ -23,7 +23,7 @@ VM_KEYS=(rocky10 alma10 centos10 fedora44 debian13 ubuntu2604 opensuse16 runner-
 #   VM_KIND      server-assert.sh kind: el10 | fedora | debian | opensuse (runner: rocky | debian)
 #   VM_BASE      HTTPS directory of the image and its checksum file
 #   VM_FILE      image file name; empty = resolve with VM_LIST_RE from the listing of VM_BASE
-#   VM_LIST_RE   ERE the whole file name must match (only when VM_FILE is empty)
+#   VM_LIST_RE   ERE the whole file name must match (only when VM_FILE is empty); ";" separates alternatives tried in order
 #   VM_SUMS      checksum file name; "<image>" suffixes mean "image name + suffix"; empty = resolve with VM_SUMS_RE
 #   VM_SUMS_RE   ERE for the checksum file name in the listing
 #   VM_ALGO      sha256 | sha512
@@ -63,7 +63,9 @@ vm_catalogue() {
     opensuse16)
       # Leap 16.0 minimal cloud VM. Resolved from the listing: the unversioned name if present, else the highest build.
       VM_BASE=https://download.opensuse.org/distribution/leap/16.0/appliances/
-      VM_LIST_RE='Leap-16\.0-Minimal-VM\.x86_64-Cloud(-Build[0-9.]+)?\.qcow2'
+      # Patterns are tried in this order (";" separates them), the first one that matches the listing wins: a cloud-init
+      # enabled "Cloud" image, any other x86_64 file with "Cloud" in its name, and last the plain kvm image.
+      VM_LIST_RE='Leap-16\.0-Minimal-VM\.x86_64-Cloud(-Build[0-9.]+)?\.qcow2;Leap-16\.0-[^/]*x86_64[^/]*-Cloud[^/]*\.qcow2;Leap-16\.0-Minimal-VM\.x86_64-kvm[^/]*\.qcow2'
       VM_SUMS="<image>.sha256" VM_SINGLE=1 VM_BOOT=uefi VM_KIND=opensuse VM_USERDATA=server/cloud-init/server-opensuse.yaml ;;
     *) return 1 ;;
   esac
@@ -97,10 +99,27 @@ vm_expected_hash() {
   [[ -n "$h" ]] && echo "$h"
 }
 
+# vm_hrefs LISTING_FILE: the file names linked from an HTML directory listing (any path prefix and query dropped, directories
+# left out), one per line. Mirror listings link either the bare name or an absolute path.
+vm_hrefs() {
+  grep -Eo 'href="[^"?#]+"' "$1" | sed -e 's/^href="//' -e 's/"$//' | grep -v '/$' | sed 's#.*/##' | grep -v '^$' || true
+}
+
 # vm_pick LISTING_FILE ERE: the best file name in an HTML directory listing whose whole name matches ERE. The unversioned
 # spelling wins when it is there, otherwise the highest version (sort -V).
 vm_pick() {
-  grep -Eo 'href="[^"/?]+"' "$1" | sed -e 's/^href="//' -e 's/"$//' | grep -E "^(${2})\$" | sort -uV | awk '{ a[NR] = $0 } END { for (i = NR; i >= 1; i--) if (a[i] !~ /-Build[0-9]/) { print a[i]; exit } if (NR) print a[NR] }'
+  vm_hrefs "$1" | grep -E "^(${2})\$" | sort -uV | awk '{ a[NR] = $0 } END { for (i = NR; i >= 1; i--) if (a[i] !~ /-Build[0-9]/) { print a[i]; exit } if (NR) print a[NR] }' || true
+}
+
+# vm_pick_any LISTING_FILE "ERE;ERE...": vm_pick with each alternative in turn; the first one that finds a file decides.
+vm_pick_any() {
+  local re found
+  while IFS= read -r re; do
+    [[ -n "$re" ]] || continue
+    found=$(vm_pick "$1" "$re")
+    if [[ -n "$found" ]]; then echo "$found"; return 0; fi
+  done <<<"${2//;/$'\n'}"
+  return 1
 }
 
 CURL=(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 5 --retry-delay 5 --retry-connrefused --connect-timeout 20)
@@ -115,8 +134,12 @@ vm_fetch() {
     list=$(mktemp)
     "${CURL[@]}" -o "$list" "$VM_BASE" || die "cannot read the directory listing ${VM_BASE}"
     if [[ -z "$file" ]]; then
-      file=$(vm_pick "$list" "$VM_LIST_RE")
-      [[ -n "$file" ]] || die "no file matching ${VM_LIST_RE} in ${VM_BASE}"
+      file=$(vm_pick_any "$list" "$VM_LIST_RE" || true)
+      if [[ -z "$file" ]]; then
+        # Show what the directory does hold, so the next run says which name to add to the catalogue.
+        echo "image files in ${VM_BASE}: $(vm_hrefs "$list" | grep -Ei '\.(qcow2|img|raw)(\.[a-z0-9]+)?$' | sort -u | tr '\n' ' ')" >&2
+        die "no file matching ${VM_LIST_RE} in ${VM_BASE}"
+      fi
     fi
     sums=$VM_SUMS
     if [[ -z "$sums" ]]; then
