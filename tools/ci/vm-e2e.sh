@@ -243,10 +243,12 @@ show_docker_log() { # DESC
 
 # Known Fedora 44 image issue, allowed narrowly. cloud-init's LOCAL stage runs `hostnamectl set-hostname <local-hostname>` before the
 # D-Bus system bus exists ("Failed to connect to system scope bus"), logs "Will retry in network stage", and the retry succeeds, but
-# cloud-init then reports "degraded done" (exit 2) with one recoverable WARNING. That stage runs before user-data is consumed, so
-# nothing in the cloud-init file can prevent it. The allowance holds only when ALL of these are true; anything else still fails:
-# Fedora, status done / extended_status exactly "degraded done", no errors, the only recoverable error is exactly the hostname
-# WARNING for the seed's local-hostname, cloud-init.log shows the bus failure and the retry, and the live hostname is correct.
+# cloud-init then reports "degraded done" (exit 2) with recoverable WARNINGs. That stage runs before user-data is consumed, so
+# nothing in the cloud-init file can prevent it. cloud-init 26.1 lists the one warning several times (seen: 4 identical entries in
+# `status --format json`, recoverable_errors {"WARNING": [msg, msg, msg, msg]}), so the count is not part of the test, the text is.
+# The allowance holds only when ALL of these are true; anything else still fails: Fedora, status done / extended_status exactly
+# "degraded done", no errors, WARNING is the only recoverable level and every entry in it is exactly the hostname warning for the
+# seed's local-hostname (one other entry fails), cloud-init.log shows the bus failure and the retry, and the live hostname is correct.
 # Args: OS_ID LOCAL_HOSTNAME STATUS_TEXT_FILE STATUS_JSON_FILE CLOUD_INIT_LOG_FILE LIVE_HOSTNAME [STATIC_HOSTNAME]
 vm_hostname_race_allowed() {
   local osid=$1 want=$2 st=$3 js=$4 lg=$5 live=$6 stat=${7:-$6}
@@ -257,7 +259,8 @@ import json, sys
 d = json.load(open(sys.argv[1])); want = sys.argv[2]
 r = d.get("recoverable_errors") or {}
 msg = "Failed to set the hostname to %s (%s)" % (want, want)
-ok = (not d.get("errors")) and list(r) == ["WARNING"] and r["WARNING"] == [msg]
+w = r.get("WARNING")
+ok = (not d.get("errors")) and list(r) == ["WARNING"] and isinstance(w, list) and len(w) > 0 and all(m == msg for m in w)
 sys.exit(0 if ok else 1)' "$js" "$want" 2>/dev/null || return 1
   grep -q 'Failed to connect to system scope bus' "$lg" && grep -q 'Will retry in network stage' "$lg" || return 1
   [[ "$live" == "$want" && "$stat" == "$want" ]]
