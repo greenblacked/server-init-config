@@ -35,14 +35,13 @@ write_files:
     content: |
       #!/usr/bin/env bash
       # Base setup for a general (non-runner) server on Ubuntu 26.04 (also 24.04) or Debian 13, x86_64 or ARM64:
-      # SSH keys only, admin user with sudo, ufw, fail2ban, auto security updates, Docker + Compose, swap, sysctl,
-      # journald limit, time sync, admin tools, shell history.
-      # Also safe on Hetzner Apps images (Coolify, Docker CE, GitLab CE, Jitsi Meet, ...): existing Docker, firewall rules and
-      # app config stay untouched; only the app's ports are added to ufw.
+      # SSH keys only, admin user with sudo, ufw, fail2ban, auto security updates, Docker + Compose, swap, sysctl, tools.
+      # Also safe on Hetzner Apps images (Coolify, GitLab CE, ...): existing Docker, firewall rules and app config stay
+      # untouched; only the app's ports are added to ufw.
       # Root keeps login by SSH key on port 22, so nothing here can lock you out.
       #
       # Self-contained and idempotent; rerun as root any time: /usr/local/sbin/server-init.sh (settings: /etc/server-init.conf).
-      # After SSH hardening a failed step is logged and the next one still runs.
+      # A failed step is logged and the next one still runs.
       set -Eeuo pipefail
 
       FAILED_LOG=/var/log/server-init-failed.log
@@ -59,7 +58,7 @@ write_files:
       # No prompts from apt, dpkg or needrestart.
       export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 
-      # First run: save the settings given in the environment (or defaults) so reruns use the same values.
+      # First run: save the settings (from the environment, or defaults) for reruns.
       if [[ ! -f "$CONF_FILE" ]]; then
         install -m 0644 /dev/null "$CONF_FILE"
         cat > "$CONF_FILE" <<CONF
@@ -102,8 +101,8 @@ write_files:
 
       packages() {
         apt_get update >/dev/null || return 1
-        # Required: ufw, fail2ban (+ python3-systemd for the journal backend, nftables for its bans), unattended-upgrades, curl.
-        # Ubuntu 26.04 ships sudo-rs as its sudo; the sudo package is added only when no sudo command exists.
+        # Required: ufw, fail2ban (+ python3-systemd: journal backend, nftables: bans), unattended-upgrades, curl.
+        # Ubuntu 26.04 ships sudo-rs; the sudo package is added only if there is no sudo.
         local required=(openssh-server ufw nftables fail2ban python3-systemd unattended-upgrades curl ca-certificates gnupg tzdata)
         command -v sudo >/dev/null && command -v visudo >/dev/null || required+=(sudo)
         apt_get install "${required[@]}" >/dev/null || return 1
@@ -121,6 +120,30 @@ write_files:
         if [[ -f "$path" ]] && cmp -s "$tmp" "$path"; then rm -f "$tmp"; return 0; fi
         install -D -m "$mode" "$tmp" "$path"
         rm -f "$tmp"
+      }
+
+      # ufw runs sysctl -p on its conffile (log_martians=0) at every start and "ufw reload". It is left as shipped; ours
+      # is re-applied by a ufw.service drop-in (boot, restart) and /etc/ufw/after.init (also on reload).
+      ufw_sysctl_keep() {
+        local hook=/etc/ufw/after.init conf=/etc/ufw/sysctl.conf want sub='s#^\(net/ipv4/conf/[a-z]*/log_martians\)=1#\1=0#'
+        # Undo an older run's edit, only if it is the sole change from dpkg's md5.
+        if grep -q '^net/ipv4/conf/.*/log_martians=1' "$conf" 2>/dev/null; then
+          want=$(dpkg-query -W -f='${Conffiles}\n' ufw | awk -v f="$conf" '$1 == f { print $2 }') || true
+          [[ -z "$want" || "$(sed "$sub" "$conf" | md5sum)" != "$want  -" ]] || sed -i "$sub" "$conf"
+        fi
+        put /etc/systemd/system/ufw.service.d/90-server-sysctl.conf 0644 <<'EOF'
+      [Service]
+      ExecStartPost=-/usr/sbin/sysctl -q -p /etc/sysctl.d/90-server.conf
+      EOF
+        systemctl daemon-reload || fail "daemon-reload failed"
+        # The package makes after.init a 640 (not run) copy of its template: take it only while unchanged or ours.
+        if [[ ! -e "$hook" ]] || cmp -s /usr/share/ufw/after.init "$hook" || grep -q 90-server.conf "$hook"; then
+          put "$hook" 0750 <<'EOF'
+      #!/bin/sh
+      [ "$1" = start ] && /usr/sbin/sysctl -q -p /etc/sysctl.d/90-server.conf >/dev/null 2>&1; exit 0
+      EOF
+          chmod 0750 "$hook"
+        else log "$hook is customised: 'ufw reload' resets log_martians until sysctl --system"; fi
       }
 
       write_configs() {
@@ -156,10 +179,10 @@ write_files:
       -fs.protected_fifos = 2
       -fs.protected_regular = 2
       net.ipv4.conf.all.log_martians = 1
+      net.ipv4.conf.default.log_martians = 1
       EOF
-        # ufw re-applies its own sysctl.conf at every start, with log_martians=0: keep the value above.
-        sed -i 's#^\(net/ipv4/conf/.*/log_martians\)=0#\1=1#' /etc/ufw/sysctl.conf 2>/dev/null || true
-        # No core dumps: they can hold keys and tokens.
+        ufw_sysctl_keep
+        # No core dumps (they can hold keys).
         put /etc/security/limits.d/50-nocore.conf 0644 <<'EOF'
       * hard core 0
       EOF
@@ -168,9 +191,8 @@ write_files:
       Storage=none
       ProcessSizeMax=0
       EOF
-        # The journal backend is needed because Debian 13 has no /var/log/auth.log. Bans go through nftables,
-        # which works with or without ufw. Both are also the package defaults.
-        # The jail must watch the port sshd really listens on (bootstrap --port), not only the default 22.
+        # Debian 13 has no /var/log/auth.log, hence the journal backend; nftables bans work with or without ufw.
+        # The jail must watch the port sshd really listens on (bootstrap --port), not only 22.
         sshd_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -un | paste -sd, -) || true
         put /etc/fail2ban/jail.d/50-sshd.local 0644 <<EOF
       [DEFAULT]
@@ -185,7 +207,7 @@ write_files:
       findtime = 10m
       bantime  = 1h
       EOF
-        # Security updates only, never an automatic reboot. #clear drops the distro's wider default origin list.
+        # Security updates only, no automatic reboot. #clear drops the distro's wider origin list.
         put /etc/apt/apt.conf.d/20auto-upgrades 0644 <<'EOF'
       APT::Periodic::Update-Package-Lists "1";
       APT::Periodic::Unattended-Upgrade "1";
@@ -286,8 +308,7 @@ write_files:
         unset __f __fzf_done __fzf_b
       fi
       EOF
-        # Docker settings are only seeded on a server without Docker; an existing install (for example a
-        # Hetzner Apps image) and an existing daemon.json are never touched.
+        # Docker settings are only seeded without Docker; an existing install (Apps image) or daemon.json is untouched.
         if (( INSTALL_DOCKER == 1 )) && ! command -v docker >/dev/null && [[ ! -f /etc/docker/daemon.json ]]; then
           put /etc/docker/daemon.json 0644 <<'EOF'
       {
@@ -300,12 +321,11 @@ write_files:
       }
 
       ssh_hardening() {
-        # sshd -t needs the privilege separation directory, which the service normally creates.
+        # sshd -t needs /run/sshd, which the service normally creates.
         command -v sshd >/dev/null || { fail "sshd is not installed; hardening not applied"; return 1; }
         [[ -d /run/sshd ]] || install -d -m 0755 /run/sshd
         if sshd -t; then
-          # Ubuntu may start sshd through ssh.socket: a running ssh.service is reloaded, otherwise the
-          # next connection starts a new sshd that reads the drop-in anyway.
+          # Ubuntu may use ssh.socket: reload a running ssh.service, else the next connection reads the drop-in.
           if systemctl is-active --quiet ssh; then systemctl reload ssh; else log "ssh.service is not running (socket activation or no systemd); the drop-in applies to the next connection"; fi
         else
           rm -f /etc/ssh/sshd_config.d/00-hardening.conf
@@ -317,7 +337,7 @@ write_files:
         [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { fail "invalid ADMIN_USER: $ADMIN_USER"; return 1; }
         id "$ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo "$ADMIN_USER" || return 1
         usermod -aG sudo "$ADMIN_USER" || return 1
-        # useradd leaves "!" (locked); use "*" (no password, keys only) like runner/install/users.sh.
+        # useradd leaves "!" (locked); "*" means no password, keys only (as runner/install/users.sh).
         if [[ "$(getent shadow "$ADMIN_USER" | cut -d: -f2)" == '!'* ]]; then usermod -p '*' "$ADMIN_USER" || return 1; fi
         if [[ -s /root/.ssh/authorized_keys ]]; then
           install -d -m 0700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/${ADMIN_USER}/.ssh" || return 1
@@ -335,7 +355,7 @@ write_files:
         timedatectl set-timezone "$TIMEZONE" || fail "unknown TIMEZONE: $TIMEZONE"
         systemctl restart systemd-journald || return 1
         sysctl --system >/dev/null || return 1
-        # Keep a running time sync (systemd-timesyncd or chrony); install chrony only if neither is.
+        # Keep a running time sync; install chrony only if there is none.
         if systemctl is-active --quiet systemd-timesyncd; then log "time sync: systemd-timesyncd (kept)"
         elif systemctl is-active --quiet chrony; then log "time sync: chrony (kept)"
         else
@@ -344,33 +364,27 @@ write_files:
         fi
       }
 
-      # Hetzner Apps (https://github.com/hetznercloud/apps, apps/hetzner/<app>): all are built on Ubuntu 24.04
-      # (template.pkr.hcl, hcloud_image). The images ship no ufw rules; the ports below are the ones the
-      # image itself serves or publishes. APP_PORTS and APP_NAME are set by detect_app.
+      # Hetzner Apps (github.com/hetznercloud/apps, apps/hetzner/<app>), Ubuntu 24.04 (template.pkr.hcl), no ufw rules:
+      # the ports each serves. detect_app sets APP_PORTS and APP_NAME.
       APP_NAME=""
       APP_PORTS=""
-      # Set to 1 for an app whose image owns the firewall (ufw must not be enabled).
-      APP_OWN_FW=0
+      APP_OWN_FW=0   # 1 when the image owns the firewall (ufw must not be enabled)
       APP_BAD=0   # 1 when APP in the config names no known app (a typo): firewall() then leaves ufw alone
       app_ports() {
         case "$1" in
-          # coolify/test.sh checks the dashboard on http://localhost:8000; the rest is set up by Coolify's
-          # own installer on first login and is not documented in the repo (add it to EXTRA_PORTS if needed).
+          # coolify/test.sh checks the dashboard on :8000; the rest is Coolify's own installer (use EXTRA_PORTS).
           coolify) APP_PORTS="8000/tcp" ;;
-          # docker-ce/scripts/docker.sh only installs Docker; no port is opened.
+          # docker-ce/scripts/docker.sh only installs Docker.
           docker-ce) APP_PORTS="" ;;
-          # gitlab/files/etc/apache2/sites-available/000-default.conf serves port 80 until GitLab is enabled;
-          # gitlab/README.md enables HTTPS (external_url https, Let's Encrypt) afterwards.
+          # gitlab/files/etc/apache2/sites-available/000-default.conf serves 80; gitlab/README.md enables HTTPS.
           gitlab) APP_PORTS="80/tcp 443/tcp" ;;
-          # jitsi/files/etc/nginx/sites-available/hetzner listens on 80; jitsi/files/opt/hcloud/jitsi_setup.sh
-          # sets up the nginx site with a certificate (443). jitsi-videobridge2 takes media on 10000/udp
+          # jitsi/files/etc/nginx/sites-available/hetzner serves 80, jitsi_setup.sh adds 443; media is 10000/udp
           # (Jitsi quick-install guide); coturn (3478/udp, 5349/tcp) is added in firewall() when installed.
           jitsi) APP_PORTS="80/tcp 443/tcp 10000/udp" ;;
-          # lamp, wordpress, nextcloud: the image's native Apache.
+          # lamp, wordpress, nextcloud: native Apache.
           lamp|wordpress|nextcloud) APP_PORTS="80/tcp 443/tcp" ;;
-          # wireguard: wg on WGUI_SERVER_LISTEN_PORT=51820/udp plus Caddy on 80/443 for the UI. Its
-          # /etc/nftables.conf starts with "flush ruleset" and nftables.service is enabled, so the image owns the
-          # firewall: firewall() does not enable ufw here.
+          # wireguard: 51820/udp (WGUI_SERVER_LISTEN_PORT) plus Caddy on 80/443. Its /etc/nftables.conf starts with
+          # "flush ruleset" and nftables.service is enabled, so the image owns the firewall: ufw is not enabled.
           wireguard) APP_PORTS="51820/udp 80/tcp 443/tcp"; APP_OWN_FW=1 ;;
           # apps/hetzner/<app>/files/opt/containers/<app>/docker-compose.yml, "ports:" of traefik/caddy/services.
           owncast) APP_PORTS="80/tcp 443/tcp 1935/tcp" ;;
@@ -390,9 +404,8 @@ write_files:
              fail "unknown APP in $CONF_FILE: $APP"; APP_PORTS=""; APP_BAD=1; return 0 ;;
         esac
         local a
-        # Markers: the compose project the image copies to /opt/containers/<app>, the first-login script
-        # /opt/hcloud/<app>_setup.sh (appended to /root/.bashrc by files/var/lib/cloud/scripts/per-instance/001_onboot),
-        # the gitlab-ce / jitsi-meet packages, and /data/coolify from Coolify's installer.
+        # Markers: /opt/containers/<app>/docker-compose.yml, the first-login script /opt/hcloud/<app>_setup.sh
+        # (files/var/lib/cloud/scripts/per-instance/001_onboot), the gitlab-ce / jitsi-meet packages, /data/coolify.
         for a in owncast photoprism prometheus-grafana rustdesk; do
           [[ -f "/opt/containers/${a}/docker-compose.yml" ]] && { APP_NAME="$a"; break; }
         done
@@ -411,17 +424,17 @@ write_files:
         return 0
       }
 
-      # The output is captured first: grep -q closing a pipe early would fail the pipeline under pipefail.
+      # Output is captured first: grep -q closing a pipe early would fail the pipeline under pipefail.
       ufw_is_active() { local o; o=$(ufw status 2>/dev/null) || return 1; grep -q '^Status: active' <<<"$o"; }
-      # True when the saved rules (active or not) allow SSH on 22.
+      # True when the saved rules allow SSH on 22.
       ufw_ssh_saved() { local o; o=$(ufw show added 2>/dev/null) || return 1; grep -qE '^ufw (allow|limit) (in )?(22(/tcp)?|ssh|OpenSSH)([[:space:]]|$)' <<<"$o"; }
-      # True when the running firewall lists SSH as allowed.
+      # True when the running firewall allows SSH.
       ufw_ssh_live() { local o; o=$(ufw status 2>/dev/null) || return 1; grep -qE '^(22(/tcp)?|OpenSSH|ssh)([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|LIMIT)' <<<"$o"; }
 
-      # A port range in ufw is written 6000:6007/tcp.
+      # ufw writes a port range as 6000:6007/tcp.
       ufw_open() { ufw allow "${1/-/:}" >/dev/null || { fail "could not open $1"; return 1; }; }
 
-      # True for a Hetzner Apps image this script has no port list for.
+      # True for a Hetzner Apps image without a port list here.
       unknown_hetzner_app() {
         local f
         for f in /opt/hcloud/*_setup.sh /var/lib/cloud/scripts/per-instance/001_onboot; do [[ -e "$f" ]] && return 0; done
@@ -445,19 +458,19 @@ write_files:
         fi
         ufw_is_active && was_active=1
         ufw_ssh_saved || ufw allow 22/tcp >/dev/null || return 1
-        # sshd may listen on another port than 22 (bootstrap --port): that port is allowed too.
+        # sshd on another port (bootstrap --port): allow it too.
         for p in $(sshd -T 2>/dev/null | awk '$1 == "port" && $2 != 22 { print $2 }'); do
           ufw allow "${p}/tcp" >/dev/null || return 1
           ssh_ports+=" $p"
         done
-        # Lockout guard: never enable the firewall unless SSH is in the saved rules.
+        # Lockout guard: enable the firewall only with SSH in the saved rules.
         ufw_ssh_saved || { fail "22/tcp missing from saved ufw rules; ufw left as it was"; return 1; }
         local o
         for p in $ssh_ports; do
           o=$(ufw show added 2>/dev/null) || true
           grep -qE "^ufw (allow|limit) (in )?${p}/tcp([[:space:]]|\$)" <<<"$o" || { fail "ssh port ${p} missing from saved ufw rules; ufw left as it was"; return 1; }
         done
-        # Defaults are set only when ufw is switched on for the first time; an active ufw keeps what it has.
+        # Defaults only when ufw is first switched on; an active ufw keeps its own.
         if (( ! was_active )); then
           ufw default deny incoming >/dev/null || return 1
           ufw default allow outgoing >/dev/null || return 1
@@ -474,7 +487,9 @@ write_files:
           ufw --force enable >/dev/null || return 1
           systemctl enable ufw >/dev/null 2>&1 || true
         fi
-        # A rule added to an active ufw applies at once; here SSH must still be allowed.
+        # ufw has just applied its own sysctl.conf (log_martians=0): put ours back. A rule added to an active ufw
+        # applies at once; here SSH must still be allowed.
+        sysctl -q -p /etc/sysctl.d/90-server.conf || true
         local live=1
         ufw_ssh_live || live=0
         o=$(ufw status 2>/dev/null) || true
@@ -493,12 +508,11 @@ write_files:
 
       auto_updates() {
         pkg_installed unattended-upgrades || apt_get install unattended-upgrades >/dev/null || return 1
-        # The apt.conf.d files are written by write_configs; the daily timers run the upgrade.
+        # write_configs wrote the apt.conf.d files; the daily timers run the upgrade.
         systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
       }
 
-      # pin_repo_key URL FINGERPRINT DEST: download an armored key, install only the key with that primary
-      # fingerprint (anything else in the file is dropped). Needs gpg.
+      # pin_repo_key URL FINGERPRINT DEST: install only the key with that primary fingerprint from the armored file.
       pin_repo_key() {
         local url="$1" want="$2" dest="$3" tmp home ok=1
         command -v gpg >/dev/null || apt_get install gnupg >/dev/null || return 1
@@ -516,7 +530,7 @@ write_files:
         return "$ok"
       }
 
-      # dockerd can fail on its first start: retry, keep the evidence.
+      # dockerd can fail on first start: retry, keep the evidence.
       docker_start() {
         local i o k; k=$(uname -r)
         for i in 1 2 3; do
@@ -532,18 +546,18 @@ write_files:
       docker_engine() {
         (( INSTALL_DOCKER == 1 )) || { log "Docker disabled in /etc/server-init.conf"; return 0; }
         if command -v docker >/dev/null; then
-          # Already installed (earlier run or Apps image): keep its repo, packages and daemon.json.
+          # Installed already (earlier run, Apps image): keep its repo, packages and daemon.json.
           log "Docker present ($(docker --version 2>/dev/null)); not reinstalled or reconfigured"
           docker info >/dev/null 2>&1 || docker_start
           return
         fi
         local arch repo_ok=0 src compose_pkg=docker-compose
-        # Compose v2 is docker-compose-v2 on Ubuntu but docker-compose on Debian.
+        # Compose v2 is docker-compose-v2 on Ubuntu, docker-compose on Debian.
         [[ "$DOCKER_DISTRO" != ubuntu ]] || compose_pkg=docker-compose-v2
         arch=$(dpkg --print-architecture)
         src="https://download.docker.com/linux/${DOCKER_DISTRO}"
-        # Docker publishes a repo per codename; use it only when the index exists for this architecture.
-        # Only a definite 404 means "no repo"; a DNS or network error must not downgrade the host to docker.io for good.
+        # Use Docker's repo only when its index exists for this codename and arch. Only a definite 404 means "no
+        # repo"; a network error must not downgrade the host to docker.io for good.
         if [[ -n "$CODENAME" ]]; then
           local code=""
           for _ in 1 2 3; do
@@ -559,7 +573,7 @@ write_files:
         fi
         if (( repo_ok )); then
           install -m 0755 -d /etc/apt/keyrings || return 1
-          # Trust the key only if it is Docker's: fingerprint of "Docker Release (CE deb)", checked before it is installed.
+          # Trust the key only if it has the fingerprint of "Docker Release (CE deb)".
           pin_repo_key "${src}/gpg" 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 /etc/apt/keyrings/docker.asc || return 1
           put /etc/apt/sources.list.d/docker.sources 0644 <<EOF
       Types: deb
@@ -582,7 +596,7 @@ write_files:
 
       swap() {
         (( INSTALL_SWAP == 1 )) || { log "swap disabled in /etc/server-init.conf"; return 0; }
-        # Add a disk swap file only when there is no swap at all.
+        # A swap file only when there is no swap at all.
         if [[ -n "$(swapon --noheadings --show=NAME)" ]]; then log "swap already present: $(swapon --noheadings --show=NAME | tr '\n' ' ')"; return 0; fi
         local mem_mb size_mb
         mem_mb=$(awk '/MemTotal/ { print int($2 / 1024) }' /proc/meminfo)
@@ -591,7 +605,7 @@ write_files:
           if [[ "$(findmnt -no FSTYPE /)" == btrfs ]]; then
             btrfs filesystem mkswapfile --size "${size_mb}m" /swapfile || return 1
           else
-            # fallocate on ext4 (the default); dd if it fails or the file is rejected as swap.
+            # fallocate on ext4; dd if it fails or the file is rejected as swap.
             if fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
               chmod 600 /swapfile
               mkswap /swapfile >/dev/null || return 1
