@@ -377,14 +377,14 @@ docker_start() {
       journalctl -u docker -u docker.socket -u containerd --no-pager -n 40; dmesg | tail -15; } >> "$DOCKER_LOG" 2>&1
     (( i == 3 )) || sleep $((i * 3))
   done
-  n=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort -V | tail -1)
-  if [[ -n "$n" && "$n" != "$k" ]]; then
+  n=; rpm -q --quiet kernel-core && n=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort -V | tail -1)
+  if [[ "$n" =~ ^[0-9][^[:space:]]*$ && "$n" != "$k" ]]; then
     if [[ $(systemctl is-active cloud-final.service) == activating ]]; then
       d=/etc/systemd/system/docker.service.d/reboot.conf
       printf '[Service]\nExecStartPost=-/bin/sed -i /docker-reboot-pending/d %s\nExecStartPost=-/bin/rm -f %s\n' "$FAILED_LOG" "$d" | put "$d" 0644
       fail "docker-reboot-pending: no Docker on kernel ${k}, rebooting into ${n} after the init"; REBOOT_AT_END=1; return 0
     fi
-    REBOOT_HINT="reboot needed for docker (new kernel ${n} installed, running ${k}): reboot the server"; fail "$REBOOT_HINT"
+    REBOOT_HINT="docker is not running; a newer kernel (${n}) is installed, running ${k}: reboot the server; if docker still fails after the reboot, see ${DOCKER_LOG}"; fail "$REBOOT_HINT"
   fi
   tail -n 30 "$DOCKER_LOG" | sed 's/^/docker: /' >> "$FAILED_LOG"; return 1
 }
