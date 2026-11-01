@@ -2,7 +2,7 @@ name: registry-cache
 
 services:
   registry:
-    image: registry:2.8.3
+    image: registry:3.1.2
     restart: unless-stopped
     network_mode: host
     mem_limit: 128m
