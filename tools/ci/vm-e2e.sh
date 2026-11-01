@@ -330,13 +330,15 @@ main() {
   # --wait prints progress dots without a newline, so the first line is ".....status: done"; strip them before matching. The
   # extended status must be a plain "done" too ("degraded done" means a module reported a recoverable error).
   local ci_txt; ci_txt=$(sed 's/^\.*//' "$ci_out")
-  # Rocky runner files: when Docker cannot start on the image's old kernel they reboot once, from a unit ordered after
-  # cloud-final.service, so cloud-init has already finished and reported (the status above is the first boot's). Wait for the new
-  # boot and for cloud-init there before the remaining checks, else ssh drops under them. "Expected" = the log the file writes
-  # exists (or ssh is already dropping: exit 255, retried a few times).
-  if [[ "$VM_ROLE" == runner && -n "$boot1" ]]; then
-    local rb=255 n bn
-    for n in 1 2 3; do rb=0; vm_ssh root 'test -s /var/log/ci-docker-reboot.log' >/dev/null 2>&1 || rb=$?; (( rb == 255 )) || break; sleep 5; done
+  # Rocky runner files and the EL10 server init: when Docker cannot start on the image's old kernel they reboot once, from a unit
+  # ordered after cloud-final.service, so cloud-init has already finished and reported (the status above is the first boot's).
+  # Wait for the new boot and for cloud-init there before the remaining checks, else ssh drops under them. "Expected" = the
+  # runner's log (ci-docker-reboot.log) or the server init's "reboot pending for docker" line exists (or ssh is already dropping:
+  # exit 255, retried a few times).
+  if [[ -n "$boot1" ]]; then
+    local rb=255 n bn marker='test -s /var/log/ci-docker-reboot.log'
+    [[ "$VM_ROLE" == server ]] && marker='grep -q "done, reboot pending for docker" /var/log/cloud-init-output.log'
+    for n in 1 2 3; do rb=0; vm_ssh root "$marker" >/dev/null 2>&1 || rb=$?; (( rb == 255 )) || break; sleep 5; done
     if (( rb == 0 || rb == 255 )); then
       log "first boot: Docker reboot expected, waiting for the new boot"
       for ((n = 0; n < 120; n++)); do

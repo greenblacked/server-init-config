@@ -120,6 +120,19 @@ for f in runner/cloud-init/rocky.yaml runner/cloud-init/rocky-x86.yaml runner/cl
 done
 endgroup
 
+group "No rendered cloud-init file reboots from inside runcmd"
+# The server init (EL10) reboots only through a unit ordered after cloud-final.service while cloud-init runs; a hand rerun reboots at once.
+for f in server/cloud-init/*.yaml runner/cloud-init/*.yaml; do
+  grep -q 'systemctl reboot --no-block' "$f" && fail "$f: bare 'systemctl reboot --no-block' (kills cloud-init's modules-final)" || pass "$f: no bare 'systemctl reboot --no-block'"
+  (( $(wc -c < "$f") < 32768 )) && pass "$f: under 32768 bytes" || fail "$f: 32768 bytes or more"
+done
+f=server/cloud-init/server-el10.yaml
+grep -q 'systemd-run --no-block -p After=cloud-final.service systemctl reboot' "$f" && grep -q 'cloud-final.service 2>/dev/null)" == activating' "$f" \
+  && pass "$f: deferred reboot only while cloud-final.service is activating" || fail "$f: deferred reboot / cloud-init detection missing"
+! grep -n 'reboot' server/server-init-fedora.sh server/server-init-debian.sh server/server-init-opensuse.sh | grep -q 'systemctl\|shutdown\|reboot$' \
+  && pass "fedora, debian, opensuse inits never reboot" || fail "another server init reboots"
+endgroup
+
 group "NoCloud seed"
 if need genisoimage || need xorriso; then
   ssh-keygen -q -t ed25519 -N '' -C selftest -f "$T/id" <<<y >/dev/null 2>&1 || true

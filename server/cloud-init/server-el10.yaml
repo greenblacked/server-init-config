@@ -56,7 +56,6 @@ write_files:
       case "${ID:-}:${VERSION_ID%%.*}" in
         centos:10) DOCKER_DIST=centos ;;
         rocky:10 | almalinux:10) DOCKER_DIST=rhel ;;
-        # return when sourced by mistake, so the shell is not closed
         *) echo "this script is for EL10 (CentOS, Rocky, Alma), found ${PRETTY_NAME:-unknown}" >&2; return 1 2>/dev/null || exit 1 ;;
       esac
 
@@ -101,7 +100,6 @@ write_files:
       }
 
       packages() {
-        # fail2ban and several tools come from EPEL, which needs CRB enabled.
         rpm -q dnf-plugins-core >/dev/null 2>&1 || dnf -y -q install dnf-plugins-core || return 1
         dnf config-manager --set-enabled crb || return 1
         rpm -q epel-release >/dev/null 2>&1 || dnf -y -q install epel-release || return 1
@@ -334,7 +332,6 @@ write_files:
         done
 
         # Everything else is changed through the running daemon: firewall-offline-cmd rejects
-        # --zone with --remove-service ("Can't use lokkit options with other options").
         local changed=0
         # The default public zone opens cockpit (and mdns on some images); a cloud server needs neither.
         for p in cockpit mdns; do
@@ -372,7 +369,6 @@ write_files:
       [emitters]
       emit_via = stdio
       CONF
-        # server-update.timer replaces dnf-automatic (both would race on the dnf lock).
         if systemctl is-enabled --quiet server-update.timer 2>/dev/null; then log "server-update.timer is enabled, dnf-automatic stays off"; return 0; fi
         systemctl enable --now dnf-automatic.timer
       }
@@ -451,7 +447,6 @@ write_files:
           if [[ "$(findmnt -no FSTYPE /)" == btrfs ]]; then
             btrfs filesystem mkswapfile --size "${size_mb}m" /swapfile || return 1
           else
-            # dd, not fallocate: XFS (the EL default) can reject fallocated swap files.
             dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none || return 1
             chmod 600 /swapfile
             mkswap /swapfile >/dev/null || return 1
@@ -650,7 +645,12 @@ write_files:
       if (( ${#FAILED_STEPS[@]} )); then log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"; rc=1
       elif (( REBOOT_AT_END )); then log "done, reboot pending for docker (see $FAILED_LOG)"
       else log "done, all steps ok"; fi
-      if (( REBOOT_AT_END )); then log "rebooting now (once)"; systemctl reboot --no-block; fi
+      if (( REBOOT_AT_END )); then
+        log "rebooting now (once)"
+        # Under cloud-init a reboot here would kill modules-final: a unit ordered after cloud-final.service does it.
+        if [[ "$(systemctl is-active cloud-final.service 2>/dev/null)" == activating ]]; then systemd-run --no-block -p After=cloud-final.service systemctl reboot
+        else systemctl --no-block reboot; fi
+      fi
       exit "$rc"
 
 runcmd:
