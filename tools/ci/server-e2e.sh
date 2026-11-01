@@ -39,10 +39,13 @@ ALLOWED="swap system-tuning docker"
 if [[ "${STRICT:-0}" == 1 ]]; then ALLOWED=""; fi
 log "image ${IMAGE} -> init kind ${KIND}; allowed container-only failures: ${ALLOWED:-none}"
 
+# The throwaway private key, ssh_config and known_hosts stay out of ci-out/ (uploaded as a public artifact on failure).
+PRIV=$(mktemp -d); chmod 700 "$PRIV"
 cleanup() {
   local rc=$?
   sd_collect "$NAME" "$W/collected" 2>/dev/null || true
   if [[ "${KEEP:-0}" != 1 ]]; then docker rm -f "$NAME" >/dev/null 2>&1 || true; fi
+  rm -rf "$PRIV"
   exit "$rc"
 }
 trap cleanup EXIT
@@ -54,24 +57,24 @@ sd_exec "$NAME" sh -c '. /etc/os-release; echo "${ID}:${VERSION_ID} ${PRETTY_NAM
 endgroup
 
 # --- throwaway SSH identity; ssh gets its config through a wrapper because OpenSSH ignores $HOME for ~/.ssh --------------
-ssh-keygen -q -t ed25519 -N '' -C ci-test -f "$W/id" <<<y >/dev/null 2>&1 || true
+ssh-keygen -q -t ed25519 -N '' -C ci-test -f "$PRIV/id" <<<y >/dev/null 2>&1 || true
 docker exec "$NAME" sh -c 'install -d -m 0700 /root/.ssh'
-docker cp "$W/id.pub" "$NAME:/root/.ssh/authorized_keys"
+docker cp "$PRIV/id.pub" "$NAME:/root/.ssh/authorized_keys"
 docker exec "$NAME" sh -c 'chown root:root /root/.ssh/authorized_keys && chmod 0600 /root/.ssh/authorized_keys'
 IP=$(sd_ip "$NAME")
 log "container IP ${IP}"
-for _ in $(seq 1 30); do ssh-keyscan -T 3 -t ed25519 "$IP" > "$W/known_hosts" 2>/dev/null && [[ -s "$W/known_hosts" ]] && break; sleep 2; done
-[[ -s "$W/known_hosts" ]] || die "sshd in the container does not answer"
-cat > "$W/ssh_config" <<CONF
+for _ in $(seq 1 30); do ssh-keyscan -T 3 -t ed25519 "$IP" > "$PRIV/known_hosts" 2>/dev/null && [[ -s "$PRIV/known_hosts" ]] && break; sleep 2; done
+[[ -s "$PRIV/known_hosts" ]] || die "sshd in the container does not answer"
+cat > "$PRIV/ssh_config" <<CONF
 Host *
-  IdentityFile $W/id
+  IdentityFile $PRIV/id
   IdentitiesOnly yes
-  UserKnownHostsFile $W/known_hosts
+  UserKnownHostsFile $PRIV/known_hosts
   StrictHostKeyChecking yes
 CONF
-mkdir -p "$W/bin"
-printf '#!/bin/sh\nexec /usr/bin/ssh -F "%s" "$@"\n' "$W/ssh_config" > "$W/bin/ssh"; chmod +x "$W/bin/ssh"
-export PATH="$W/bin:$PATH"
+mkdir -p "$PRIV/bin"
+printf '#!/bin/sh\nexec /usr/bin/ssh -F "%s" "$@"\n' "$PRIV/ssh_config" > "$PRIV/bin/ssh"; chmod +x "$PRIV/bin/ssh"
+export PATH="$PRIV/bin:$PATH"
 BOOT=(server/bootstrap.sh)
 [[ "${ALLOW_DIRTY:-0}" == 1 ]] && BOOT+=(--allow-dirty)
 
