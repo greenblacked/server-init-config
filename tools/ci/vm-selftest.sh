@@ -133,8 +133,8 @@ done
 f=server/cloud-init/server-el10.yaml
 grep -q 'systemd-run --no-block -p After=cloud-final.service systemctl reboot' "$f" && grep -q 'cloud-final.service 2>/dev/null)" == activating' "$f" \
   && pass "$f: deferred reboot only while cloud-final.service is activating" || fail "$f: deferred reboot / cloud-init detection missing"
-grep -q 'REBOOT_HINT="reboot needed for docker' "$f" && grep -q '\[\[ -z "\$REBOOT_HINT" \]\] || log' "$f" \
-  && pass "$f: outside cloud-init a kernel mismatch is reported as 'reboot needed for docker', never rebooted" || fail "$f: no reboot hint outside cloud-init"
+grep -q 'REBOOT_HINT="docker is not running; a newer kernel' "$f" && grep -q '\[\[ -z "\$REBOOT_HINT" \]\] || log' "$f" \
+  && pass "$f: outside cloud-init a kernel mismatch is reported as a 'newer kernel is installed' hint, never rebooted" || fail "$f: no reboot hint outside cloud-init"
 ! grep -n 'reboot' server/server-init-fedora.sh server/server-init-debian.sh server/server-init-opensuse.sh | grep -q 'systemctl\|shutdown\|reboot$' \
   && pass "fedora, debian, opensuse inits never reboot" || fail "another server init reboots"
 endgroup
