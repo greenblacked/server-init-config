@@ -1,0 +1,33 @@
+# Keeps pinned versions current by pull request. For GitHub Actions Dependabot rewrites the full-SHA pin and its
+# "# vX.Y.Z" comment together. The lint checks (tools/ci/check-pins.sh) keep every action SHA-pinned.
+# Not covered on purpose: other/lampa-stack and common/security/kali take their image from an environment variable or
+# build argument (Dependabot cannot see a value that is only set in .env or install scripts); the tool versions and
+# SHA-256 values in tools/ci/install-*.sh and common/security-tools.sh are bumped by hand together with the hash.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  # Compose files with literal, pinned images (the torrserver one has a Caddy default pinned by digest).
+  - package-ecosystem: docker-compose
+    directories:
+      - /other/torrserver
+      - /runner/stacks/logging
+      - /runner/stacks/monitoring
+      - /runner/stacks/npm-cache
+      - /runner/stacks/registry-cache
+      - /server/ai
+    schedule:
+      interval: weekly
+    groups:
+      compose-images:
+        patterns: ["*"]
+    commit-message:
+      prefix: deps
