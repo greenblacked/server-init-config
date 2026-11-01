@@ -154,6 +154,6 @@ runcmd:
   - usermod -aG docker gitlab-runner
   - chmod 600 /etc/gitlab-runner/config.toml
   - [systemctl, restart, gitlab-runner]
-  # The old image kernel has no kernel-modules (netfilter) after the upgrade, so dockerd fails until the new kernel boots: reboot once.
-  - [sh, -c, "systemctl is-active -q docker || [ \"$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\\n' | sort -V | tail -1)\" = \"$(uname -r)\" ] || { journalctl -u docker -n 20 --no-pager > /var/log/ci-docker-reboot.log; systemctl reboot --no-block; }"]
+  # The old image kernel has no kernel-modules (netfilter) after the upgrade, so dockerd fails until the new kernel boots: reboot once, after cloud-init is done.
+  - [sh, -c, "systemctl is-active -q docker || [ \"$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\\n' | sort -V | tail -1)\" = \"$(uname -r)\" ] || { journalctl -u docker -n 20 --no-pager > /var/log/ci-docker-reboot.log; systemd-run --no-block -p After=cloud-final.service systemctl reboot; }"]
   - [sh, -c, "for s in sshd docker gitlab-runner; do systemctl is-active --quiet $s || [ $s = docker -a -s /var/log/ci-docker-reboot.log ] || echo bootstrap-check-failed-$s >> /var/log/ci-bootstrap-failed.log; done"]

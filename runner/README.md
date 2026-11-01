@@ -274,7 +274,7 @@ Runner-specific; the general table is in the [main README](../README.md#troubles
 
 ### Reboot on first boot (Rocky)
 
-The Rocky image boots an older kernel than the one the package upgrade installs, and the new kernel's `kernel-modules` (netfilter) exist only for the new kernel. Until then `dockerd` cannot add its iptables rules and does not start. The init files check for that at the end and reboot once; `/var/log/ci-docker-reboot.log` then holds the last Docker journal lines. After the reboot Docker, the job isolation rules and the cache start by themselves.
+The Rocky image boots an older kernel than the one the package upgrade installs, and the new kernel's `kernel-modules` (netfilter) exist only for the new kernel. Until then `dockerd` cannot add its iptables rules and does not start. The init files check for that at the end and reboot once, from a unit that starts after `cloud-final.service` (so `cloud-init status` still ends `done`); `/var/log/ci-docker-reboot.log` then holds the last Docker journal lines. After the reboot Docker, the job isolation rules and the cache start by themselves.
 
 ### Check the first boot
 

@@ -111,6 +111,15 @@ race fedora "$T/rs" "$T/rj" "$T/rl" localhost ci-fedora44 && fail "race: wrong l
 race fedora "$T/rs" "$T/rj" "$T/rl" ci-fedora44 localhost && fail "race: wrong static hostname allowed" || pass "race: wrong static hostname refused"
 endgroup
 
+group "Rocky runner files: the Docker reboot comes after cloud-init"
+# A reboot inside runcmd kills cloud-init mid-final-stage ("received SIGTERM", status error: runner-rocky10, run 41306416353).
+for f in runner/cloud-init/rocky.yaml runner/cloud-init/rocky-x86.yaml runner/cloud-init/rocky-clean.yaml; do
+  grep -q 'systemd-run --no-block -p After=cloud-final.service systemctl reboot' "$f" && ! grep -q 'systemctl reboot --no-block' "$f" \
+    && pass "$f: reboots from a unit ordered after cloud-final.service" || fail "$f: reboot is not deferred until cloud-final.service is done"
+  (( $(wc -c < "$f") < 32768 )) && pass "$f: under 32768 bytes" || fail "$f: 32768 bytes or more"
+done
+endgroup
+
 group "NoCloud seed"
 if need genisoimage || need xorriso; then
   ssh-keygen -q -t ed25519 -N '' -C selftest -f "$T/id" <<<y >/dev/null 2>&1 || true

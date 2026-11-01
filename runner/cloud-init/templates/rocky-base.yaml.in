@@ -85,5 +85,5 @@ runcmd:
   - [systemctl, enable, --now, runner-weekly-cleanup.timer, runner-disk-guard.timer, runner-engine-update.timer, ci-job-isolation.service, registry-cache.service]
   - sed -i -E 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
   - setenforce 1
-  # The old image kernel has no kernel-modules (netfilter) after the upgrade, so dockerd fails until the new kernel boots: reboot once.
-  - [sh, -c, "systemctl is-active -q docker || [ \"$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\\n' | sort -V | tail -1)\" = \"$(uname -r)\" ] || { journalctl -u docker -n 20 --no-pager > /var/log/ci-docker-reboot.log; systemctl reboot --no-block; }"]
+  # The old image kernel has no kernel-modules (netfilter) after the upgrade, so dockerd fails until the new kernel boots: reboot once, after cloud-init is done.
+  - [sh, -c, "systemctl is-active -q docker || [ \"$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\\n' | sort -V | tail -1)\" = \"$(uname -r)\" ] || { journalctl -u docker -n 20 --no-pager > /var/log/ci-docker-reboot.log; systemd-run --no-block -p After=cloud-final.service systemctl reboot; }"]

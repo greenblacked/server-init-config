@@ -313,6 +313,7 @@ main() {
   vm_make_seed "$TMP/seed.iso" "$KEYFILE.pub" "$CI_ROOT/$VM_USERDATA" "$key"
   vm_first_boot "$image" "$TMP/seed.iso" "$VM_BOOT"
   log "ssh is up after ${SECONDS} s"
+  local boot1; boot1=$(vm_ssh root 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
   endgroup
 
   group "1. cloud-init finished without errors"
@@ -329,6 +330,26 @@ main() {
   # --wait prints progress dots without a newline, so the first line is ".....status: done"; strip them before matching. The
   # extended status must be a plain "done" too ("degraded done" means a module reported a recoverable error).
   local ci_txt; ci_txt=$(sed 's/^\.*//' "$ci_out")
+  # Rocky runner files: when Docker cannot start on the image's old kernel they reboot once, from a unit ordered after
+  # cloud-final.service, so cloud-init has already finished and reported (the status above is the first boot's). Wait for the new
+  # boot and for cloud-init there before the remaining checks, else ssh drops under them. "Expected" = the log the file writes
+  # exists (or ssh is already dropping: exit 255, retried a few times).
+  if [[ "$VM_ROLE" == runner && -n "$boot1" ]]; then
+    local rb=255 n bn
+    for n in 1 2 3; do rb=0; vm_ssh root 'test -s /var/log/ci-docker-reboot.log' >/dev/null 2>&1 || rb=$?; (( rb == 255 )) || break; sleep 5; done
+    if (( rb == 0 || rb == 255 )); then
+      log "first boot: Docker reboot expected, waiting for the new boot"
+      for ((n = 0; n < 120; n++)); do
+        vm_alive || die "qemu exited during the first-boot reboot"
+        bn=$(vm_ssh root 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
+        [[ "$bn" =~ ^[0-9a-f-]{32,36}$ && "$bn" != "$boot1" ]] && break
+        sleep 5
+      done
+      (( n < 120 )) && pass "rebooted once on its own at the end of the first boot (new boot id)" || fail "the first-boot Docker reboot did not happen within about 10 min"
+      vm_wait_ssh 300
+      timeout 1200 ssh "${SSH_BASE[@]}" root@127.0.0.1 'cloud-init status --wait' >/dev/null 2>&1 || true
+    fi
+  fi
   local js errs race=0
   js=$(vm_ssh root 'cloud-init status --format json' 2>/dev/null || true)
   if [[ "${key}" == fedora44 && -n "$js" ]] && grep -qx 'extended_status: degraded done' <<<"$ci_txt"; then
