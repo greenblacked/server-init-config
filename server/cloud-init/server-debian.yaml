@@ -37,9 +37,8 @@ write_files:
       # Base setup for a general (non-runner) server on Ubuntu 26.04 (also 24.04) or Debian 13, x86_64 or ARM64:
       # SSH keys only, admin user with sudo, ufw, fail2ban for SSH, automatic security updates,
       # Docker Engine + Compose, swap + sysctl, journald limit, time sync, admin tools, shell history.
-      # Also safe on Hetzner Apps images (Ubuntu 24.04 with Coolify, Docker CE, GitLab CE, Jitsi Meet, Owncast,
-      # PhotoPrism, Prometheus Grafana or RustDesk preinstalled): existing Docker, firewall rules and app
-      # configuration are never touched, only the app's own ports are added to ufw.
+      # Also safe on Hetzner Apps images (Coolify, Docker CE, GitLab CE, Jitsi Meet, Owncast, PhotoPrism, Prometheus Grafana,
+      # RustDesk): existing Docker, firewall rules and app configuration are never touched, only the app's ports are added to ufw.
       # Root keeps login by SSH key on port 22, so nothing here can lock you out.
       #
       # Self-contained and idempotent: it writes its own config files, so it runs the same from a paste
@@ -59,7 +58,7 @@ write_files:
         # return when sourced into an interactive shell by mistake, so the shell is not closed
         *) echo "this script is for Ubuntu 26.04 / Ubuntu 24.04 / Debian 13, found ${PRETTY_NAME:-unknown}" >&2; return 1 2>/dev/null || exit 1 ;;
       esac
-      # No prompts from apt, dpkg or needrestart, and wait for the apt lock that cloud-init or unattended-upgrades may hold.
+      # No prompts from apt, dpkg or needrestart.
       export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 
       # First run: save the settings given in the environment (or defaults) so reruns use the same values.
@@ -160,6 +159,8 @@ write_files:
       -fs.protected_regular = 2
       net.ipv4.conf.all.log_martians = 1
       EOF
+        # ufw re-applies its own sysctl.conf at every start, with log_martians=0: keep the value above.
+        sed -i 's#^\(net/ipv4/conf/.*/log_martians\)=0#\1=1#' /etc/ufw/sysctl.conf 2>/dev/null || true
         # No core dumps: they can hold keys and tokens.
         put /etc/security/limits.d/50-nocore.conf 0644 <<'EOF'
       * hard core 0
@@ -170,7 +171,7 @@ write_files:
       ProcessSizeMax=0
       EOF
         # The journal backend is needed because Debian 13 has no /var/log/auth.log. Bans go through nftables,
-        # which works whether or not ufw is active (ufw uses its own chains). Both are also the package defaults.
+        # which works with or without ufw. Both are also the package defaults.
         # The jail must watch the port sshd really listens on (bootstrap --port), not only the default 22.
         sshd_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -un | paste -sd, -) || true
         put /etc/fail2ban/jail.d/50-sshd.local 0644 <<EOF
@@ -372,7 +373,7 @@ write_files:
           # sets up the nginx site with a certificate (443). jitsi-videobridge2 takes media on 10000/udp
           # (Jitsi quick-install guide); coturn (3478/udp, 5349/tcp) is added in firewall() when installed.
           jitsi) APP_PORTS="80/tcp 443/tcp 10000/udp" ;;
-          # lamp, wordpress and nextcloud run the native Apache of the image (/opt/hcloud/{lamp,wp,nextcloud}_setup.sh).
+          # lamp, wordpress, nextcloud: the image's native Apache.
           lamp|wordpress|nextcloud) APP_PORTS="80/tcp 443/tcp" ;;
           # wireguard: wg on WGUI_SERVER_LISTEN_PORT=51820/udp plus Caddy on 80/443 for the UI. Its
           # /etc/nftables.conf starts with "flush ruleset" and nftables.service is enabled, so the image owns the
