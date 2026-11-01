@@ -15,10 +15,10 @@ updates:
     commit-message:
       prefix: ci
 
-  # Compose files with literal, pinned images (the torrserver one has a Caddy default pinned by digest).
+  # Compose files whose images are literal and tag-pinned. other/torrserver is left out: both of its images come from
+  # ${VAR} / ${VAR:-default} interpolation, which Dependabot's compose parser is not known to resolve.
   - package-ecosystem: docker-compose
     directories:
-      - /other/torrserver
       - /runner/stacks/logging
       - /runner/stacks/monitoring
       - /runner/stacks/npm-cache
