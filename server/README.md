@@ -173,6 +173,8 @@ Paste the file for the OS into the Hetzner Console field **Cloud config** when y
 
 On CentOS Stream, Rocky and AlmaLinux 10 the first boot upgrades the packages. If that installs a newer kernel and Docker cannot start on the running one, the init finishes its steps and then reboots the server once (this happens only under cloud-init, never on a rerun or from the bootstrap); the SSH session drops for about a minute, and Docker is up afterwards. The init then ends with "done, reboot pending for docker" instead of "done, all steps ok" and leaves a `docker-reboot-pending` line in `/var/log/server-init-failed.log`; Docker removes that line when it starts after the reboot, so a line that is still there means the reboot did not help. What the failed start printed stays in `/var/log/server-init-docker.log`.
 
+On Fedora 44, cloud-init may report `degraded done` because of an image-side hostname race; the hostname is still set correctly.
+
 After the first boot, run the bootstrap above; it adds `health` and the tools that do not fit into the Cloud config. To check the result first. Laptop, any directory:
 
 ```bash
