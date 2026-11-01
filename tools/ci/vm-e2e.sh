@@ -139,12 +139,16 @@ vm_first_boot() { # IMAGE SEED BOOT
 # Pull diagnostics out of the VM (best effort, redacted) into $W/guest/.
 vm_collect() {
   local g="$W/guest" f
+  # vm_collect runs from cleanup(), after the reboot phase, so a plain `journalctl -b` is the LAST boot. The failures of interest (cloud-init
+  # local stage, hostnamectl without a bus) happen on the FIRST boot, so select it by boot id: the oldest line of --list-boots. If the journal
+  # is volatile the first boot is gone and this falls back to the current one (the listing printed below shows which).
+  local fb='FB=$(journalctl --list-boots --no-pager 2>/dev/null | grep -oE -m1 "[0-9a-f]{32}"); B="-b ${FB:-0}"'
   mkdir -p "$g"
   vm_alive || return 0
   for f in /var/log/cloud-init.log /var/log/cloud-init-output.log /var/log/server-init-failed.log /var/log/server-init-docker.log /var/log/ci-bootstrap-failed.log /etc/server-init.conf; do
     timeout 60 ssh "${SSH_BASE[@]}" "root@127.0.0.1" "cat $f" > "$g/$(basename "$f")" 2>/dev/null || rm -f "$g/$(basename "$f")"
   done
-  timeout 120 ssh "${SSH_BASE[@]}" "root@127.0.0.1" '
+  timeout 120 ssh "${SSH_BASE[@]}" "root@127.0.0.1" "$fb"'
     echo "--- cloud-init status"; cloud-init status --long 2>&1
     echo "--- failed units"; systemctl --failed --no-pager 2>&1
     echo "--- swap"; cat /proc/swaps; free -m
@@ -152,24 +156,30 @@ vm_collect() {
     echo "--- firewall"; { ufw status verbose; firewall-cmd --list-all; nft list ruleset | head -80; iptables -S | head -60; } 2>&1
     echo "--- docker"; docker ps -a 2>&1 | head -20
     echo "--- hostname"; hostname; hostnamectl 2>&1 | head -12; systemctl status systemd-hostnamed --no-pager 2>&1 | head -15
-    echo "--- hostname and bus in the journal with monotonic time (what hostnamectl printed in the cloud-init local stage, and whether D-Bus was up yet)"
-    journalctl -b -o short-monotonic --no-pager -u systemd-hostnamed -u dbus -u dbus-broker -u cloud-init-local -u cloud-init -g "hostname|bus|D-Bus|Failed to set" -n 120 2>&1 | cut -c1-400
+    echo "--- boots in the journal (the first one is used below; cleanup runs after the reboot phase, so -b alone would be the last boot)"
+    journalctl --list-boots --no-pager 2>&1 | cut -c1-200; echo "first boot id: ${FB:-none (volatile journal: current boot used)}"
+    echo "--- hostname and bus in the journal of the FIRST boot with monotonic time (what hostnamectl printed in the cloud-init local stage, and whether D-Bus was up yet)"
+    journalctl $B -o short-monotonic --no-pager -u systemd-hostnamed -u dbus -u dbus-broker -u dbus.socket -u cloud-init-main -u cloud-init-local -u cloud-init -g "hostname|bus|D-Bus|Failed to set" -n 120 2>&1 | cut -c1-400
     echo "--- journal, warnings and worse, this boot"; journalctl -b -p warning --no-pager -n 300 2>&1
-    echo "--- journal of the key units"; journalctl -b --no-pager -n 200 -u cloud-init-local -u cloud-init -u cloud-config -u cloud-final -u ssh -u sshd -u docker -u firewalld -u fail2ban 2>&1' \
+    echo "--- journal of the key units"; journalctl -b --no-pager -n 200 -u cloud-init-main -u cloud-init-local -u cloud-init -u cloud-config -u cloud-final -u ssh -u sshd -u docker -u firewalld -u fail2ban 2>&1' \
     > "$g/diagnostics.txt" 2>&1 || true
   [[ -f "$W/serial.log" ]] && cp "$W/serial.log" "$g/serial.log"
   for f in "$W"/qemu*.log; do [[ -f "$f" ]] && cp "$f" "$g/"; done
   for f in "$g"/*; do [[ -f "$f" ]] && ci_redact_file "$f"; done
   if [[ -f "$g/cloud-init.log" ]] && grep -qi 'hostname' "$g/cloud-init.log"; then
     echo "--- hostname lines of cloud-init.log (with the command's stderr that follows a failure)"; grep -i -A6 'hostname' "$g/cloud-init.log" | cut -c1-400 | head -n 120
-    # Why the local stage had no system bus: versions, how cloud-init-local is ordered, and when dbus came up relative to it.
-    echo "--- versions and boot ordering (cloud-init-local against dbus and hostnamed)"
-    timeout 60 ssh "${SSH_BASE[@]}" "root@127.0.0.1" '
+    # Why the local stage had no system bus. Since cloud-init 24.3 every stage runs in cloud-init-main.service (cloud-init-local.service is
+    # only a shim), so its After/Requires on dbus.socket is what matters; the unit timings come from the journal of the FIRST boot (the
+    # unit properties of a running system only describe the last boot).
+    echo "--- versions and boot ordering (cloud-init-main against dbus and hostnamed)"
+    timeout 60 ssh "${SSH_BASE[@]}" "root@127.0.0.1" "$fb"'
+      echo "first boot id: ${FB:-none (volatile journal: current boot used)}"
       rpm -q cloud-init systemd dbus-broker dbus-daemon 2>&1 | head -6
-      systemctl cat cloud-init-local.service 2>&1 | grep -E "^(#|\[|Description|DefaultDependencies|After|Before|Wants|Requires)" | head -20
-      systemctl show dbus.socket dbus-broker.service dbus.service systemd-hostnamed.service cloud-init-local.service -p Id -p ActiveEnterTimestampMonotonic -p After 2>&1 | cut -c1-300 | head -40
-      ls -ld /run/dbus /run/dbus/system_bus_socket 2>&1
-      journalctl -b -o short-monotonic --no-pager -g "Starting cloud-init|Listening on dbus|Started dbus|D-Bus|hostnamed|Cloud-init: Local" -n 30 2>&1 | cut -c1-240' 2>&1 | ci_redact || true
+      for u in cloud-init-main cloud-init-local; do echo "# systemctl cat $u.service"; systemctl cat $u.service 2>&1 | grep -E "^(#|\[|Description|DefaultDependencies|After|Before|Wants|Requires|ExecStart)" | head -20; done
+      systemctl show cloud-init-main.service cloud-init-local.service dbus.socket dbus-broker.service dbus.service systemd-hostnamed.service -p Id -p After -p Requires -p Wants 2>&1 | cut -c1-300 | head -60
+      echo "# current boot: system bus socket"; ls -ld /run/dbus /run/dbus/system_bus_socket 2>&1
+      echo "# first boot: unit start order with monotonic time"
+      journalctl $B -o short-monotonic --no-pager -g "Starting cloud-init|Listening on D-Bus|Started D-Bus|dbus|D-Bus|hostnamed|Cloud-init: Local|Finished cloud-init" -n 40 2>&1 | cut -c1-240' 2>&1 | ci_redact || true
   fi
   return 0
 }
