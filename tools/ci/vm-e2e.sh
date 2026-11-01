@@ -74,6 +74,7 @@ vm_start() { # IMAGE SEED BOOT
   local args=(-machine q35 "${accel[@]}" -m "$MEM_MB" -smp "$CPUS"
     -display none -serial "file:$W/serial.log" -monitor none -no-user-config -nodefaults
     -pidfile "$PIDFILE" -daemonize
+    -d "guest_errors,cpu_reset" -D "$W/qemu.log"
     -drive "file=$overlay,if=virtio,format=qcow2,cache=unsafe"
     -drive "file=$seed,if=virtio,format=raw,readonly=on"
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" -device "virtio-net-pci,netdev=n0"
@@ -100,18 +101,33 @@ vm_wait_ssh() { # SECONDS [SOFT]
   done
   echo "serial console: $(wc -l < "$W/serial.log" 2>/dev/null || echo 0) lines, GRUB menu shown $(grep -c 'Booting `' "$W/serial.log" 2>/dev/null || true) time(s); head and tail:"
   { head -n 20 "$W/serial.log"; echo '[...]'; tail -n 40 "$W/serial.log"; } 2>/dev/null | ci_redact || true
+  echo "qemu log, $(grep -c 'CPU Reset' "$W/qemu.log" 2>/dev/null || true) 'CPU Reset' lines (one per vCPU at power-on, more means the guest reset itself); tail:"
+  tail -n 30 "$W/qemu.log" 2>/dev/null | ci_redact || true
   [[ "${2:-}" == 1 ]] && return 1
   die "no ssh login as root within $1 s (see the serial console above)"
 }
 
-# First boot. A guest that never gets to sshd (seen as a GRUB menu printed over and over, or a silent console) on some runner
-# CPUs with "-cpu host" is started once more with a fixed baseline CPU model before the run is given up.
+# Stop qemu and wait until it is gone: it is daemonized, so it cannot be waited on and the disk lock must be free before the
+# next qemu-img create / qemu-system on the same overlay.
+vm_stop() {
+  local n=0
+  kill "$QEMU_PID" 2>/dev/null || true
+  while vm_alive && (( n++ < 50 )); do sleep 0.2; done
+  if vm_alive; then kill -9 "$QEMU_PID" 2>/dev/null || true; n=0; while vm_alive && (( n++ < 25 )); do sleep 0.2; done; fi
+  ! vm_alive || die "qemu pid ${QEMU_PID} does not exit"
+}
+
+# First boot. A guest that never gets to sshd (seen as a GRUB menu printed over and over, or a silent console) is started once
+# more with a fixed baseline CPU model before the run is given up. The logs so far point at the image, not the CPU (the same
+# runner CPUs boot other images), so this is cheap insurance and not the fix; qemu's own log ($W/qemu.log: guest errors and
+# CPU resets) says what the guest did. Not with VM_ACCEL=tcg: that already runs -cpu max, a retry would repeat the same boot.
 vm_first_boot() { # IMAGE SEED BOOT
   local fast=${BOOT_FAST_TIMEOUT:-300}
   vm_start "$1" "$2" "$3"
+  if [[ "${VM_ACCEL:-kvm}" == tcg ]]; then vm_wait_ssh "$BOOT_TIMEOUT"; return; fi
   vm_wait_ssh "$fast" 1 && return 0
   warn "no ssh within ${fast} s with -cpu ${VM_CPU:-host}; retrying once with -cpu Haswell-noTSX (x86-64-v3, fixed feature set)"
-  kill "$QEMU_PID" 2>/dev/null || true; sleep 2; : > "$W/serial.log"
+  vm_stop; : > "$W/serial.log"; mv -f "$W/qemu.log" "$W/qemu-first-try.log" 2>/dev/null || true
   VM_CPU=Haswell-noTSX vm_start "$1" "$2" "$3"
   vm_wait_ssh $(( BOOT_TIMEOUT > fast ? BOOT_TIMEOUT - fast : 300 ))
 }
@@ -131,11 +147,16 @@ vm_collect() {
     echo "--- listening"; ss -ltn 2>&1
     echo "--- firewall"; { ufw status verbose; firewall-cmd --list-all; nft list ruleset | head -80; iptables -S | head -60; } 2>&1
     echo "--- docker"; docker ps -a 2>&1 | head -20
+    echo "--- hostname"; hostname; hostnamectl 2>&1 | head -12; systemctl status systemd-hostnamed --no-pager 2>&1 | head -15
     echo "--- journal, warnings and worse, this boot"; journalctl -b -p warning --no-pager -n 300 2>&1
     echo "--- journal of the key units"; journalctl -b --no-pager -n 200 -u cloud-init-local -u cloud-init -u cloud-config -u cloud-final -u ssh -u sshd -u docker -u firewalld -u fail2ban 2>&1' \
     > "$g/diagnostics.txt" 2>&1 || true
   [[ -f "$W/serial.log" ]] && cp "$W/serial.log" "$g/serial.log"
+  for f in "$W"/qemu*.log; do [[ -f "$f" ]] && cp "$f" "$g/"; done
   for f in "$g"/*; do [[ -f "$f" ]] && ci_redact_file "$f"; done
+  if [[ -f "$g/cloud-init.log" ]] && grep -qi 'hostname' "$g/cloud-init.log"; then
+    echo "--- hostname lines of cloud-init.log"; grep -i 'hostname' "$g/cloud-init.log" | cut -c1-400 | head -n 60
+  fi
   return 0
 }
 
