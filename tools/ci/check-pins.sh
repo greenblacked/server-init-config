@@ -16,14 +16,14 @@ for f in "${files[@]}"; do
   # uses: owner/repo[/path]@<40 hex>  (a trailing comment is fine); ./local actions and docker:// are checked separately.
   while IFS=: read -r no ref; do
     ref="${ref#"${ref%%[![:space:]]*}"}"
-    value=$(sed -E 's/^-?[[:space:]]*uses:[[:space:]]*//; s/[[:space:]]+#.*$//; s/^["'\'']//; s/["'\'']$//' <<<"$ref")
+    value=$(sed -E 's/^-?[[:space:]]*(\{[[:space:]]*)?uses:[[:space:]]*//; s/[[:space:]]+#.*$//; s/[[:space:]]*\}[[:space:]]*$//; s/,.*$//; s/^["'\'']//; s/["'\'']$//' <<<"$ref")
     case "$value" in
       ./*) pass "${name}:${no} local action ${value}" ;;
-      docker://*@sha256:*) pass "${name}:${no} ${value}" ;;
+      docker://*@sha256:*) if [[ "${value##*@sha256:}" =~ ^[0-9a-f]{64}$ ]]; then pass "${name}:${no} ${value}"; else fail "${name}:${no} '${value}' has no valid 64-hex sha256 digest"; fi ;;
       *@*) if [[ "${value##*@}" =~ ^[0-9a-f]{40}$ ]]; then pass "${name}:${no} ${value%%@*} pinned"; else fail "${name}:${no} '${value}' is not pinned to a 40-hex commit SHA"; fi ;;
       *) fail "${name}:${no} '${value}' has no @ref" ;;
     esac
-  done < <(grep -nE '^[[:space:]]*-?[[:space:]]*uses:' "$f" || true)
+  done < <(grep -nE '^[[:space:]]*(-[[:space:]]*)?(\{[[:space:]]*)?uses:' "$f" || true)
   if grep -qE '^permissions:' "$f"; then pass "${name} has a top-level permissions block"; else fail "${name} has no top-level 'permissions:' block"; fi
 done
 finish
