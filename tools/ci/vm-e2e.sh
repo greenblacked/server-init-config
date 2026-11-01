@@ -228,7 +228,11 @@ main() {
   done
   cat "$ci_out"
   expect_eq "cloud-init status --wait exit code" "$ci_rc" 0
-  grep -q '^status: done' "$ci_out" && pass "cloud-init status is done" || fail "cloud-init status is not 'done'"
+  # --wait prints progress dots without a newline, so the first line is ".....status: done"; strip them before matching. The
+  # extended status must be a plain "done" too ("degraded done" means a module reported a recoverable error).
+  local ci_txt; ci_txt=$(sed 's/^\.*//' "$ci_out")
+  grep -qx 'status: done' <<<"$ci_txt" && pass "cloud-init status is done" || fail "cloud-init status is not 'done'"
+  grep -qx 'extended_status: done' <<<"$ci_txt" && pass "cloud-init extended status is done" || fail "cloud-init extended status is not 'done' ($(grep -m1 '^extended_status:' <<<"$ci_txt"))"
   local js errs
   js=$(vm_ssh root 'cloud-init status --format json' 2>/dev/null || true)
   if [[ -n "$js" ]]; then
