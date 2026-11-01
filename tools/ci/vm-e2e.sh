@@ -139,7 +139,7 @@ vm_collect() {
   local g="$W/guest" f
   mkdir -p "$g"
   vm_alive || return 0
-  for f in /var/log/cloud-init.log /var/log/cloud-init-output.log /var/log/server-init-failed.log /var/log/ci-bootstrap-failed.log /etc/server-init.conf; do
+  for f in /var/log/cloud-init.log /var/log/cloud-init-output.log /var/log/server-init-failed.log /var/log/server-init-docker.log /var/log/ci-bootstrap-failed.log /etc/server-init.conf; do
     timeout 60 ssh "${SSH_BASE[@]}" "root@127.0.0.1" "cat $f" > "$g/$(basename "$f")" 2>/dev/null || rm -f "$g/$(basename "$f")"
   done
   timeout 120 ssh "${SSH_BASE[@]}" "root@127.0.0.1" '
@@ -202,7 +202,20 @@ snapshot() {
 
 failed_log_empty() { # DESC
   if vm_ssh root '[ ! -e /var/log/server-init-failed.log ] || [ ! -s /var/log/server-init-failed.log ]'; then pass "$1: /var/log/server-init-failed.log absent or empty"
-  else fail "$1: /var/log/server-init-failed.log has entries: $(vm_ssh root 'tail -n 20 /var/log/server-init-failed.log' 2>&1 | tr '\n' '|' | cut -c1-600)"; fi
+  else
+    # the whole file, one entry per line (a one-line summary cut off the dockerd error that mattered)
+    echo "--- /var/log/server-init-failed.log ($1)"; vm_ssh root 'cat /var/log/server-init-failed.log' 2>&1 | cut -c1-400 | head -n 120 | ci_redact || true
+    fail "$1: /var/log/server-init-failed.log has entries (listed above): $(vm_ssh root 'head -n 3 /var/log/server-init-failed.log' 2>&1 | tr '\n' '|' | cut -c1-300)"
+  fi
+}
+
+# The Docker start log of the init (server-init-docker.log, written only when a start attempt failed), shown whenever it exists:
+# a reboot may have cured Docker, the log still says what failed.
+show_docker_log() { # DESC
+  if vm_ssh root 'test -s /var/log/server-init-docker.log'; then
+    echo "--- /var/log/server-init-docker.log ($1): Docker did not start on a try"
+    vm_ssh root 'cat /var/log/server-init-docker.log' 2>&1 | cut -c1-300 | head -n 300 | ci_redact || true
+  fi
 }
 
 reboot_vm() {
@@ -256,12 +269,13 @@ main() {
 
   group "1. cloud-init finished without errors"
   local ci_out="$W/cloud-init-status.txt" ci_rc=0 i
-  # sshd comes up while cloud-init still runs; the wait can be cut by an sshd reload or restart, so it is retried.
-  for i in 1 2 3; do
+  # sshd comes up while cloud-init still runs; the wait can be cut by an sshd reload or restart, or by the one reboot the EL10
+  # init does at the end of the first boot when a new kernel was installed (docker_start), so it is retried.
+  for i in 1 2 3 4 5; do
     ci_rc=0
     timeout 1200 ssh "${SSH_BASE[@]}" root@127.0.0.1 'cloud-init status --wait --long' > "$ci_out" 2>&1 || ci_rc=$?
     (( ci_rc == 255 )) || break
-    log "ssh dropped while waiting for cloud-init (try ${i}), retrying"; vm_wait_ssh 120
+    log "ssh dropped while waiting for cloud-init (try ${i}), retrying"; vm_wait_ssh 180
   done
   cat "$ci_out"
   expect_eq "cloud-init status --wait exit code" "$ci_rc" 0
@@ -287,6 +301,7 @@ main() {
   if [[ "$VM_ROLE" == server ]]; then
     group "2. the init: no failed step, assertions (nothing allow-listed)"
     failed_log_empty "first boot"
+    show_docker_log "first boot"
     vm_ssh root 'grep -h "done, all steps ok\|done with failures" /var/log/cloud-init-output.log | tail -2' | sed 's/^/  init: /' || true
     vm_ssh root 'grep -q "done, all steps ok" /var/log/cloud-init-output.log' && pass "server-init reported 'done, all steps ok'" || fail "server-init did not report 'done, all steps ok' in cloud-init-output.log"
     # copy the repo in (not .git, not outputs, not the image cache) and run the same assertions the container test runs
