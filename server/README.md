@@ -158,7 +158,7 @@ A firewall mistake that cuts SSH is fixed from the Hetzner web console. The init
 | `sudo: health: command not found` | `secure_path` lacks `/usr/local/bin`. Check `/etc/sudoers.d/50-secure-path` (installed with `health`) and `/etc/sudoers.d/90-ops`, or run `sudo /usr/local/bin/health`. |
 | `SHA1` GPG warning on EL10 | Harmless; packages are still verified. |
 | A service from Docker is open to the world | Published ports (`-p 8080:80`) bypass firewalld and ufw. Bind to `127.0.0.1:8080:80` unless it should be public. |
-| A step failed | `sudo cat /var/log/server-init-failed.log`, fix the cause, rerun the bootstrap. |
+| A step failed | `sudo cat /var/log/server-init-failed.log` (Docker: also `/var/log/server-init-docker.log`), fix the cause, rerun the bootstrap. |
 
 ## Cloud config
 
@@ -170,6 +170,8 @@ Paste the file for the OS into the Hetzner Console field **Cloud config** when y
 | `cloud-init/server-el10.yaml` | CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 |
 | `cloud-init/server-debian.yaml` | Ubuntu 26.04, Debian 13, Hetzner Apps |
 | `cloud-init/server-opensuse.yaml` | openSUSE Leap 16.0 |
+
+On CentOS Stream, Rocky and AlmaLinux 10 the first boot upgrades the packages. If that installs a newer kernel and Docker cannot start on the running one, the init finishes its steps and then reboots the server once (this happens only under cloud-init, never on a rerun or from the bootstrap); the SSH session drops for about a minute, and Docker is up afterwards. What the failed start printed stays in `/var/log/server-init-docker.log`.
 
 After the first boot, run the bootstrap above; it adds `health` and the tools that do not fit into the Cloud config. To check the result first. Laptop, any directory:
 
