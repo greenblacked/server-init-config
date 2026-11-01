@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # server-cleanup: safe cleanup for a general server. Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
 # Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
-# Settings: /etc/server-init.conf (CLEAN_JOURNAL_TIME, CLEAN_JOURNAL_SIZE, CLEAN_AUTOREMOVE, CLEAN_DOCKER_UNUSED_IMAGES).
+# Settings: CLEAN_* in /etc/server-init.conf.
 set -uo pipefail
 CONF=${SERVER_INIT_CONF:-/etc/server-init.conf}
 STATE=${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}
@@ -60,7 +60,7 @@ run() {
   return 0
 }
 
-# prune_old DESC DAYS DIR [find tests...]: delete regular files older than DAYS under DIR, same filesystem.
+# prune_old DESC DAYS DIR [find tests...]: delete files older than DAYS under DIR (one filesystem).
 prune_old() {
   local desc=$1 days=$2 dir=$3 n kb; shift 3
   case $dir in /|/home*|/root*|/srv*|/opt*|/var/lib/docker*) log error "refusing protected path $dir"; ERRORS=$((ERRORS + 1)); return 0 ;; esac
