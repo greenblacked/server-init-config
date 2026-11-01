@@ -162,6 +162,14 @@ vm_collect() {
   for f in "$g"/*; do [[ -f "$f" ]] && ci_redact_file "$f"; done
   if [[ -f "$g/cloud-init.log" ]] && grep -qi 'hostname' "$g/cloud-init.log"; then
     echo "--- hostname lines of cloud-init.log (with the command's stderr that follows a failure)"; grep -i -A6 'hostname' "$g/cloud-init.log" | cut -c1-400 | head -n 120
+    # Why the local stage had no system bus: versions, how cloud-init-local is ordered, and when dbus came up relative to it.
+    echo "--- versions and boot ordering (cloud-init-local against dbus and hostnamed)"
+    timeout 60 ssh "${SSH_BASE[@]}" "root@127.0.0.1" '
+      rpm -q cloud-init systemd dbus-broker dbus-daemon 2>&1 | head -6
+      systemctl cat cloud-init-local.service 2>&1 | grep -E "^(#|\[|Description|DefaultDependencies|After|Before|Wants|Requires)" | head -20
+      systemctl show dbus.socket dbus-broker.service dbus.service systemd-hostnamed.service cloud-init-local.service -p Id -p ActiveEnterTimestampMonotonic -p After 2>&1 | cut -c1-300 | head -40
+      ls -ld /run/dbus /run/dbus/system_bus_socket 2>&1
+      journalctl -b -o short-monotonic --no-pager -g "Starting cloud-init|Listening on dbus|Started dbus|D-Bus|hostnamed|Cloud-init: Local" -n 30 2>&1 | cut -c1-240' 2>&1 | ci_redact || true
   fi
   return 0
 }
