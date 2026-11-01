@@ -35,6 +35,7 @@ jobs:
         with:
           persist-credentials: false
       - name: TorrServer end to end
+        timeout-minutes: 26
         run: sudo -E tools/ci/stack-torrserver.sh
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}
@@ -54,6 +55,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Lampa stack end to end
+        timeout-minutes: 55
         run: sudo -E tools/ci/stack-lampa.sh
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}

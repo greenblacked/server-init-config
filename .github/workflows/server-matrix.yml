@@ -52,6 +52,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Server init end to end (${{ matrix.image }})
+        timeout-minutes: 35
         run: tools/ci/server-e2e.sh "${{ matrix.image }}"
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}
