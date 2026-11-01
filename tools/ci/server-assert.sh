@@ -4,6 +4,9 @@
 #   KIND          fedora | el10 | debian | opensuse
 #   FAILED_STEPS  steps server-init reported as failed in the container (already checked against the allow-list by the driver);
 #                 assertions that depend on a failed step are skipped with a warning instead of failing twice.
+# Env ASSERT_MODE=cloud-init: the machine was set up by the pasted cloud-init file alone (tools/ci/vm-e2e.sh), not by bootstrap.sh.
+#   The cloud-init file does not install the tools step (health, srv, server-update.timer), so those checks are replaced by the
+#   timers the cloud-init file itself enables.
 # Prints PASS/FAIL/WARN lines; exits 1 when something failed.
 set -uo pipefail
 KIND="${1:?kind}"
@@ -94,10 +97,16 @@ if step_failed fail2ban; then warn "fail2ban step failed (allowed), skipped"; el
 fi
 
 echo "== automatic updates"
+CLOUD_INIT_ONLY=0; [[ "${ASSERT_MODE:-}" == cloud-init ]] && CLOUD_INIT_ONLY=1
 if step_failed auto-updates; then warn "auto-updates step failed (allowed), skipped"; else
   case "$KIND" in
-    el10 | fedora) check "server-update.timer is active (install-tools)" systemctl is-active --quiet server-update.timer
-                   check "server-cleanup.timer is active" systemctl is-active --quiet server-cleanup.timer ;;
+    el10 | fedora) if (( CLOUD_INIT_ONLY )); then
+                     if systemctl is-active --quiet dnf-automatic.timer || systemctl is-active --quiet dnf5-automatic.timer; then pass "dnf automatic timer is active"; else fail "no dnf automatic timer is active"; fi
+                     check "server-cleanup.timer is active" systemctl is-active --quiet server-cleanup.timer
+                   else
+                   check "server-update.timer is active (install-tools)" systemctl is-active --quiet server-update.timer
+                   check "server-cleanup.timer is active" systemctl is-active --quiet server-cleanup.timer
+                   fi ;;
     debian)        check "apt-daily-upgrade.timer is active" systemctl is-active --quiet apt-daily-upgrade.timer
                    [[ -f /etc/apt/apt.conf.d/50unattended-upgrades ]] && pass "unattended-upgrades is configured" || fail "no unattended-upgrades config" ;;
     opensuse)      check "server-security-updates.timer is active" systemctl is-active --quiet server-security-updates.timer
@@ -105,8 +114,19 @@ if step_failed auto-updates; then warn "auto-updates step failed (allowed), skip
   esac
 fi
 
-echo "== health and tools run without shell errors"
 BAD_RE='unbound variable|syntax error|bad substitution|: line [0-9]+: |command not found|unexpected EOF'
+if (( CLOUD_INIT_ONLY )); then
+  echo "== tools installed by the cloud-init file"
+  if command -v server-cleanup >/dev/null 2>&1; then
+    out=$(server-cleanup --dry-run 2>&1); rc=$?
+    (( rc == 0 )) && pass "server-cleanup --dry-run" || fail "server-cleanup --dry-run exit ${rc}: $(tail -3 <<<"$out")"
+  else
+    pass "no server-cleanup command on this OS (the cloud-init file does not install health or srv)"
+  fi
+  echo "ASSERT-DONE"
+  exit $(( fails > 0 ))
+fi
+echo "== health and tools run without shell errors"
 for args in "--brief" "-q --no-color"; do
   # shellcheck disable=SC2086
   out=$(/usr/local/bin/health $args 2>&1); rc=$?
