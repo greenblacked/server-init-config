@@ -18,7 +18,7 @@ warn() { echo "  WARN  $*"; echo "::warning::$PHASE: $*"; }
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$d"; else fail "$d"; fi; }
 # retry SECONDS CMD...   the command may need a moment after boot (units are started in parallel)
 retry() { local n=$1 i; shift; for ((i = 0; i < n; i++)); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
-okw() { local d="$1" n="$2"; shift 2; if retry "$n" "$@"; then pass "$d"; else fail "$d"; fi; }
+okw() { local d="$1" n="$2"; shift 2; if retry "$n" "$@"; then pass "$d"; else fail "$d"; return 1; fi; }
 
 echo "== ${ROLE} ${KIND}, phase ${PHASE}: $(. /etc/os-release; echo "${PRETTY_NAME:-$ID}"), kernel $(uname -r), boot $(cat /proc/sys/kernel/random/boot_id | cut -c1-8)"
 
@@ -46,8 +46,15 @@ sysctl_file() { # file
   if (( n > 0 )); then pass "sysctl: ${n} value(s) from ${f} are live (${skipped} optional key(s) absent)"; else fail "sysctl: no value of ${f} could be checked"; fi
 }
 
+# Why Docker is down, in the log of the run that sees it (the journal of the key units is also collected at the end).
+docker_diag() {
+  echo "  --- docker is down: kernel $(uname -r); installed: $(rpm -q kernel-core 2>&1 | tr '\n' ' ')"
+  { systemctl status docker docker.socket containerd -l --no-pager 2>&1 | head -40
+    journalctl -b -u docker -u docker.socket -u containerd --no-pager -n 60 2>&1; } | cut -c1-300 | sed 's/^/  docker: /'
+}
+
 docker_works() {
-  okw "docker.service is active" 60 systemctl is-active --quiet docker
+  okw "docker.service is active" 60 systemctl is-active --quiet docker || docker_diag
   ok "docker daemon answers (docker info)" docker info
   ok "docker compose plugin works" docker compose version
   local img out
