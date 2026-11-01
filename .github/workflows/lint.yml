@@ -1,7 +1,7 @@
 name: lint
 
 # Static checks and the offline test suites. Cheap (a few minutes), so it runs on every pull request and on pushes to main (a pull request branch is covered by the pull_request run, not twice).
-# Same checks locally: tools/ci/lint.sh [shell|render|cloud-init|server-tools|yaml|dockerfiles|compose|actionlint]
+# Same checks locally: tools/ci/lint.sh [shell|render|cloud-init|server-tools|yaml|dockerfiles|compose|actionlint|unit]
 
 on:
   push:
@@ -39,6 +39,8 @@ jobs:
         run: tools/ci/lint.sh compose
       - name: actionlint
         run: tools/ci/lint.sh actionlint
+      - name: Unit tests (shell helpers)
+        run: tools/ci/lint.sh unit
 
   tests:
     name: cloud-init and server tools
