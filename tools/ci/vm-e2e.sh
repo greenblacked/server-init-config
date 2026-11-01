@@ -69,7 +69,7 @@ vm_alive() { [[ -n "$QEMU_PID" ]] && kill -0 "$QEMU_PID" 2>/dev/null; }
 vm_start() { # IMAGE SEED BOOT
   local image=$1 seed=$2 boot=$3 overlay="$TMP/disk.qcow2" fw
   qemu-img create -q -f qcow2 -F qcow2 -b "$(realpath "$image")" "$overlay" "${DISK_GB}G"
-  local accel=(-enable-kvm -cpu host)
+  local accel=(-enable-kvm -cpu "${VM_CPU:-host}")
   [[ "${VM_ACCEL:-kvm}" == tcg ]] && accel=(-accel tcg -cpu max)
   local args=(-machine q35 "${accel[@]}" -m "$MEM_MB" -smp "$CPUS"
     -display none -serial "file:$W/serial.log" -monitor none -no-user-config -nodefaults
@@ -90,15 +90,30 @@ vm_start() { # IMAGE SEED BOOT
 }
 
 # Wait until root answers over ssh with our key. cloud-init writes the key late in the first boot, so early failures are normal.
-vm_wait_ssh() { # SECONDS
+# With SOFT=1 a timeout returns 1 (after showing the serial console) instead of ending the run.
+vm_wait_ssh() { # SECONDS [SOFT]
   local deadline=$((SECONDS + $1)) out
   while (( SECONDS < deadline )); do
     vm_alive || { tail -n 40 "$W/serial.log" 2>/dev/null | ci_redact || true; die "qemu is not running any more"; }
     if out=$(vm_ssh root 'echo vm-ssh-ok' 2>/dev/null) && [[ "$out" == vm-ssh-ok ]]; then return 0; fi
     sleep 5
   done
-  tail -n 60 "$W/serial.log" 2>/dev/null | ci_redact || true
+  echo "serial console: $(wc -l < "$W/serial.log" 2>/dev/null || echo 0) lines, GRUB menu shown $(grep -c 'Booting `' "$W/serial.log" 2>/dev/null || true) time(s); head and tail:"
+  { head -n 20 "$W/serial.log"; echo '[...]'; tail -n 40 "$W/serial.log"; } 2>/dev/null | ci_redact || true
+  [[ "${2:-}" == 1 ]] && return 1
   die "no ssh login as root within $1 s (see the serial console above)"
+}
+
+# First boot. A guest that never gets to sshd (seen as a GRUB menu printed over and over, or a silent console) on some runner
+# CPUs with "-cpu host" is started once more with a fixed baseline CPU model before the run is given up.
+vm_first_boot() { # IMAGE SEED BOOT
+  local fast=${BOOT_FAST_TIMEOUT:-300}
+  vm_start "$1" "$2" "$3"
+  vm_wait_ssh "$fast" 1 && return 0
+  warn "no ssh within ${fast} s with -cpu ${VM_CPU:-host}; retrying once with -cpu Haswell-noTSX (x86-64-v3, fixed feature set)"
+  kill "$QEMU_PID" 2>/dev/null || true; sleep 2; : > "$W/serial.log"
+  VM_CPU=Haswell-noTSX vm_start "$1" "$2" "$3"
+  vm_wait_ssh $(( BOOT_TIMEOUT > fast ? BOOT_TIMEOUT - fast : 300 ))
 }
 
 # Pull diagnostics out of the VM (best effort, redacted) into $W/guest/.
@@ -212,8 +227,7 @@ main() {
 
   group "boot ${key} with ${VM_USERDATA} (${VM_BOOT})"
   vm_make_seed "$TMP/seed.iso" "$KEYFILE.pub" "$CI_ROOT/$VM_USERDATA" "$key"
-  vm_start "$image" "$TMP/seed.iso" "$VM_BOOT"
-  vm_wait_ssh "$BOOT_TIMEOUT"
+  vm_first_boot "$image" "$TMP/seed.iso" "$VM_BOOT"
   log "ssh is up after ${SECONDS} s"
   endgroup
 
