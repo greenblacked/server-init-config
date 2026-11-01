@@ -44,6 +44,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Runner components without token or Docker (${{ matrix.image }})
+        timeout-minutes: 35
         run: tools/ci/runner-e2e.sh "${{ matrix.image }}"
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}
@@ -63,6 +64,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Registry cache, DOCKER-USER isolation, npm cache stack
+        timeout-minutes: 26
         run: sudo -E tools/ci/runner-host-e2e.sh
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}

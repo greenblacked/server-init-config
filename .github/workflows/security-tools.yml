@@ -43,6 +43,7 @@ jobs:
           persist-credentials: false
       # The runner OS (Ubuntu 24.04) is not one the script supports, so the scan runs in a Debian 13 container on the runner's arch.
       - name: Install the release binaries and run each one
+        timeout-minutes: 17
         run: tools/ci/security-tools-e2e.sh scan-in debian:13
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}
@@ -70,6 +71,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install audit and network packages (${{ matrix.image }})
+        timeout-minutes: 26
         run: tools/ci/security-tools-e2e.sh pkgs "${{ matrix.image }}"
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}

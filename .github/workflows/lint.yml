@@ -58,8 +58,10 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q cloud-init openssh-server python3-yaml
           cloud-init --version
       - name: tools/test-cloud-init.py (schema check with the real CLI, live SSH test as root)
+        timeout-minutes: 8
         run: tools/ci/lint.sh cloud-init
       - name: tools/test-server-tools.sh (hermetic on the host, destructive in a container)
+        timeout-minutes: 20
         run: tools/ci/lint.sh server-tools
       - name: Upload logs on failure
         if: failure()
