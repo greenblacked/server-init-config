@@ -142,6 +142,9 @@ def test_file(rel: str) -> None:
         script = cmd if isinstance(cmd, str) else (cmd[2] if cmd[:2] == ["sh", "-c"] else " ".join(map(str, cmd)))
         r = run(["sh", "-n", "-c", script])
         check(r.returncode == 0, f"runcmd[{i}] parses", r.stderr.strip())
+        if "enabled=1" in script and "yum.repos.d" in script:
+            # a repo is switched on only by the command that pins its keys, so a failed pin leaves it disabled
+            check(re.search(r"pin-repo-key [^;|]*&& sed ", script) is not None, f"runcmd[{i}]: repo enabled only after pin-repo-key succeeded")
 
     for f in data.get("write_files", []):
         p, content = f["path"], f.get("content", "")
