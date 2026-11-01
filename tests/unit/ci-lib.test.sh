@@ -32,7 +32,8 @@ test_redact_keeps_safe_check_lines() {
            '  PASS  sshd: root by key only' '  FAIL  sshd: permitrootlogin is not prohibit-password (permitrootlogin yes)' \
            '  PASS  admin has passwordless sudo' '  FAIL  deploy has passwordless sudo' '  PASS  install printed the admin web password once' \
            '  FAIL  no admin password in the install output' '  FAIL  rerun replaced the password' '  PASS  public: wrong password is 401 (401)' \
-           '  WARN  sshd: Password login still on' '::error::sshd: password login still on' '::warning::sshd: passwordauthentication no'; do
+           '  WARN  sshd: Password login still on' '::error::sshd: password login still on' '::warning::sshd: passwordauthentication no' \
+           '  FAIL  sshd: password login is off' '::error::sshd: password login is off' '  PASS  sshd: password login is off'; do
     assert_eq "$(printf '%s\n' "$l" | ci_redact)" "$l" "$l"
   done
 }
@@ -46,7 +47,13 @@ test_redact_hides_safe_phrase_lines_that_embed_a_secret() {
            '  FAIL  sshd: password login still on password: hunter2' '::error::sshd: password login still on password: hunter2' \
            '  FAIL  sshd: password login on /lite/events?token=abc' '  FAIL  sshd: password login on PrivateKey = abc' \
            '  FAIL  sshd: password login on PresharedKey: abc' '  FAIL  sshd: password login on -----BEGIN OPENSSH PRIVATE KEY-----' \
-           "  FAIL  sshd: password login on $b64" "  FAIL  sshd: password login on http://h/on/js/abc"; do
+           "  FAIL  sshd: password login on $b64" "  FAIL  sshd: password login on http://h/on/js/abc" \
+           '  FAIL  rerun replaced the password with XyZ12345abcdeFGHijkl' '  FAIL  sshd: password login still on pass: hunter2' \
+           '  FAIL  sshd: password login still on passwd=hunter2' '  FAIL  sshd: password login still on pwd: hunter2' \
+           '  FAIL  sshd: password login still on Authorization: Basic YWRtaW46aHVudGVyMg==' '  FAIL  sshd: password login on https://admin:hunter2@h/x' \
+           '  FAIL  public: wrong password is 401 (got 200, want 401) -u admin:XyZ12345abcdeFGHijkl' \
+           '::error::rerun replaced the password hunter2 changed' '  FAIL  sshd: password login on (Xy12abCDef34ghIJkl56mnOP)' \
+           '  FAIL  rerun replaced the password (a1b2c3d4e5f6g7h8i9j0k1l2)' '  FAIL  sshd: password login still on (pass: hunter2)'; do
     out=$(printf '%s\n' "$l" | ci_redact)
     [[ "$out" == '    [line hidden: it may hold a '@(secret|device key)']' ]] || { echo "    not hidden: $l -> $out" >&2; return 1; }
   done
