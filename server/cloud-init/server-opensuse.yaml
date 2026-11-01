@@ -270,8 +270,10 @@ write_files:
       ssh_hardening() {
         if sshd -t; then
           systemctl reload sshd || return 1
-          # Leap 16 keeps its default sshd_config in /usr/etc; make sure the drop-in really applies.
-          sshd -T 2>/dev/null | grep -qix 'passwordauthentication no' || fail "sshd does not apply sshd_config.d/00-hardening.conf; check the Include line"
+          # Leap 16 keeps its default sshd_config in /usr/etc; make sure the drop-in really applies. The output is captured first:
+          # grep -q closing the pipe early can SIGPIPE sshd -T (about 5 KB, written in chunks), which fails the pipeline under pipefail.
+          local eff; eff=$(sshd -T 2>/dev/null) || true
+          grep -qix 'passwordauthentication no' <<<"$eff" || fail "sshd does not apply sshd_config.d/00-hardening.conf; check the Include line"
         else
           rm -f /etc/ssh/sshd_config.d/00-hardening.conf
           fail "sshd rejected 00-hardening.conf; removed it, defaults kept"
