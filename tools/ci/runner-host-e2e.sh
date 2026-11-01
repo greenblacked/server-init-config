@@ -96,6 +96,8 @@ reach http://10.99.0.2/ && pass "other forwarded addresses still work (jobs keep
 reach "http://${GW}:18080/" && fail "container STILL reaches a host service via docker0" || pass "container cannot reach host services via docker0"
 reach "http://${GW}:4873/" && pass "container reaches the npm-cache port (${GW}:4873)" || fail "npm-cache port is blocked"
 NET_ARGS=(--network ci-e2e-br)
+# positive control: the container starts on the custom bridge and has networking, so the negatives below mean "blocked", not "broken"
+reach http://10.99.0.2/ && pass "control: container on the custom bridge starts and reaches a forwarded address (10.99.0.2)" || fail "control failed: no container on ci-e2e-br can reach 10.99.0.2, the custom-bridge checks prove nothing"
 reach "http://${BRGW}:18080/" && fail "container on a custom bridge STILL reaches a host service" || pass "custom bridge (br-*) is isolated from host services too"
 reach http://169.254.169.254/ && fail "custom-bridge container reaches 169.254.169.254" || pass "custom-bridge container cannot reach 169.254.169.254"
 NET_ARGS=()
@@ -114,6 +116,13 @@ iptables -F DOCKER-USER || true   # what a fresh Docker start would look like
 systemctl restart docker
 for _ in $(seq 1 30); do iptables -S DOCKER-USER 2>/dev/null | grep -q ci-job-isolation && break; sleep 1; done
 iptables -S DOCKER-USER | grep -q ci-job-isolation && pass "the unit re-applied the DOCKER-USER rule after systemctl restart docker" || fail "rule not re-applied after a Docker restart"
+# positive controls: containers still start and have networking after the restart (default bridge and custom bridge), so the negatives count
+reach http://10.99.0.2/ && pass "control: default-bridge container starts and reaches 10.99.0.2 after the Docker restart" || fail "control failed after the Docker restart: default-bridge container cannot reach 10.99.0.2, the checks below prove nothing"
+NET_ARGS=(--network ci-e2e-br)
+reach http://10.99.0.2/ && pass "control: custom-bridge container starts and reaches 10.99.0.2 after the Docker restart" || fail "control failed after the Docker restart: ci-e2e-br container cannot reach 10.99.0.2, the checks below prove nothing"
+reach http://169.254.169.254/ && fail "custom-bridge container reaches metadata after the Docker restart" || pass "custom-bridge container still cannot reach metadata after the Docker restart"
+reach "http://${BRGW}:18080/" && fail "custom-bridge container reaches a host service after the Docker restart" || pass "custom-bridge container still isolated from host services after the Docker restart"
+NET_ARGS=()
 reach http://169.254.169.254/ && fail "metadata reachable after the Docker restart" || pass "metadata still blocked after the Docker restart"
 iptables-save > "$W/iptables-isolation.txt"
 endgroup
