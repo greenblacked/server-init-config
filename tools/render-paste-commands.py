@@ -210,6 +210,8 @@ def render_base() -> str:
         line = cmd if isinstance(cmd, str) else shlex.join(str(c) for c in cmd)
         if "--lock-root" in line:
             continue  # pasted on a live server: lock root only after the admin login is tested
+        if "systemctl reboot" in line:
+            continue  # pasted in a live SSH session: never reboot under the admin's hands
         lines.append(line)
     lines += ["", "systemctl is-active docker gitlab-runner", "INSTALL"]
     return ('<a id="base"></a>\n## Base host: Docker, GitLab Runner, tools\n\n'

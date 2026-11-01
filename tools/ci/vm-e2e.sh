@@ -283,7 +283,7 @@ main() {
   group "1. cloud-init finished without errors"
   local ci_out="$W/cloud-init-status.txt" ci_rc=0 i
   # sshd comes up while cloud-init still runs; the wait can be cut by an sshd reload or restart, or by the one reboot the EL10
-  # init does at the end of the first boot when a new kernel was installed (docker_start), so it is retried.
+  # init or the Rocky runner file does at the end of the first boot when a new kernel was installed, so it is retried.
   for i in 1 2 3 4 5; do
     ci_rc=0
     timeout 1200 ssh "${SSH_BASE[@]}" root@127.0.0.1 'cloud-init status --wait --long' > "$ci_out" 2>&1 || ci_rc=$?
@@ -341,6 +341,12 @@ main() {
   fi
 
   group "3. the machine as booted: swap, sysctl, Docker, firewall, fail2ban, timers"
+  # Runner on Rocky: the cloud-init file rebooted once at its end because Docker could not start on the image's old kernel and
+  # wrote what docker said to ci-docker-reboot.log. The checks below still require Docker, the isolation rules and the cache.
+  if [[ "$VM_ROLE" == runner ]] && vm_ssh root 'test -s /var/log/ci-docker-reboot.log'; then
+    warn "first boot: Docker did not start on the image's kernel; the cloud-init file rebooted once into the upgraded kernel (log below)"
+    vm_ssh root 'cat /var/log/ci-docker-reboot.log; uname -r' 2>&1 | cut -c1-300 | head -n 40 | ci_redact || true
+  fi
   guest_checks first
   [[ "$VM_ROLE" == server ]] && ops_check "first boot"
   endgroup

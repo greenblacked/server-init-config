@@ -272,6 +272,10 @@ Runner-specific; the general table is in the [main README](../README.md#troubles
 - Tools: htop, btop, ncdu, iotop, mtr, nano, vim, rsync, wget, unzip, bash-completion, skopeo, dnf-utils, dig, lsof, sysstat, tcpdump, traceroute, nc, tmux, jq, git, mc, fd, rg, fzf. EPEL ones that are missing are logged to `ci-bootstrap-failed.log` and do not stop the boot.
 - Not in the init, on purpose: users, closing root SSH, another SSH port, SELinux enforcing (`rocky-clean.yaml`), service users.
 
+### Reboot on first boot (Rocky)
+
+The Rocky image boots an older kernel than the one the package upgrade installs, and the new kernel's `kernel-modules` (netfilter) exist only for the new kernel. Until then `dockerd` cannot add its iptables rules and does not start. The init files check for that at the end and reboot once; `/var/log/ci-docker-reboot.log` then holds the last Docker journal lines. After the reboot Docker, the job isolation rules and the cache start by themselves.
+
 ### Check the first boot
 
 Server, as `ops` (after the users step), any directory:

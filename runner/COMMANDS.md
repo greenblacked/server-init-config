@@ -279,7 +279,7 @@ dnf -y -q install gitlab-runner
 usermod -aG docker gitlab-runner
 chmod 600 /etc/gitlab-runner/config.toml
 systemctl restart gitlab-runner
-sh -c 'for s in sshd docker gitlab-runner; do systemctl is-active --quiet $s || echo bootstrap-check-failed-$s >> /var/log/ci-bootstrap-failed.log; done'
+sh -c 'for s in sshd docker gitlab-runner; do systemctl is-active --quiet $s || [ $s = docker -a -s /var/log/ci-docker-reboot.log ] || echo bootstrap-check-failed-$s >> /var/log/ci-bootstrap-failed.log; done'
 
 systemctl is-active docker gitlab-runner
 INSTALL
