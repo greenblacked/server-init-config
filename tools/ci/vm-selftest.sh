@@ -90,7 +90,7 @@ if need genisoimage || need xorriso; then
     isoinfo -R -i "$T/seed.iso" -x /user-data > "$T/ud" 2>/dev/null
     cmp -s "$T/ud" server/cloud-init/server-debian.yaml && pass "user-data is the repo file, byte for byte" || fail "user-data differs from the repo file"
     isoinfo -R -i "$T/seed.iso" -x /meta-data > "$T/md" 2>/dev/null
-    grep -q '^instance-id: iid-ci-debian13-' "$T/md" && grep -q '^local-hostname: ci-debian13$' "$T/md" && grep -qF -- "$(cat "$T/id.pub")" "$T/md" && pass "meta-data: instance-id, local-hostname, public key" || fail "meta-data incomplete: $(cat "$T/md")"
+    grep -q '^instance-id: iid-ci-debian13-' "$T/md" && ! grep -q 'hostname' "$T/md" && grep -qF -- "$(cat "$T/id.pub")" "$T/md" && pass "meta-data: instance-id, public key, no local-hostname (Fedora fails to set it in the local stage)" || fail "meta-data incomplete: $(cat "$T/md")"
     python3 -I -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); assert d["public-keys"][0].startswith("ssh-ed25519 ")' "$T/md" 2>/dev/null && pass "meta-data is valid YAML" || warn "meta-data YAML not checked (PyYAML missing?)"
     isoinfo -R -i "$T/seed.iso" -x /vendor-data 2>/dev/null | grep -q '^disable_root: false$' && pass "vendor-data lifts disable_root" || fail "vendor-data missing disable_root: false"
   else

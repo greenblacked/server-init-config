@@ -28,7 +28,9 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"
 
 # --- pieces that are tested without a VM (tools/ci/vm-selftest.sh) ----------------------------------------------------------
 # vm_make_seed OUT.iso PUBKEY_FILE USERDATA KEY: a NoCloud seed (volume label cidata). user-data is the repo file byte for
-# byte. meta-data mirrors what Hetzner injects: instance-id, local-hostname and the SSH keys. vendor-data lifts the images'
+# byte. meta-data mirrors what Hetzner injects: instance-id and the SSH keys. It carries NO local-hostname: Hetzner is a network
+# datasource, so cloud-init never sets the hostname in its local stage there, but NoCloud is a local one and Fedora's
+# hostnamectl fails that early (no D-Bus yet), which cloud-init reports as "degraded done". vendor-data lifts the images'
 # default "root login disabled" (Hetzner's own images allow root, and the init copies root's keys to the admin user).
 vm_make_seed() {
   local out=$1 pub=$2 userdata=$3 key=$4 d
@@ -36,7 +38,7 @@ vm_make_seed() {
   [[ -s "$pub" ]] || die "public key file empty: $pub"
   d=$(mktemp -d)
   cp "$userdata" "$d/user-data"
-  printf 'instance-id: iid-ci-%s-%s\nlocal-hostname: ci-%s\npublic-keys:\n  - %s\n' "$key" "$(date +%s)" "$key" "$(cat "$pub")" > "$d/meta-data"
+  printf 'instance-id: iid-ci-%s-%s\npublic-keys:\n  - %s\n' "$key" "$(date +%s)" "$(cat "$pub")" > "$d/meta-data"
   printf '#cloud-config\ndisable_root: false\n' > "$d/vendor-data"
   if need genisoimage; then genisoimage -quiet -output "$out" -volid cidata -joliet -rock "$d/user-data" "$d/meta-data" "$d/vendor-data"
   elif need xorriso; then xorriso -as mkisofs -quiet -output "$out" -volid cidata -joliet -rock "$d/user-data" "$d/meta-data" "$d/vendor-data"
