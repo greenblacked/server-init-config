@@ -76,6 +76,8 @@ for k in "${VM_KEYS[@]}"; do
 done
 vm_catalogue ubuntu2604; expect_eq "Ubuntu 26.04 uses the Debian file (README)" "$VM_USERDATA" server/cloud-init/server-debian.yaml
 grep -q 'server/cloud-init/server-debian.yaml' README.md && pass "README names server-debian.yaml for Ubuntu" || fail "README does not name server-debian.yaml"
+vm_catalogue rocky10; expect_eq "Rocky 10 boots with UEFI" "$VM_BOOT" uefi
+vm_catalogue alma10; expect_eq "Alma 10 boots with BIOS" "$VM_BOOT" bios
 ! vm_catalogue nonsense && pass "unknown key is refused" || fail "unknown key accepted"
 endgroup
 

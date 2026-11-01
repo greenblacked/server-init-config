@@ -36,7 +36,9 @@ vm_catalogue() {
     rocky10 | runner-rocky10)
       VM_BASE=https://dl.rockylinux.org/pub/rocky/10/images/x86_64/
       VM_FILE=Rocky-10-GenericCloud-Base.latest.x86_64.qcow2
-      VM_SUMS="<image>.CHECKSUM" VM_SINGLE=1 VM_KIND=el10 VM_USERDATA=server/cloud-init/server-el10.yaml ;;
+      # Both Rocky 10 jobs ended with a silent console under SeaBIOS (-nodefaults removes the VGA card SeaBIOS prints to, so a
+      # disk the BIOS cannot boot looks the same); UEFI is the other path this hybrid image supports.
+      VM_SUMS="<image>.CHECKSUM" VM_SINGLE=1 VM_BOOT=uefi VM_KIND=el10 VM_USERDATA=server/cloud-init/server-el10.yaml ;;
     alma10)
       VM_BASE=https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/
       VM_FILE=AlmaLinux-10-GenericCloud-latest.x86_64.qcow2
@@ -135,9 +137,14 @@ vm_fetch() {
     "${CURL[@]}" -o "$list" "$VM_BASE" || die "cannot read the directory listing ${VM_BASE}"
     if [[ -z "$file" ]]; then
       file=$(vm_pick_any "$list" "$VM_LIST_RE" || true)
+      if [[ -n "$file" && "$VM_KIND" == opensuse && "$file" != *Cloud* ]]; then
+        echo "WARN: ${file} is not a Cloud image; without cloud-init the run ends in an ssh timeout, not a clear error" >&2
+      fi
       if [[ -z "$file" ]]; then
         # Show what the directory does hold, so the next run says which name to add to the catalogue.
         echo "image files in ${VM_BASE}: $(vm_hrefs "$list" | grep -Ei '\.(qcow2|img|raw)(\.[a-z0-9]+)?$' | sort -u | tr '\n' ' ')" >&2
+        echo "listing: $(wc -c < "$list") bytes, $(vm_hrefs "$list" | wc -l) links; first lines:" >&2
+        head -n 15 "$list" | cut -c1-200 >&2
         die "no file matching ${VM_LIST_RE} in ${VM_BASE}"
       fi
     fi
