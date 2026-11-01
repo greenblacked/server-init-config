@@ -203,9 +203,8 @@ __shell_history_vars() {
 __shell_history_vars
 shopt -s histappend cmdhist
 
-# Run before each prompt: append the last command to the history file so parallel sessions share history.
-# On Debian and Ubuntu the user's ~/.bashrc runs after this file and lowers the limits, so the first
-# prompt applies them again (a later change by hand in a session is kept).
+# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
+# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -213,10 +212,9 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
-# When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
-# the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
-# then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
+# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
+# element 0 for /etc/bashrc's title command; the hook stays in element 1.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -1187,9 +1185,8 @@ __shell_history_vars() {
 __shell_history_vars
 shopt -s histappend cmdhist
 
-# Run before each prompt: append the last command to the history file so parallel sessions share history.
-# On Debian and Ubuntu the user's ~/.bashrc runs after this file and lowers the limits, so the first
-# prompt applies them again (a later change by hand in a session is kept).
+# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
+# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -1197,10 +1194,9 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
-# When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
-# the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
-# then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
+# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
+# element 0 for /etc/bashrc's title command; the hook stays in element 1.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -14048,9 +14044,8 @@ __shell_history_vars() {
 __shell_history_vars
 shopt -s histappend cmdhist
 
-# Run before each prompt: append the last command to the history file so parallel sessions share history.
-# On Debian and Ubuntu the user's ~/.bashrc runs after this file and lowers the limits, so the first
-# prompt applies them again (a later change by hand in a session is kept).
+# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
+# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -14058,10 +14053,9 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
-# When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
-# the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
-# then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
+# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
+# element 0 for /etc/bashrc's title command; the hook stays in element 1.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -18945,9 +18939,8 @@ __shell_history_vars() {
 __shell_history_vars
 shopt -s histappend cmdhist
 
-# Run before each prompt: append the last command to the history file so parallel sessions share history.
-# On Debian and Ubuntu the user's ~/.bashrc runs after this file and lowers the limits, so the first
-# prompt applies them again (a later change by hand in a session is kept).
+# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
+# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -18955,10 +18948,9 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array) and is safe to source twice.
-# When PROMPT_COMMAND is still empty (Fedora/EL login shells read profile.d before /etc/bashrc, which sets
-# the terminal title only if PROMPT_COMMAND is empty), use an array with an empty first element: /etc/bashrc
-# then fills element 0 with its title command and the hook stays in element 1 (bash 5.1+ runs every element).
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
+# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
+# element 0 for /etc/bashrc's title command; the hook stays in element 1.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')

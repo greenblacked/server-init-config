@@ -25,7 +25,7 @@ write_files:
       INSTALL_DOCKER=1
       INSTALL_SWAP=1
       TIMEZONE=Europe/Kyiv
-      # Weekly cleanup (server-cleanup). INSTALL_CLEANUP=0 turns it off; CLEAN_SCHEDULE is a systemd OnCalendar value.
+      # Weekly cleanup: INSTALL_CLEANUP=0 turns it off; CLEAN_SCHEDULE is a systemd OnCalendar value.
       INSTALL_CLEANUP=1
       CLEAN_SCHEDULE=weekly
       CLEAN_JOURNAL_TIME=1month
