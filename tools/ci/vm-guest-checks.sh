@@ -24,6 +24,8 @@ echo "== ${ROLE} ${KIND}, phase ${PHASE}: $(. /etc/os-release; echo "${PRETTY_NA
 
 # Every "key = value" line of a sysctl.d file must be what the running kernel reports; a leading "-" means "ignore a key this
 # kernel does not have", so such a key is compared only when it exists.
+squeeze_ws() { tr -s '[:space:]' ' ' <<<"$1" | sed -E 's/^ //; s/ $//'; }
+
 sysctl_file() { # file
   local f=$1 line key val got n=0 skipped=0
   [[ -f "$f" ]] || { fail "$f is missing"; return; }
@@ -36,7 +38,9 @@ sysctl_file() { # file
       if [[ "$line" =~ ^[[:space:]]*- ]]; then skipped=$((skipped + 1)); continue; fi
       fail "sysctl ${key}: key does not exist in this kernel"; continue
     fi
-    got=$(tr -s '[:space:]' ' ' <<<"$got" | sed 's/ $//'); val=$(tr -s '[:space:]' ' ' <<<"$val")
+    # Normalise both sides alike: collapse runs of blanks/tabs (multi-value keys such as tcp_rmem) and trim the ends; a here-string
+    # appends a newline, so each side is trimmed after the squeeze, not just the live one.
+    got=$(squeeze_ws "$got"); val=$(squeeze_ws "$val")
     if [[ "$got" == "$val" ]]; then n=$((n + 1)); else fail "sysctl ${key} = ${got} (${f} says ${val})"; fi
   done < "$f"
   if (( n > 0 )); then pass "sysctl: ${n} value(s) from ${f} are live (${skipped} optional key(s) absent)"; else fail "sysctl: no value of ${f} could be checked"; fi
