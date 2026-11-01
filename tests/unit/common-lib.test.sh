@@ -1,5 +1,10 @@
 # shellcheck shell=bash
 # Unit tests for backup() and edit_with_backup() in common/lib.sh. Sourced by run.sh; $T is a private empty directory.
+# Sourcing common/lib.sh installs diffutils when run as root without cmp. A unit test must not change the host, so stop first.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then
+  echo "cmp is missing and this is root: install diffutils first (common/lib.sh would install it on source)" >&2
+  return 1 2>/dev/null || exit 1
+fi
 # shellcheck source=../../common/lib.sh
 source "$REPO/common/lib.sh"
 
