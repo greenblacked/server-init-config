@@ -125,9 +125,9 @@ done
 endgroup
 
 group "No rendered cloud-init file reboots from inside runcmd"
-# The server init (EL10) reboots only through a unit ordered after cloud-final.service while cloud-init runs; a hand rerun reboots at once.
+# The server init (EL10) reboots only through a unit ordered after cloud-final.service while cloud-init runs; a hand rerun never reboots.
 for f in server/cloud-init/*.yaml runner/cloud-init/*.yaml; do
-  grep -q 'systemctl reboot --no-block' "$f" && fail "$f: bare 'systemctl reboot --no-block' (kills cloud-init's modules-final)" || pass "$f: no bare 'systemctl reboot --no-block'"
+  grep -E 'systemctl (--no-block )?reboot( --no-block)?' "$f" | grep -qv 'systemd-run' && fail "$f: bare 'systemctl reboot' (kills cloud-init's modules-final)" || pass "$f: no bare 'systemctl reboot'"
   (( $(wc -c < "$f") < 32768 )) && pass "$f: under 32768 bytes" || fail "$f: 32768 bytes or more"
 done
 f=server/cloud-init/server-el10.yaml

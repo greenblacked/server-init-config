@@ -293,7 +293,7 @@ firewall() {
     firewall-cmd --zone=public --query-port="${p}/tcp" >/dev/null || { systemctl stop firewalld; fail "ssh port ${p} not allowed after start; firewalld stopped"; return 1; }
   done
 
-  # Everything else is changed through the running daemon: firewall-offline-cmd rejects
+  # Everything else is changed through the running daemon (firewall-offline-cmd refuses while it runs).
   local changed=0
   # The default public zone opens cockpit (and mdns on some images); a cloud server needs neither.
   for p in cockpit mdns; do
@@ -608,9 +608,9 @@ if (( ${#FAILED_STEPS[@]} )); then log "done with failures: ${FAILED_STEPS[*]} (
 elif (( REBOOT_AT_END )); then log "done, reboot pending for docker (see $FAILED_LOG)"
 else log "done, all steps ok"; fi
 if (( REBOOT_AT_END )); then
-  log "rebooting now (once)"
-  # Under cloud-init a reboot here would kill modules-final: a unit ordered after cloud-final.service does it.
-  if [[ "$(systemctl is-active cloud-final.service 2>/dev/null)" == activating ]]; then systemd-run --no-block -p After=cloud-final.service systemctl reboot
-  else systemctl --no-block reboot; fi
+  # Under cloud-init a reboot here would kill modules-final: a unit ordered after cloud-final.service does it. A manual rerun never reboots.
+  if [[ "$(systemctl is-active cloud-final.service 2>/dev/null)" == activating ]]; then
+    log "rebooting now (once)"; systemd-run --no-block -p After=cloud-final.service systemctl reboot
+  else log "reboot needed for docker: reboot the server manually"; fi
 fi
 exit "$rc"
