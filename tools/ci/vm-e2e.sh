@@ -217,6 +217,7 @@ failed_log_empty() { # DESC
 # a reboot may have cured Docker, the log still says what failed.
 show_docker_log() { # DESC
   if vm_ssh root 'test -s /var/log/server-init-docker.log'; then
+    warn "$1: Docker did not start on a try (log below); a reboot or retry may have cured it"
     echo "--- /var/log/server-init-docker.log ($1): Docker did not start on a try"
     vm_ssh root 'cat /var/log/server-init-docker.log' 2>&1 | cut -c1-300 | head -n 300 | ci_redact || true
   fi
@@ -304,10 +305,22 @@ main() {
 
   if [[ "$VM_ROLE" == server ]]; then
     group "2. the init: no failed step, assertions (nothing allow-listed)"
+    local docker_reboot=0 init_ok=0
+    # EL10: Docker could not start on the first-boot kernel, the init rebooted once and printed "done, reboot pending for docker".
+    # That is not a clean run: say so, and require Docker to be up afterwards (the init's drop-in then clears its failed-log entry).
+    if vm_ssh root 'grep -q "done, reboot pending for docker" /var/log/cloud-init-output.log'; then
+      docker_reboot=1
+      warn "first boot: Docker did not start on the first-boot kernel; the init rebooted once into the upgraded kernel (EL10 Docker workaround fired)"
+      vm_ssh root 'for i in $(seq 60); do systemctl is-active --quiet docker && exit 0; sleep 2; done; exit 1' || true
+    fi
     failed_log_empty "first boot"
     show_docker_log "first boot"
-    vm_ssh root 'grep -h "done, all steps ok\|done with failures" /var/log/cloud-init-output.log | tail -2' | sed 's/^/  init: /' || true
-    vm_ssh root 'grep -q "done, all steps ok" /var/log/cloud-init-output.log' && pass "server-init reported 'done, all steps ok'" || fail "server-init did not report 'done, all steps ok' in cloud-init-output.log"
+    vm_ssh root 'grep -h "done, all steps ok\|done, reboot pending for docker\|done with failures" /var/log/cloud-init-output.log | tail -2' | sed 's/^/  init: /' || true
+    vm_ssh root 'grep -q "done, all steps ok" /var/log/cloud-init-output.log' && init_ok=1
+    if (( init_ok )); then pass "server-init reported 'done, all steps ok'"
+    elif (( docker_reboot )) && vm_ssh root 'systemctl is-active --quiet docker && ! grep -qs docker-reboot-pending /var/log/server-init-failed.log'; then
+      pass "server-init reported 'done, reboot pending for docker'; after the reboot Docker is active and its pending entry is gone"
+    else fail "server-init did not report 'done, all steps ok' in cloud-init-output.log"; fi
     # copy the repo in (not .git, not outputs, not the image cache) and run the same assertions the container test runs
     tar -C "$CI_ROOT" --exclude=./.git --exclude=./ci-out --exclude=./.vm-cache -czf - . | timeout 300 ssh "${SSH_BASE[@]}" root@127.0.0.1 'rm -rf /root/ci-repo && mkdir -p /root/ci-repo && tar -xzf - -C /root/ci-repo'
     local a_rc=0
