@@ -166,6 +166,11 @@ def test_file(rel: str) -> None:
             src = {"server/cloud-init/server-el10.yaml": "server-init-el10.sh", "server/cloud-init/server-fedora.yaml": "server-init-fedora.sh"}.get(rel)
             if src:
                 check(content == (ROOT / "server" / src).read_text(), f"{p} equals server/{src}")
+        if p.startswith("/etc/yum.repos.d/"):
+            # write_files runs before the package: step; an enabled repo whose gpgkey file is not there yet makes every dnf call fail
+            keys = re.findall(r"file://(\S+)", " ".join(line for line in content.splitlines() if line.startswith("gpgkey=")))
+            written = {g["path"] for g in data.get("write_files", [])}
+            check("enabled=0" in content or all(k in written for k in keys), f"{p}: disabled until its key files exist", ", ".join(keys))
         if p.startswith("/etc/ssh/sshd_config.d/"):
             lower = [line.strip().lower() for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
             bad = [line for line in lower if line.startswith(LOCKOUT)]
