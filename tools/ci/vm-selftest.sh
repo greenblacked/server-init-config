@@ -109,6 +109,10 @@ printf 'Will retry in network stage\n' > "$T/rl2"; race fedora "$T/rs" "$T/rj" "
 printf 'Failed to connect to system scope bus\n' > "$T/rl3"; race fedora "$T/rs" "$T/rj" "$T/rl3" && fail "race: no retry evidence allowed" || pass "race: missing retry evidence refused"
 race fedora "$T/rs" "$T/rj" "$T/rl" localhost ci-fedora44 && fail "race: wrong live hostname allowed" || pass "race: wrong live hostname refused"
 race fedora "$T/rs" "$T/rj" "$T/rl" ci-fedora44 localhost && fail "race: wrong static hostname allowed" || pass "race: wrong static hostname refused"
+vm_hostname_race_allowed fedora ci-fedora44 "$T/rs" "$T/rj" "$T/rl" ci-fedora44 "" && fail "race: empty static hostname allowed" || pass "race: empty static hostname refused"
+race fedora "$T/rs" "$T/rj" "$T/rl" ci-fedora44 && pass "race: both hostnames given allowed" || fail "race: both hostnames given refused"
+vm_hostname_race_allowed fedora ci-fedora44 "$T/rs" "$T/rj" "$T/rl" ci-fedora44 && fail "race: missing static hostname argument allowed" || pass "race: missing static hostname argument refused"
+vm_hostname_race_allowed fedora ci-fedora44 "$T/rs" "$T/rj" "$T/rl" "" ci-fedora44 && fail "race: empty live hostname allowed" || pass "race: empty live hostname refused"
 endgroup
 
 group "Rocky runner files: the Docker reboot comes after cloud-init"

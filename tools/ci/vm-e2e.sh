@@ -249,10 +249,10 @@ show_docker_log() { # DESC
 # The allowance holds only when ALL of these are true; anything else still fails: Fedora, status done / extended_status exactly
 # "degraded done", no errors, WARNING is the only recoverable level and every entry in it is exactly the hostname warning for the
 # seed's local-hostname (one other entry fails), cloud-init.log shows the bus failure and the retry, and the live hostname is correct.
-# Args: OS_ID LOCAL_HOSTNAME STATUS_TEXT_FILE STATUS_JSON_FILE CLOUD_INIT_LOG_FILE LIVE_HOSTNAME [STATIC_HOSTNAME]
+# Args: OS_ID LOCAL_HOSTNAME STATUS_TEXT_FILE STATUS_JSON_FILE CLOUD_INIT_LOG_FILE LIVE_HOSTNAME STATIC_HOSTNAME (an empty one refuses)
 vm_hostname_race_allowed() {
-  local osid=$1 want=$2 st=$3 js=$4 lg=$5 live=$6 stat=${7:-$6}
-  [[ "$osid" == fedora && -n "$want" ]] || return 1
+  local osid=$1 want=$2 st=$3 js=$4 lg=$5 live=$6 stat=${7:-}
+  [[ "$osid" == fedora && -n "$want" && -n "$live" && -n "$stat" ]] || return 1
   grep -qx 'status: done' "$st" && grep -qx 'extended_status: degraded done' "$st" || return 1
   python3 -I -c '
 import json, sys
@@ -359,7 +359,7 @@ main() {
     printf '%s\n' "$ci_txt" > "$W/ci-status.txt"; printf '%s\n' "$js" > "$W/ci-status.json"
     vm_ssh root 'cat /var/log/cloud-init.log' > "$W/ci-race.log" 2>/dev/null || : > "$W/ci-race.log"
     live=$(vm_ssh root 'hostname' 2>/dev/null || true)
-    stat=$(vm_ssh root 'hostnamectl --static 2>/dev/null || hostname' 2>/dev/null || true)
+    stat=$(vm_ssh root 'hostnamectl --static 2>/dev/null' 2>/dev/null || true)
     osid=$(vm_ssh root '. /etc/os-release; echo "$ID"' 2>/dev/null || true)
     vm_hostname_race_allowed "$osid" "ci-${key}" "$W/ci-status.txt" "$W/ci-status.json" "$W/ci-race.log" "$live" "$stat" && race=1
   fi
