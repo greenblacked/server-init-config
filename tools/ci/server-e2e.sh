@@ -45,7 +45,11 @@ cleanup() {
   local rc=$?
   sd_collect "$NAME" "$W/collected" 2>/dev/null || true
   if [[ "${KEEP:-0}" != 1 ]]; then docker rm -f "$NAME" >/dev/null 2>&1 || true; fi
-  rm -rf "$PRIV"
+  if [[ "${KEEP:-0}" == 1 ]]; then
+    echo "KEEP=1: container ${NAME} and ${PRIV} kept (outside ci-out). Log in with: ${PRIV}/bin/ssh root@$(sd_ip "$NAME" 2>/dev/null || echo '<container-ip>')" >&2
+  else
+    rm -rf "$PRIV"
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
