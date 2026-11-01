@@ -82,11 +82,16 @@ GW=$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1 | head -1)
 log "docker0 gateway ${GW}"
 docker network create ci-e2e-br >/dev/null
 BRGW=$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' ci-e2e-br)
+if [[ "$BRGW" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && ! [[ "$BRGW" =~ (^|\.)(25[6-9]|2[6-9][0-9]|[3-9][0-9]{2})(\.|$) ]]; then pass "custom bridge gateway is a valid IPv4 (${BRGW})"; else fail "cannot determine the ci-e2e-br gateway (got '${BRGW}'), the custom-bridge host-service checks would prove nothing"; fi
 
 echo "-- before the rules (control: the test setup itself works)"
 reach http://169.254.169.254/ && pass "control: container reaches the metadata stand-in" || fail "control failed: metadata stand-in unreachable, the test cannot prove anything"
 reach http://10.99.0.2/ && pass "control: container reaches another forwarded address (10.99.0.2)" || fail "control failed: 10.99.0.2 unreachable"
 reach "http://${GW}:18080/" && pass "control: container reaches a host service on docker0 (${GW}:18080)" || fail "control failed: host service unreachable from docker0"
+NET_ARGS=(--network ci-e2e-br)
+reach "http://${BRGW}:18080/" && pass "control: container on ci-e2e-br reaches a host service (${BRGW}:18080) before isolation, same path as the negative below" || fail "control failed: ci-e2e-br container cannot reach ${BRGW}:18080 before isolation, the custom-bridge host-service check proves nothing"
+reach http://10.99.0.2/ && pass "control: container on ci-e2e-br reaches the forwarded address (10.99.0.2) before isolation" || fail "control failed: ci-e2e-br container cannot reach 10.99.0.2 before isolation"
+NET_ARGS=()
 
 bash runner/scripts/ci-job-isolation.sh 2>&1 | tee "$W/isolation-1.log"
 iptables-save | grep -c ci-job-isolation > "$W/rules-1.count" || true
@@ -116,6 +121,7 @@ iptables -F DOCKER-USER || true   # what a fresh Docker start would look like
 systemctl restart docker
 for _ in $(seq 1 30); do iptables -S DOCKER-USER 2>/dev/null | grep -q ci-job-isolation && break; sleep 1; done
 iptables -S DOCKER-USER | grep -q ci-job-isolation && pass "the unit re-applied the DOCKER-USER rule after systemctl restart docker" || fail "rule not re-applied after a Docker restart"
+# (the host-service path is blocked by design after the restart, so the positive control here uses the forwarded path)
 # positive controls: containers still start and have networking after the restart (default bridge and custom bridge), so the negatives count
 reach http://10.99.0.2/ && pass "control: default-bridge container starts and reaches 10.99.0.2 after the Docker restart" || fail "control failed after the Docker restart: default-bridge container cannot reach 10.99.0.2, the checks below prove nothing"
 NET_ARGS=(--network ci-e2e-br)
