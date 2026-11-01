@@ -137,8 +137,6 @@ EOF
   put /etc/profile.d/90-server-shell.sh 0644 <<'EOF'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
-# Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-# Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
 
@@ -428,7 +426,6 @@ cleanup() {
   put /usr/local/sbin/server-cleanup 0755 <<'EOF'
 #!/usr/bin/env bash
 # server-cleanup: safe cleanup for a general server. Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
-# Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
 # Settings: CLEAN_* in /etc/server-init.conf.
 set -uo pipefail
 CONF=${SERVER_INIT_CONF:-/etc/server-init.conf}

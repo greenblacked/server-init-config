@@ -9,6 +9,8 @@
 set -Eeuo pipefail
 
 FAILED_LOG=/var/log/server-init-failed.log
+DOCKER_LOG=/var/log/server-init-docker.log
+REBOOT_AT_END=0
 CONF_FILE=/etc/server-init.conf
 (( EUID == 0 )) || { echo "run as root" >&2; exit 1; }
 # shellcheck source=/dev/null
@@ -138,12 +140,10 @@ maxretry = 5
 findtime = 10m
 bantime  = 1h
 EOF
-  # Same text as common/shell-history.sh (keep identical; tools/test-cloud-init.py checks it).
+  # = common/shell-history.sh
   put /etc/profile.d/90-server-shell.sh 0644 <<'EOF'
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
-# Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-# Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
 
@@ -341,8 +341,7 @@ CONF
   systemctl enable --now dnf-automatic.timer
 }
 
-# pin_repo_key URL FINGERPRINT DEST: download an armored key, install only the key with that primary
-# fingerprint (anything else in the file is dropped). Needs gpg.
+# pin_repo_key URL FINGERPRINT DEST: install only the downloaded key that has this primary fingerprint.
 pin_repo_key() {
   local url="$1" want="$2" dest="$3" tmp home ok=1
   command -v gpg >/dev/null || dnf -y -q install gnupg2 >/dev/null || return 1
@@ -373,21 +372,24 @@ gpgkey=file:///etc/pki/rpm-gpg/docker-ce.asc
 REPO
 }
 
-# dockerd can fail on a first start: retry, keep the evidence. After a kernel upgrade the running kernel may lack its
-# modules: install them, else a reboot is needed.
+# dockerd can fail on a first start; each failed try goes to $DOCKER_LOG. Under cloud-init a kernel upgraded in this boot can
+# keep Docker down until a reboot (Alma, Rocky 10): the init then ends and reboots once.
 docker_start() {
-  local i o k; k=$(uname -r)
+  local i k n; k=$(uname -r)
   for i in 1 2 3; do
     systemctl reset-failed docker docker.socket 2>/dev/null
     systemctl enable --now docker && docker info >/dev/null 2>&1 && return 0
-    o=$(echo "kernel ${k}"; ls /lib/modules; rpm -q kernel-core kernel-modules-core kernel-modules; modprobe -a -n -v br_netfilter overlay veth 2>&1; journalctl -u docker -u docker.socket -u containerd --no-pager -n 30 2>&1)
-    log "WARN: docker not up (try ${i})"; echo "$o"
-    if (( i == 1 )) && ! modprobe -a -n -q br_netfilter overlay veth; then
-      dnf -y -q install "kernel-modules-core-${k}" "kernel-modules-${k}" || log "WARN: no modules for the running kernel ${k}: reboot"
-    fi
+    log "WARN: docker not up (try ${i})"
+    { echo "== try ${i}, kernel ${k}"; ls /lib/modules; rpm -q kernel-core kernel-modules-core kernel-modules; getenforce
+      modprobe -a -n -v br_netfilter overlay veth nf_tables 2>&1; systemctl status docker docker.socket containerd -l --no-pager | head -50
+      journalctl -u docker -u docker.socket -u containerd --no-pager -n 40; dmesg | tail -15; } >> "$DOCKER_LOG" 2>&1
     (( i == 3 )) || sleep $((i * 3))
   done
-  echo "$o" | sed 's/^/docker: /' >> "$FAILED_LOG"; return 1
+  n=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort -V | tail -1)
+  if [[ -n "$n" && "$n" != "$k" && $(systemctl is-active cloud-final.service) == activating ]]; then
+    log "WARN: no Docker on kernel ${k}, ${n} is installed: rebooting once after the init"; REBOOT_AT_END=1; return 0
+  fi
+  tail -n 30 "$DOCKER_LOG" | sed 's/^/docker: /' >> "$FAILED_LOG"; return 1
 }
 
 docker_engine() {
@@ -423,7 +425,7 @@ swap() {
   grep -qE '^/swapfile[[:space:]]' /etc/fstab || echo '/swapfile none swap defaults 0 0' >> /etc/fstab
 }
 
-# Same text as server/server-cleanup.sh (keep identical; tools/test-cloud-init.py checks it).
+# = server/server-cleanup.sh
 cleanup() {
   if (( INSTALL_CLEANUP != 1 )); then
     log "cleanup disabled in /etc/server-init.conf"
@@ -433,7 +435,6 @@ cleanup() {
   put /usr/local/sbin/server-cleanup 0755 <<'EOF'
 #!/usr/bin/env bash
 # server-cleanup: safe cleanup for a general server. Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
-# Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
 # Settings: CLEAN_* in /etc/server-init.conf.
 set -uo pipefail
 CONF=${SERVER_INIT_CONF:-/etc/server-init.conf}
@@ -608,8 +609,7 @@ step docker docker_engine
 step swap swap
 step cleanup cleanup
 log "open in firewall: $(firewall-cmd --zone=public --list-services 2>/dev/null) $(firewall-cmd --zone=public --list-ports 2>/dev/null)"
-if (( ${#FAILED_STEPS[@]} )); then
-  log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"
-  exit 1
-fi
-log "done, all steps ok"
+rc=0
+if (( ${#FAILED_STEPS[@]} )); then log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"; rc=1; else log "done, all steps ok"; fi
+if (( REBOOT_AT_END )); then log "rebooting now (once)"; systemctl reboot --no-block; fi
+exit "$rc"

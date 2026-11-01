@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # server-cleanup: safe cleanup for a general server. Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
-# Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
 # Settings: CLEAN_* in /etc/server-init.conf.
 set -uo pipefail
 CONF=${SERVER_INIT_CONF:-/etc/server-init.conf}
