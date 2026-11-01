@@ -241,6 +241,28 @@ show_docker_log() { # DESC
   fi
 }
 
+# Known Fedora 44 image issue, allowed narrowly. cloud-init's LOCAL stage runs `hostnamectl set-hostname <local-hostname>` before the
+# D-Bus system bus exists ("Failed to connect to system scope bus"), logs "Will retry in network stage", and the retry succeeds, but
+# cloud-init then reports "degraded done" (exit 2) with one recoverable WARNING. That stage runs before user-data is consumed, so
+# nothing in the cloud-init file can prevent it. The allowance holds only when ALL of these are true; anything else still fails:
+# Fedora, status done / extended_status exactly "degraded done", no errors, the only recoverable error is exactly the hostname
+# WARNING for the seed's local-hostname, cloud-init.log shows the bus failure and the retry, and the live hostname is correct.
+# Args: OS_ID LOCAL_HOSTNAME STATUS_TEXT_FILE STATUS_JSON_FILE CLOUD_INIT_LOG_FILE LIVE_HOSTNAME [STATIC_HOSTNAME]
+vm_hostname_race_allowed() {
+  local osid=$1 want=$2 st=$3 js=$4 lg=$5 live=$6 stat=${7:-$6}
+  [[ "$osid" == fedora && -n "$want" ]] || return 1
+  grep -qx 'status: done' "$st" && grep -qx 'extended_status: degraded done' "$st" || return 1
+  python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1])); want = sys.argv[2]
+r = d.get("recoverable_errors") or {}
+msg = "Failed to set the hostname to %s (%s)" % (want, want)
+ok = (not d.get("errors")) and list(r) == ["WARNING"] and r["WARNING"] == [msg]
+sys.exit(0 if ok else 1)' "$js" "$want" 2>/dev/null || return 1
+  grep -q 'Failed to connect to system scope bus' "$lg" && grep -q 'Will retry in network stage' "$lg" || return 1
+  [[ "$live" == "$want" && "$stat" == "$want" ]]
+}
+
 reboot_vm() {
   local old new i
   old=$(vm_ssh root 'cat /proc/sys/kernel/random/boot_id')
@@ -301,18 +323,34 @@ main() {
     log "ssh dropped while waiting for cloud-init (try ${i}), retrying"; vm_wait_ssh 180
   done
   cat "$ci_out"
-  expect_eq "cloud-init status --wait exit code" "$ci_rc" 0
   # --wait prints progress dots without a newline, so the first line is ".....status: done"; strip them before matching. The
   # extended status must be a plain "done" too ("degraded done" means a module reported a recoverable error).
   local ci_txt; ci_txt=$(sed 's/^\.*//' "$ci_out")
-  grep -qx 'status: done' <<<"$ci_txt" && pass "cloud-init status is done" || fail "cloud-init status is not 'done'"
-  grep -qx 'extended_status: done' <<<"$ci_txt" && pass "cloud-init extended status is done" || fail "cloud-init extended status is not 'done' ($(grep -m1 '^extended_status:' <<<"$ci_txt"))"
-  local js errs
+  local js errs race=0
   js=$(vm_ssh root 'cloud-init status --format json' 2>/dev/null || true)
-  if [[ -n "$js" ]]; then
-    errs=$(python3 -I -c 'import json,sys; d=json.load(sys.stdin); r=d.get("recoverable_errors") or {}; print(len(d.get("errors") or []) + sum(len(v) for v in r.values()))' <<<"$js" 2>/dev/null || echo "?")
-    expect_eq "cloud-init reports no errors" "$errs" 0
-  else warn "cloud-init status --format json is not available on this version"; fi
+  if [[ "${key}" == fedora44 && -n "$js" ]] && grep -qx 'extended_status: degraded done' <<<"$ci_txt"; then
+    local live stat osid
+    printf '%s\n' "$ci_txt" > "$W/ci-status.txt"; printf '%s\n' "$js" > "$W/ci-status.json"
+    vm_ssh root 'cat /var/log/cloud-init.log' > "$W/ci-race.log" 2>/dev/null || : > "$W/ci-race.log"
+    live=$(vm_ssh root 'hostname' 2>/dev/null || true)
+    stat=$(vm_ssh root 'hostnamectl --static 2>/dev/null || hostname' 2>/dev/null || true)
+    osid=$(vm_ssh root '. /etc/os-release; echo "$ID"' 2>/dev/null || true)
+    vm_hostname_race_allowed "$osid" "ci-${key}" "$W/ci-status.txt" "$W/ci-status.json" "$W/ci-race.log" "$live" "$stat" && race=1
+  fi
+  if (( race )) && (( ci_rc == 2 )); then
+    pass "cloud-init status --wait exit code is 2 (degraded done, see below)"
+  else expect_eq "cloud-init status --wait exit code" "$ci_rc" 0; fi
+  if (( race )); then
+    pass "cloud-init done (known Fedora 44 image issue: local-stage hostname before D-Bus, retried OK, hostname correct)"
+    warn "Fedora 44: cloud-init reports 'degraded done' only because its local stage ran hostnamectl before D-Bus; retried in the network stage, hostname is ci-${key}"
+  else
+    grep -qx 'status: done' <<<"$ci_txt" && pass "cloud-init status is done" || fail "cloud-init status is not 'done'"
+    grep -qx 'extended_status: done' <<<"$ci_txt" && pass "cloud-init extended status is done" || fail "cloud-init extended status is not 'done' ($(grep -m1 '^extended_status:' <<<"$ci_txt"))"
+    if [[ -n "$js" ]]; then
+      errs=$(python3 -I -c 'import json,sys; d=json.load(sys.stdin); r=d.get("recoverable_errors") or {}; print(len(d.get("errors") or []) + sum(len(v) for v in r.values()))' <<<"$js" 2>/dev/null || echo "?")
+      expect_eq "cloud-init reports no errors" "$errs" 0
+    else warn "cloud-init status --format json is not available on this version"; fi
+  fi
   if vm_ssh root 'cloud-init schema --help >/dev/null 2>&1'; then
     local sc_rc=0 sc
     sc=$(vm_ssh root 'cloud-init schema --system' 2>&1) || sc_rc=$?

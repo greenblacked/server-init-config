@@ -83,6 +83,25 @@ vm_catalogue runner-debian13; expect_eq "runner Debian 13 boots with UEFI" "$VM_
 ! vm_catalogue nonsense && pass "unknown key is refused" || fail "unknown key accepted"
 endgroup
 
+group "Fedora hostname-race allowance"
+printf 'status: done\nextended_status: degraded done\nerrors: []\n' > "$T/rs"
+printf '{"errors": [], "recoverable_errors": {"WARNING": ["Failed to set the hostname to ci-fedora44 (ci-fedora44)"]}}' > "$T/rj"
+printf 'stderr: Failed to connect to system scope bus via local transport\nWill retry in network stage\n' > "$T/rl"
+race() { vm_hostname_race_allowed "${1:-fedora}" ci-fedora44 "${2:-$T/rs}" "${3:-$T/rj}" "${4:-$T/rl}" "${5:-ci-fedora44}" "${6:-ci-fedora44}"; }
+race && pass "race: exact known case allowed" || fail "race: known case refused"
+race debian && fail "race: other distro allowed" || pass "race: other distro refused"
+printf 'status: done\nextended_status: done\n' > "$T/rs2"; race fedora "$T/rs2" && fail "race: plain done allowed" || pass "race: plain done refused (not degraded)"
+printf 'status: error\nextended_status: degraded done\n' > "$T/rs3"; race fedora "$T/rs3" && fail "race: status error allowed" || pass "race: status not done refused"
+printf '{"errors": ["boom"], "recoverable_errors": {"WARNING": ["Failed to set the hostname to ci-fedora44 (ci-fedora44)"]}}' > "$T/rj2"; race fedora "$T/rs" "$T/rj2" && fail "race: errors allowed" || pass "race: non-empty errors refused"
+printf '{"errors": [], "recoverable_errors": {"WARNING": ["Failed to set the hostname to ci-fedora44 (ci-fedora44)", "other"]}}' > "$T/rj3"; race fedora "$T/rs" "$T/rj3" && fail "race: extra warning allowed" || pass "race: extra warning refused"
+printf '{"errors": [], "recoverable_errors": {"WARNING": ["Failed to set the hostname to x (x)"]}}' > "$T/rj4"; race fedora "$T/rs" "$T/rj4" && fail "race: other hostname allowed" || pass "race: warning for another hostname refused"
+printf '{"errors": [], "recoverable_errors": {"ERROR": ["Failed to set the hostname to ci-fedora44 (ci-fedora44)"]}}' > "$T/rj5"; race fedora "$T/rs" "$T/rj5" && fail "race: ERROR level allowed" || pass "race: wrong level refused"
+printf 'Will retry in network stage\n' > "$T/rl2"; race fedora "$T/rs" "$T/rj" "$T/rl2" && fail "race: no bus evidence allowed" || pass "race: missing bus evidence refused"
+printf 'Failed to connect to system scope bus\n' > "$T/rl3"; race fedora "$T/rs" "$T/rj" "$T/rl3" && fail "race: no retry evidence allowed" || pass "race: missing retry evidence refused"
+race fedora "$T/rs" "$T/rj" "$T/rl" localhost ci-fedora44 && fail "race: wrong live hostname allowed" || pass "race: wrong live hostname refused"
+race fedora "$T/rs" "$T/rj" "$T/rl" ci-fedora44 localhost && fail "race: wrong static hostname allowed" || pass "race: wrong static hostname refused"
+endgroup
+
 group "NoCloud seed"
 if need genisoimage || need xorriso; then
   ssh-keygen -q -t ed25519 -N '' -C selftest -f "$T/id" <<<y >/dev/null 2>&1 || true
