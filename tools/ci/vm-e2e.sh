@@ -28,17 +28,18 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"
 
 # --- pieces that are tested without a VM (tools/ci/vm-selftest.sh) ----------------------------------------------------------
 # vm_make_seed OUT.iso PUBKEY_FILE USERDATA KEY: a NoCloud seed (volume label cidata). user-data is the repo file byte for
-# byte. meta-data mirrors what Hetzner injects: instance-id and the SSH keys. It carries NO local-hostname: Hetzner is a network
-# datasource, so cloud-init never sets the hostname in its local stage there, but NoCloud is a local one and Fedora's
-# hostnamectl fails that early (no D-Bus yet), which cloud-init reports as "degraded done". vendor-data lifts the images'
+# byte. meta-data mirrors what Hetzner injects: instance-id, local-hostname and the SSH keys. vendor-data lifts the images'
 # default "root login disabled" (Hetzner's own images allow root, and the init copies root's keys to the admin user).
+# local-hostname stays in the seed on purpose: Hetzner's datasource is a local-stage one too (DEP_FILESYSTEM, sets local-hostname
+# from the metadata), so a real server makes the same early hostname attempt. If Fedora ends "degraded done" because of it,
+# that is a finding, not a seed to adjust; vm_collect records the hostnamectl/bus evidence.
 vm_make_seed() {
   local out=$1 pub=$2 userdata=$3 key=$4 d
   [[ -f "$userdata" ]] || die "user-data file not found: $userdata"
   [[ -s "$pub" ]] || die "public key file empty: $pub"
   d=$(mktemp -d)
   cp "$userdata" "$d/user-data"
-  printf 'instance-id: iid-ci-%s-%s\npublic-keys:\n  - %s\n' "$key" "$(date +%s)" "$(cat "$pub")" > "$d/meta-data"
+  printf 'instance-id: iid-ci-%s-%s\nlocal-hostname: ci-%s\npublic-keys:\n  - %s\n' "$key" "$(date +%s)" "$key" "$(cat "$pub")" > "$d/meta-data"
   printf '#cloud-config\ndisable_root: false\n' > "$d/vendor-data"
   if need genisoimage; then genisoimage -quiet -output "$out" -volid cidata -joliet -rock "$d/user-data" "$d/meta-data" "$d/vendor-data"
   elif need xorriso; then xorriso -as mkisofs -quiet -output "$out" -volid cidata -joliet -rock "$d/user-data" "$d/meta-data" "$d/vendor-data"
@@ -151,6 +152,8 @@ vm_collect() {
     echo "--- firewall"; { ufw status verbose; firewall-cmd --list-all; nft list ruleset | head -80; iptables -S | head -60; } 2>&1
     echo "--- docker"; docker ps -a 2>&1 | head -20
     echo "--- hostname"; hostname; hostnamectl 2>&1 | head -12; systemctl status systemd-hostnamed --no-pager 2>&1 | head -15
+    echo "--- hostname and bus in the journal with monotonic time (what hostnamectl printed in the cloud-init local stage, and whether D-Bus was up yet)"
+    journalctl -b -o short-monotonic --no-pager -u systemd-hostnamed -u dbus -u dbus-broker -u cloud-init-local -u cloud-init -g "hostname|bus|D-Bus|Failed to set" -n 120 2>&1 | cut -c1-400
     echo "--- journal, warnings and worse, this boot"; journalctl -b -p warning --no-pager -n 300 2>&1
     echo "--- journal of the key units"; journalctl -b --no-pager -n 200 -u cloud-init-local -u cloud-init -u cloud-config -u cloud-final -u ssh -u sshd -u docker -u firewalld -u fail2ban 2>&1' \
     > "$g/diagnostics.txt" 2>&1 || true
@@ -158,7 +161,7 @@ vm_collect() {
   for f in "$W"/qemu*.log; do [[ -f "$f" ]] && cp "$f" "$g/"; done
   for f in "$g"/*; do [[ -f "$f" ]] && ci_redact_file "$f"; done
   if [[ -f "$g/cloud-init.log" ]] && grep -qi 'hostname' "$g/cloud-init.log"; then
-    echo "--- hostname lines of cloud-init.log"; grep -i 'hostname' "$g/cloud-init.log" | cut -c1-400 | head -n 60
+    echo "--- hostname lines of cloud-init.log (with the command's stderr that follows a failure)"; grep -i -A6 'hostname' "$g/cloud-init.log" | cut -c1-400 | head -n 120
   fi
   return 0
 }
