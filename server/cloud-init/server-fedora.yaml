@@ -38,14 +38,12 @@ write_files:
     content: |
       #!/usr/bin/env bash
       # Base setup for a general (non-runner) Fedora 44 server, x86_64 or ARM64:
-      # SSH keys only, admin user with sudo, firewalld, fail2ban for SSH, automatic security updates,
-      # Docker Engine + Compose, swap + sysctl, journald limit, chrony, admin tools, weekly cleanup.
+      # SSH keys only, admin user with sudo, firewalld, fail2ban, auto security updates, Docker + Compose, swap,
+      # sysctl, journald limit, chrony, admin tools, weekly cleanup.
       # Root keeps login by SSH key on port 22, so nothing here can lock you out.
       #
-      # Self-contained and idempotent: it writes its own config files, so it runs the same from a paste
-      # (server/README.md) or from a copy of the repo. Rerun as root any time: /usr/local/sbin/server-init.sh
-      # Settings live in /etc/server-init.conf (created on first run from the environment or defaults).
-      # Every step after SSH hardening is non-fatal: a failed step is logged and the next one still runs.
+      # Self-contained and idempotent; rerun as root any time: /usr/local/sbin/server-init.sh (settings: /etc/server-init.conf).
+      # After SSH hardening a failed step is logged and the next one still runs.
       set -Eeuo pipefail
 
       FAILED_LOG=/var/log/server-init-failed.log
@@ -178,8 +176,7 @@ write_files:
       # shellcheck shell=bash
       # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
       # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-      # The same text is embedded in the server/server-init-*.sh scripts (they must stay self-contained):
-      # keep all copies identical, tools/test-cloud-init.py checks that.
+      # Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
       [ -n "${BASH_VERSION-}" ] || return 0
       [[ $- == *i* ]] || return 0
 
@@ -412,6 +409,18 @@ write_files:
       REPO
       }
 
+      # dockerd can fail on its first start: retry, keep the evidence.
+      docker_start() {
+        local i o
+        for i in 1 2 3 4; do
+          systemctl reset-failed docker docker.socket 2>/dev/null
+          systemctl enable --now docker && docker info >/dev/null 2>&1 && return 0
+          o=$(uname -r; lsmod | grep -oE '^(overlay|br_netfilter|nf_tables)'; journalctl -u docker -u docker.socket -u containerd --no-pager -n 30 2>&1)
+          log "WARN: docker not up (try ${i})"; echo "$o"; sleep $((i * 3))
+        done
+        echo "$o" | sed 's/^/docker: /' >> "$FAILED_LOG"; return 1
+      }
+
       docker_engine() {
         (( INSTALL_DOCKER == 1 )) || { log "Docker disabled in /etc/server-init.conf"; return 0; }
         if ! command -v docker >/dev/null; then
@@ -420,8 +429,7 @@ write_files:
           fi
           dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
         fi
-        systemctl enable --now docker || return 1
-        docker info >/dev/null
+        docker_start
       }
 
       swap() {
@@ -454,12 +462,9 @@ write_files:
         fi
         put /usr/local/sbin/server-cleanup 0755 <<'EOF'
       #!/usr/bin/env bash
-      # server-cleanup: safe cleanup for a general server (journal, package cache, Docker leftovers, rotated logs,
-      # temp files, core dumps). Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
-      # Same text is embedded in the server/server-init-*.sh scripts that install it (they must stay
-      # self-contained): keep all copies identical, tools/test-cloud-init.py checks that.
-      # Settings come from /etc/server-init.conf (CLEAN_JOURNAL_TIME, CLEAN_JOURNAL_SIZE, CLEAN_AUTOREMOVE,
-      # CLEAN_DOCKER_UNUSED_IMAGES); missing keys use the defaults below.
+      # server-cleanup: safe cleanup for a general server. Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
+      # Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
+      # Settings: /etc/server-init.conf (CLEAN_JOURNAL_TIME, CLEAN_JOURNAL_SIZE, CLEAN_AUTOREMOVE, CLEAN_DOCKER_UNUSED_IMAGES).
       set -uo pipefail
       CONF=${SERVER_INIT_CONF:-/etc/server-init.conf}
       STATE=${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}

@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# server-cleanup: safe cleanup for a general server (journal, package cache, Docker leftovers, rotated logs,
-# temp files, core dumps). Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
-# Same text is embedded in the server/server-init-*.sh scripts that install it (they must stay
-# self-contained): keep all copies identical, tools/test-cloud-init.py checks that.
-# Settings come from /etc/server-init.conf (CLEAN_JOURNAL_TIME, CLEAN_JOURNAL_SIZE, CLEAN_AUTOREMOVE,
-# CLEAN_DOCKER_UNUSED_IMAGES); missing keys use the defaults below.
+# server-cleanup: safe cleanup for a general server. Never touches /home, /root, /srv, /opt, Docker volumes, databases or repos.
+# Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
+# Settings: /etc/server-init.conf (CLEAN_JOURNAL_TIME, CLEAN_JOURNAL_SIZE, CLEAN_AUTOREMOVE, CLEAN_DOCKER_UNUSED_IMAGES).
 set -uo pipefail
 CONF=${SERVER_INIT_CONF:-/etc/server-init.conf}
 STATE=${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}

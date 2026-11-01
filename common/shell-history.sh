@@ -1,8 +1,7 @@
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-# The same text is embedded in the server/server-init-*.sh scripts (they must stay self-contained):
-# keep all copies identical, tools/test-cloud-init.py checks that.
+# Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
 

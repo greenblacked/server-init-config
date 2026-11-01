@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 # Base setup for a general (non-runner) server on Ubuntu 26.04 (also 24.04) or Debian 13, x86_64 or ARM64:
-# SSH keys only, admin user with sudo, ufw, fail2ban for SSH, automatic security updates,
-# Docker Engine + Compose, swap + sysctl, journald limit, time sync, admin tools, shell history.
-# Also safe on Hetzner Apps images (Coolify, Docker CE, GitLab CE, Jitsi Meet, Owncast, PhotoPrism, Prometheus Grafana,
-# RustDesk): existing Docker, firewall rules and app configuration are never touched, only the app's ports are added to ufw.
+# SSH keys only, admin user with sudo, ufw, fail2ban, auto security updates, Docker + Compose, swap, sysctl,
+# journald limit, time sync, admin tools, shell history.
+# Also safe on Hetzner Apps images (Coolify, Docker CE, GitLab CE, Jitsi Meet, ...): existing Docker, firewall rules and
+# app config stay untouched; only the app's ports are added to ufw.
 # Root keeps login by SSH key on port 22, so nothing here can lock you out.
 #
-# Self-contained and idempotent: it writes its own config files, so it runs the same from a paste
-# or from a copy of the repo. Rerun as root any time: /usr/local/sbin/server-init.sh
-# Settings live in /etc/server-init.conf (created on first run from the environment or defaults).
-# Every step after SSH hardening is non-fatal: a failed step is logged and the next one still runs.
+# Self-contained and idempotent; rerun as root any time: /usr/local/sbin/server-init.sh (settings: /etc/server-init.conf).
+# After SSH hardening a failed step is logged and the next one still runs.
 set -Eeuo pipefail
 
 FAILED_LOG=/var/log/server-init-failed.log
@@ -181,8 +179,7 @@ EOF
 # shellcheck shell=bash
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 # Installed as /etc/profile.d/90-shell-history.sh (runner hosts) or 90-server-shell.sh (plain servers).
-# The same text is embedded in the server/server-init-*.sh scripts (they must stay self-contained):
-# keep all copies identical, tools/test-cloud-init.py checks that.
+# Embedded unchanged in the server/server-init-*.sh scripts (tools/test-cloud-init.py checks the copies).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
 
@@ -307,7 +304,7 @@ system_tuning() {
   timedatectl set-timezone "$TIMEZONE" || fail "unknown TIMEZONE: $TIMEZONE"
   systemctl restart systemd-journald || return 1
   sysctl --system >/dev/null || return 1
-  # Keep the time sync that is already running (systemd-timesyncd or chrony); install chrony only if neither is.
+  # Keep a running time sync (systemd-timesyncd or chrony); install chrony only if neither is.
   if systemctl is-active --quiet systemd-timesyncd; then log "time sync: systemd-timesyncd (kept)"
   elif systemctl is-active --quiet chrony; then log "time sync: chrony (kept)"
   else
@@ -488,13 +485,24 @@ pin_repo_key() {
   return "$ok"
 }
 
+# dockerd can fail on its first start: retry, keep the evidence.
+docker_start() {
+  local i o
+  for i in 1 2 3 4; do
+    systemctl reset-failed docker docker.socket 2>/dev/null
+    systemctl enable --now docker && docker info >/dev/null 2>&1 && return 0
+    o=$(uname -r; lsmod | grep -oE '^(overlay|br_netfilter|nf_tables)'; journalctl -u docker -u docker.socket -u containerd --no-pager -n 30 2>&1)
+    log "WARN: docker not up (try ${i})"; echo "$o"; sleep $((i * 3))
+  done
+  echo "$o" | sed 's/^/docker: /' >> "$FAILED_LOG"; return 1
+}
+
 docker_engine() {
   (( INSTALL_DOCKER == 1 )) || { log "Docker disabled in /etc/server-init.conf"; return 0; }
   if command -v docker >/dev/null; then
-    # Already installed (own earlier run or a Hetzner Apps image): keep its repo, packages and daemon.json.
+    # Already installed (earlier run or Apps image): keep its repo, packages and daemon.json.
     log "Docker present ($(docker --version 2>/dev/null)); not reinstalled or reconfigured"
-    systemctl is-active --quiet docker || systemctl enable --now docker || return 1
-    docker info >/dev/null
+    docker_start
     return
   fi
   local arch repo_ok=0 src compose_pkg=docker-compose
@@ -537,8 +545,7 @@ EOF
     apt_get install docker.io "$compose_pkg" >/dev/null || return 1
     log "Docker source: distro packages docker.io + ${compose_pkg}"
   fi
-  systemctl enable --now docker || return 1
-  docker info >/dev/null
+  docker_start
 }
 
 swap() {
@@ -552,7 +559,7 @@ swap() {
     if [[ "$(findmnt -no FSTYPE /)" == btrfs ]]; then
       btrfs filesystem mkswapfile --size "${size_mb}m" /swapfile || return 1
     else
-      # fallocate is fine on ext4 (the default); dd is the fallback if it fails or the file is rejected as swap.
+      # fallocate on ext4 (the default); dd if it fails or the file is rejected as swap.
       if fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
         chmod 600 /swapfile
         mkswap /swapfile >/dev/null || return 1
