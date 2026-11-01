@@ -256,14 +256,12 @@ admin_user() {
 }
 
 system_tuning() {
-  # Fallback without D-Bus: the symlink timedatectl would make.
   timedatectl set-timezone "$TIMEZONE" 2>/dev/null || { [[ "$TIMEZONE" != *..* && -f "/usr/share/zoneinfo/$TIMEZONE" ]] && ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime; } || fail "unknown TIMEZONE: $TIMEZONE"
   systemctl restart systemd-journald || return 1
   sysctl --system >/dev/null || return 1
   systemctl enable --now chronyd
 }
 
-# Permanent firewalld change: live (firewall-cmd --permanent) when firewalld runs, offline otherwise.
 fw_perm() {
   if systemctl is-active --quiet firewalld; then firewall-cmd --permanent "$@"; else firewall-offline-cmd "$@"; fi
 }
@@ -372,10 +370,8 @@ gpgkey=file:///etc/pki/rpm-gpg/docker-ce.asc
 REPO
 }
 
-# dockerd can fail on a first start; each failed try goes to $DOCKER_LOG. Under cloud-init a kernel upgraded in this boot can
-# keep Docker down until a reboot (Alma, Rocky 10): the init then ends and reboots once.
 docker_start() {
-  local i k n; k=$(uname -r)
+  local i k n d; k=$(uname -r)
   for i in 1 2 3; do
     systemctl reset-failed docker docker.socket 2>/dev/null
     systemctl enable --now docker && docker info >/dev/null 2>&1 && return 0
@@ -387,7 +383,10 @@ docker_start() {
   done
   n=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort -V | tail -1)
   if [[ -n "$n" && "$n" != "$k" && $(systemctl is-active cloud-final.service) == activating ]]; then
-    log "WARN: no Docker on kernel ${k}, ${n} is installed: rebooting once after the init"; REBOOT_AT_END=1; return 0
+    # The entry stays until docker.service starts after the reboot (the drop-in removes both). Failed tries: $DOCKER_LOG.
+    d=/etc/systemd/system/docker.service.d/reboot.conf
+    printf '[Service]\nExecStartPost=-/bin/sed -i /docker-reboot-pending/d %s\nExecStartPost=-/bin/rm -f %s\n' "$FAILED_LOG" "$d" | put "$d" 0644
+    fail "docker-reboot-pending: no Docker on kernel ${k}, rebooting into ${n} after the init"; REBOOT_AT_END=1; return 0
   fi
   tail -n 30 "$DOCKER_LOG" | sed 's/^/docker: /' >> "$FAILED_LOG"; return 1
 }
@@ -610,6 +609,8 @@ step swap swap
 step cleanup cleanup
 log "open in firewall: $(firewall-cmd --zone=public --list-services 2>/dev/null) $(firewall-cmd --zone=public --list-ports 2>/dev/null)"
 rc=0
-if (( ${#FAILED_STEPS[@]} )); then log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"; rc=1; else log "done, all steps ok"; fi
+if (( ${#FAILED_STEPS[@]} )); then log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"; rc=1
+elif (( REBOOT_AT_END )); then log "done, reboot pending for docker (see $FAILED_LOG)"
+else log "done, all steps ok"; fi
 if (( REBOOT_AT_END )); then log "rebooting now (once)"; systemctl reboot --no-block; fi
 exit "$rc"
