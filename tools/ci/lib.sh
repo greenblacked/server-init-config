@@ -42,19 +42,28 @@ ci_mask() {
 # Also hidden: the WireGuard client config together with its QR code (a scannable private key), and the plugin URLs that
 # carry a Lampac device key in the path (/on/js/KEY, /online/js/KEY, /sisi/js/KEY).
 # One exception, so a failing security check still says why in the public logs: a test-harness result line (PASS/FAIL/WARN, or
-# ::error::/::warning::) keeps the word "password" when it only appears inside a fixed check phrase from tools/ci/*.sh (CI_SAFE_PHRASES).
+# ::error::/::warning::) keeps the word "password" when the WHOLE line is one fixed check phrase from tools/ci/*.sh
+# (CI_SAFE_PHRASES), optionally followed by one parenthesised note, e.g. "  FAIL  sshd: password login is off" or
+# "  FAIL  sshd: permitrootlogin is not prohibit-password (permitrootlogin yes)". Free text after the phrase is not allowed.
 # The phrases are an explicit allow-list, not a rule: awk marks the word inside them with a control character (\001) so the
-# secret rule below does not see it, and it is removed again at the end. Anything left over on the line (a second "password",
-# "token", "secret", a key: value...) still matches the secret rule and hides the whole line. A result line with a run of 32 or
-# more base64-looking characters is never marked, nor one with "user:"/"login=" credentials (a "key=" or "key:" value hides it) or a phrase followed by ":"/"=" and a value.
-CI_SAFE_PHRASES='sshd: password login( still)? on|sshd: passwordauthentication no|[a-z0-9_.-]+ has passwordless sudo|permitrootlogin is not prohibit-password|install printed the admin web password once|no admin password in the install output|rerun replaced the password|public: wrong password is 401'
+# secret rule below does not see it, and it is removed again at the end. A line that is not exactly phrase(+note) is left as it
+# is, so the secret rule hides it. Also never marked: a line with a run of 32 or more base64-looking characters (a note with a run of 20+),
+# one with "key:"/"key=", "user:"/"login=" credentials, or "pass:"/"passwd="/"pwd:" followed by a value.
+# (The run length is counted by a loop, not a {n,} interval: old mawk, e.g. Ubuntu 22.04, treats {32,} literally.)
+CI_SAFE_PHRASES='sshd: password login( still| is)? (on|off)|sshd: passwordauthentication no|[a-z0-9_.-]+ has passwordless sudo|sshd: permitrootlogin is not prohibit-password|install printed the admin web password once|no admin password in the install output|rerun replaced the password|public: wrong password is 401'
 ci_redact() {
   awk -v phrases="$CI_SAFE_PHRASES" '
     function qr(s) { gsub(/\033\[[0-9;]*m/, "", s); return s ~ /^( |▀|▄|█)*$/ }
-    function mark(s,   lo, o, seg) {
+    function longrun(s, n) {
+      while (match(s, /[A-Za-z0-9+\/=_-]+/)) { if (RLENGTH >= n) return 1; s = substr(s, RSTART + RLENGTH) }
+      return 0
+    }
+    function mark(s,   lo, o, seg, note) {
       lo = tolower(s); o = ""
-      if (lo ~ /key[ \t]*[:=]/) return "    [line hidden: it may hold a secret]"
+      if (lo ~ /key[ \t]*[:=]/ || lo ~ /(pass(wd)?|pwd)[ \t]*[:=]/) return "    [line hidden: it may hold a secret]"
       if (lo ~ /(user(name)?|login)[ \t]*[:=]/) return s
+      if (lo !~ ("^[ \t]+(pass|fail|warn)[ \t]+(" phrases ")( \\([^()]*\\))?$") && lo !~ ("^::(error|warning)::(" phrases ")( \\([^()]*\\))?$")) return s
+      if (match(lo, / \([^()]*\)$/) && longrun(substr(lo, RSTART), 20)) return s
       while (match(lo, phrases)) {
         seg = substr(s, RSTART, RLENGTH)
         if (substr(lo, RSTART + RLENGTH) !~ /^[ \t]*[:=]/) gsub(/[Pp][Aa][Ss][Ss]/, "&" SENT, seg)
@@ -68,7 +77,7 @@ ci_redact() {
     { st = (st == 2 ? 0 : st) }
     st == 1 { if ($0 ~ /^PersistentKeepalive/) st = 2; next }
     /^\[Interface\]/ { st = 1; print "    [WireGuard client config and QR code hidden]"; next }
-    /^[ \t]+(PASS|FAIL|WARN)[ \t]/ || /^::(error|warning)::/ { if ($0 !~ /[A-Za-z0-9+\/=_-]{32,}/) $0 = mark($0) }
+    /^[ \t]+(PASS|FAIL|WARN)[ \t]/ || /^::(error|warning)::/ { if (!longrun($0, 32)) $0 = mark($0) }
     { print }
   ' | sed -E -e 's/.*(password|token|secret|private ?key|preshared ?key).*/    [line hidden: it may hold a secret]/I' \
     -e 's#.*/(on|online|sisi)/js/.*#    [line hidden: it may hold a device key]#' | tr -d '\001'
