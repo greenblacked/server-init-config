@@ -137,6 +137,17 @@ grep -q 'systemd-run --no-block -p After=cloud-final.service systemctl reboot' "
   && pass "fedora, debian, opensuse inits never reboot" || fail "another server init reboots"
 endgroup
 
+group "sshd -T is never piped into grep -q (pipefail)"
+# opensuse16 run 41308402493: the rerun logged "sshd does not apply sshd_config.d/00-hardening.conf" although the drop-in applied:
+# grep -q left after the first match, sshd -T (about 5 KB, written in chunks) got SIGPIPE and pipefail failed the pipeline.
+slow_out() { printf 'passwordauthentication no\n'; sleep 0.3; head -c 6000 /dev/zero | tr '\0' x; printf '\n'; }
+( set -o pipefail; slow_out | grep -qix 'passwordauthentication no' ) && fail "pipefail model: early grep -q did not fail the pipeline (test is blind)" || pass "pipefail model: grep -q closing early fails the pipeline"
+( set -o pipefail; o=$(slow_out); grep -qix 'passwordauthentication no' <<<"$o" ) && pass "captured output: same check passes" || fail "captured output: check failed"
+for f in server/server-init-*.sh server/cloud-init/server-*.yaml; do
+  grep -nE 'sshd -T[^|]*\| *grep -[a-zA-Z]*q' "$f" && fail "$f: sshd -T piped into grep -q" || pass "$f: no sshd -T piped into grep -q"
+done
+endgroup
+
 group "NoCloud seed"
 if need genisoimage || need xorriso; then
   ssh-keygen -q -t ed25519 -N '' -C selftest -f "$T/id" <<<y >/dev/null 2>&1 || true
