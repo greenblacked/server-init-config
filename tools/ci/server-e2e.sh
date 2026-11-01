@@ -132,8 +132,11 @@ FIRST_FAILED="$FAILED_LIST"
 endgroup
 
 group "3. assertions inside the machine"
-docker exec -i "$NAME" bash -s -- "$KIND" "$FIRST_FAILED" < tools/ci/server-assert.sh 2>&1 | tee "$W/assert.log" || true
+# No `|| true` after the pipeline: it would overwrite PIPESTATUS, and assert_rc would always be 0.
+set +e
+docker exec -i "$NAME" bash -s -- "$KIND" "$FIRST_FAILED" < tools/ci/server-assert.sh 2>&1 | tee "$W/assert.log"
 assert_rc=${PIPESTATUS[0]}
+set -e
 if ! grep -q '^ASSERT-DONE$' "$W/assert.log"; then fail "assertions did not run to the end (no ASSERT-DONE marker, docker exec exit ${assert_rc})"
 elif grep -q '  FAIL  ' "$W/assert.log" || (( assert_rc != 0 )); then fail "assertions inside the machine failed (exit ${assert_rc}, see above)"
 else pass "assertions inside the machine"; fi
