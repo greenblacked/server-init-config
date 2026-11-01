@@ -26,6 +26,38 @@ test_redact_passes_normal_lines() {
   assert_eq "$(printf '%s\n' "$in" | ci_redact)" "$in"
 }
 
+test_redact_keeps_safe_check_lines() {
+  local l
+  for l in '  FAIL  sshd: password login still on' '  FAIL  sshd: password login on' '  PASS  sshd: passwordauthentication no' \
+           '  PASS  sshd: root by key only' '  FAIL  sshd: permitrootlogin is not prohibit-password (permitrootlogin yes)' \
+           '  PASS  admin has passwordless sudo' '  FAIL  deploy has passwordless sudo' '  PASS  install printed the admin web password once' \
+           '  FAIL  no admin password in the install output' '  FAIL  rerun replaced the password' '  PASS  public: wrong password is 401 (401)' \
+           '  WARN  sshd: Password login still on' '::error::sshd: password login still on' '::warning::sshd: passwordauthentication no'; do
+    assert_eq "$(printf '%s\n' "$l" | ci_redact)" "$l" "$l"
+  done
+}
+
+test_redact_hides_safe_phrase_lines_that_embed_a_secret() {
+  local l b64='QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5'
+  for l in '  FAIL  sshd: password login still on password=hunter2' '  FAIL  sshd: password login still on, token=abc' \
+           '  FAIL  sshd: password login still on secret: abc' '  PASS  sshd: passwordauthentication no key=abc' \
+           '  FAIL  rerun replaced the password: hunter2' '  FAIL  rerun replaced the password=hunter2' \
+           '  FAIL  user: bob sshd: password login still on' '  FAIL  username=bob sshd: password login on' \
+           '  FAIL  sshd: password login still on password: hunter2' '::error::sshd: password login still on password: hunter2' \
+           '  FAIL  sshd: password login on /lite/events?token=abc' '  FAIL  sshd: password login on PrivateKey = abc' \
+           '  FAIL  sshd: password login on PresharedKey: abc' '  FAIL  sshd: password login on -----BEGIN OPENSSH PRIVATE KEY-----' \
+           "  FAIL  sshd: password login on $b64" "  FAIL  sshd: password login on http://h/on/js/abc"; do
+    out=$(printf '%s\n' "$l" | ci_redact)
+    [[ "$out" == '    [line hidden: it may hold a '@(secret|device key)']' ]] || { echo "    not hidden: $l -> $out" >&2; return 1; }
+  done
+}
+
+test_redact_ignores_forged_marker_character() {
+  # a control character in the input must not let a secret slip past the rule (it is dropped before the line is looked at)
+  assert_eq "$(printf '  FAIL  pass\001word=x\n' | ci_redact)" "$HIDDEN_PW"
+  assert_eq "$(printf '  FAIL  sshd: pass\001word login on token=x\n' | ci_redact)" "$HIDDEN_PW"
+}
+
 test_redact_is_case_insensitive() {
   assert_eq "$(echo 'PaSsWoRd=x' | ci_redact)" "$HIDDEN_PW"
 }

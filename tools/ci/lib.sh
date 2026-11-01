@@ -41,16 +41,37 @@ ci_mask() {
 }
 # Also hidden: the WireGuard client config together with its QR code (a scannable private key), and the plugin URLs that
 # carry a Lampac device key in the path (/on/js/KEY, /online/js/KEY, /sisi/js/KEY).
+# One exception, so a failing security check still says why in the public logs: a test-harness result line (PASS/FAIL/WARN, or
+# ::error::/::warning::) keeps the word "password" when it only appears inside a fixed check phrase from tools/ci/*.sh (CI_SAFE_PHRASES).
+# The phrases are an explicit allow-list, not a rule: awk marks the word inside them with a control character (\001) so the
+# secret rule below does not see it, and it is removed again at the end. Anything left over on the line (a second "password",
+# "token", "secret", a key: value...) still matches the secret rule and hides the whole line. A result line with a run of 32 or
+# more base64-looking characters is never marked, nor one with "user:"/"login=" credentials (a "key=" or "key:" value hides it) or a phrase followed by ":"/"=" and a value.
+CI_SAFE_PHRASES='sshd: password login( still)? on|sshd: passwordauthentication no|[a-z0-9_.-]+ has passwordless sudo|permitrootlogin is not prohibit-password|install printed the admin web password once|no admin password in the install output|rerun replaced the password|public: wrong password is 401'
 ci_redact() {
-  awk '
+  awk -v phrases="$CI_SAFE_PHRASES" '
     function qr(s) { gsub(/\033\[[0-9;]*m/, "", s); return s ~ /^( |▀|▄|█)*$/ }
+    function mark(s,   lo, o, seg) {
+      lo = tolower(s); o = ""
+      if (lo ~ /key[ \t]*[:=]/) return "    [line hidden: it may hold a secret]"
+      if (lo ~ /(user(name)?|login)[ \t]*[:=]/) return s
+      while (match(lo, phrases)) {
+        seg = substr(s, RSTART, RLENGTH)
+        if (substr(lo, RSTART + RLENGTH) !~ /^[ \t]*[:=]/) gsub(/[Pp][Aa][Ss][Ss]/, "&" SENT, seg)
+        o = o substr(s, 1, RSTART - 1) seg; s = substr(s, RSTART + RLENGTH); lo = substr(lo, RSTART + RLENGTH)
+      }
+      return o s
+    }
+    BEGIN { SENT = sprintf("%c", 1) }
+    { gsub(SENT, "") }
     st == 2 && qr($0) { next }
     { st = (st == 2 ? 0 : st) }
     st == 1 { if ($0 ~ /^PersistentKeepalive/) st = 2; next }
     /^\[Interface\]/ { st = 1; print "    [WireGuard client config and QR code hidden]"; next }
+    /^[ \t]+(PASS|FAIL|WARN)[ \t]/ || /^::(error|warning)::/ { if ($0 !~ /[A-Za-z0-9+\/=_-]{32,}/) $0 = mark($0) }
     { print }
   ' | sed -E -e 's/.*(password|token|secret|private ?key|preshared ?key).*/    [line hidden: it may hold a secret]/I' \
-    -e 's#.*/(on|online|sisi)/js/.*#    [line hidden: it may hold a device key]#'
+    -e 's#.*/(on|online|sisi)/js/.*#    [line hidden: it may hold a device key]#' | tr -d '\001'
 }
 ci_redact_file() { local t; t=$(mktemp); ci_redact < "$1" > "$t" && cat "$t" > "$1"; rm -f "$t"; }
 # ci_run LOG TAIL_LINES cmd...   runs cmd; the raw output (it may hold generated passwords) stays in a private temp file
