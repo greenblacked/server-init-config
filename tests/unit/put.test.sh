@@ -13,12 +13,16 @@ load_put() { # load_put FILE
 
 PUT_FILES=(server/server-init-fedora.sh server/server-init-opensuse.sh server/server-init-el10.sh server/server-init-debian.sh server/install-tools.sh)
 
+# FN is called as a plain command, never on the left of `||` / `if`, so `set -e` stays on inside it and any failing
+# assert or setup command fails the test (the ERR trap only names the script that failed).
 each_put() { # each_put FN : run FN once per script, each with a fresh directory
   local f
   for f in "${PUT_FILES[@]}"; do
     load_put "$f"
     rm -rf "${T:?}/w"; mkdir "$T/w"
-    "$1" "$f" || { echo "    (in $f)" >&2; return 1; }
+    trap 'echo "    (in $f)" >&2' ERR
+    "$1" "$f"
+    trap - ERR
   done
 }
 
@@ -29,7 +33,7 @@ t_creates_with_mode_and_parents() {
 }
 t_unchanged_content_is_not_rewritten() {
   printf 'x\n' | put "$T/w/file" 0644
-  touch -d '2001-01-01 00:00:00' "$T/w/file"
+  touch -d @978307200 "$T/w/file"
   printf 'x\n' | put "$T/w/file" 0644
   assert_eq "$(stat -c %Y "$T/w/file")" 978307200 "mtime unchanged"
 }
@@ -42,7 +46,7 @@ t_prints_nothing() {
   assert_eq "$(printf 'x\n' | put "$T/w/file" 0644 2>&1)" ""
 }
 t_leaves_no_temp_files() {
-  mkdir "$T/tmp"
+  rm -rf "${T:?}/tmp"; mkdir "$T/tmp"
   printf 'x\n' | TMPDIR="$T/tmp" put "$T/w/file" 0644
   printf 'x\n' | TMPDIR="$T/tmp" put "$T/w/file" 0644
   printf 'y\n' | TMPDIR="$T/tmp" put "$T/w/file" 0644
