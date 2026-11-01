@@ -6,7 +6,7 @@ name: ai
 
 services:
   ollama:
-    image: ollama/ollama:0.40.12
+    image: ollama/ollama:0.40.13
     restart: unless-stopped
     environment:
       OLLAMA_KEEP_ALIVE: "10m"          # unload the model from RAM after 10 min idle
