@@ -15,14 +15,18 @@ updates:
     commit-message:
       prefix: ci
 
-  # Compose files whose images are literal and tag-pinned. other/torrserver is left out: both of its images come from
-  # ${VAR} / ${VAR:-default} interpolation, which Dependabot's compose parser is not known to resolve.
+  # Compose files whose images are literal and tag-pinned and that no generated file embeds. Only server/ai qualifies.
+  # Left out on purpose:
+  #  - runner/stacks/registry-cache is embedded in the rendered cloud-init files (@@FILE@@ in
+  #    runner/cloud-init/templates/common-files.yaml.in), and every runner/stacks/* directory (registry-cache,
+  #    monitoring, logging, npm-cache) is embedded in runner/COMMANDS.md by tools/render-paste-commands.py. A Dependabot
+  #    PR edits only the compose file, so the render --check in tools/ci/lint.sh always fails on it.
+  #    To bump an embedded image by hand: edit the compose file, run tools/render-cloud-init.py and
+  #    tools/render-paste-commands.py, commit the compose file and the regenerated files together.
+  #  - other/torrserver: both of its images come from ${VAR} / ${VAR:-default} interpolation, which Dependabot's
+  #    compose parser is not known to resolve.
   - package-ecosystem: docker-compose
     directories:
-      - /runner/stacks/logging
-      - /runner/stacks/monitoring
-      - /runner/stacks/npm-cache
-      - /runner/stacks/registry-cache
       - /server/ai
     schedule:
       interval: weekly
