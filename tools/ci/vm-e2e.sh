@@ -9,8 +9,8 @@
 #          VM_CACHE=DIR   downloaded images (default ~/.cache/server-init-vm; CI: .vm-cache)
 #          VM_ACCEL=tcg  software emulation, ONLY to smoke-test this harness (far too slow for the real init)
 #          SSH_PORT=2222  MEM_MB=4096  CPUS=2  DISK_GB=20  BOOT_TIMEOUT=900 (seconds until sshd answers)  KEEP=1 leave the VM running
-# Server keys: cloud-init done without errors, schema, no failed step, tools/ci/server-assert.sh with STRICT=1 (nothing may be
-# allow-listed), swap, sysctl, Docker, firewall, fail2ban, ops over ssh + sudo; REBOOT and check again; rerun
+# Server keys: cloud-init done without errors, schema, no failed step, tools/ci/server-assert.sh with an empty list of
+# allowed failures (nothing may be allow-listed), swap, sysctl, Docker, firewall, fail2ban, ops over ssh + sudo; REBOOT and check again; rerun
 # /usr/local/sbin/server-init.sh and compare the managed files. Runner keys: cloud-init done, Docker, gitlab-runner installed
 # (NO token: nothing is registered), timers, job isolation rules, reboot and check again.
 # Logs (redacted) go to ci-out/vm-KEY/. The throwaway SSH key lives in a temp dir and is never copied there.
@@ -143,7 +143,7 @@ cleanup() {
 # Run the in-guest checks and count their result.
 guest_checks() { # PHASE
   local phase=$1 out="$W/guest-checks-$1.log" rc=0
-  vm_ssh root "bash -s -- ${VM_ROLE} ${VM_KIND} ${phase}" < "$CI_ROOT/tools/ci/vm-guest-checks.sh" > "$out" 2>&1 || rc=$?
+  timeout 600 ssh "${SSH_BASE[@]}" root@127.0.0.1 "bash -s -- ${VM_ROLE} ${VM_KIND} ${phase}" < "$CI_ROOT/tools/ci/vm-guest-checks.sh" > "$out" 2>&1 || rc=$?
   ci_redact_file "$out"
   cat "$out"
   if ! grep -q '^CHECKS-DONE$' "$out"; then fail "in-guest checks (${phase}) did not run to the end (ssh exit ${rc})"
@@ -177,7 +177,7 @@ reboot_vm() {
     new=$(vm_ssh root 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null) && [[ -n "$new" && "$new" != "$old" ]] && { pass "rebooted: new boot id"; return 0; }
     sleep 5
   done
-  fail "the VM did not come back after the reboot within 5 min"
+  fail "the VM did not come back after the reboot within about 10 min"
   return 1
 }
 
@@ -222,7 +222,7 @@ main() {
   # sshd comes up while cloud-init still runs; the wait can be cut by an sshd reload or restart, so it is retried.
   for i in 1 2 3; do
     ci_rc=0
-    vm_ssh root 'cloud-init status --wait --long' > "$ci_out" 2>&1 || ci_rc=$?
+    timeout 1200 ssh "${SSH_BASE[@]}" root@127.0.0.1 'cloud-init status --wait --long' > "$ci_out" 2>&1 || ci_rc=$?
     (( ci_rc == 255 )) || break
     log "ssh dropped while waiting for cloud-init (try ${i}), retrying"; vm_wait_ssh 120
   done
@@ -244,18 +244,18 @@ main() {
   endgroup
 
   if [[ "$VM_ROLE" == server ]]; then
-    group "2. the init: no failed step, assertions (STRICT=1, nothing allow-listed)"
+    group "2. the init: no failed step, assertions (nothing allow-listed)"
     failed_log_empty "first boot"
     vm_ssh root 'grep -h "done, all steps ok\|done with failures" /var/log/cloud-init-output.log | tail -2' | sed 's/^/  init: /' || true
     vm_ssh root 'grep -q "done, all steps ok" /var/log/cloud-init-output.log' && pass "server-init reported 'done, all steps ok'" || fail "server-init did not report 'done, all steps ok' in cloud-init-output.log"
     # copy the repo in (not .git, not outputs, not the image cache) and run the same assertions the container test runs
-    tar -C "$CI_ROOT" --exclude=./.git --exclude=./ci-out --exclude=./.vm-cache -czf - . | vm_ssh root 'rm -rf /root/ci-repo && mkdir -p /root/ci-repo && tar -xzf - -C /root/ci-repo'
+    tar -C "$CI_ROOT" --exclude=./.git --exclude=./ci-out --exclude=./.vm-cache -czf - . | timeout 300 ssh "${SSH_BASE[@]}" root@127.0.0.1 'rm -rf /root/ci-repo && mkdir -p /root/ci-repo && tar -xzf - -C /root/ci-repo'
     local a_rc=0
-    vm_ssh root "STRICT=1 ASSERT_MODE=cloud-init bash /root/ci-repo/tools/ci/server-assert.sh ${VM_KIND} ''" > "$W/assert.log" 2>&1 || a_rc=$?
+    timeout 600 ssh "${SSH_BASE[@]}" root@127.0.0.1 "ASSERT_MODE=cloud-init bash /root/ci-repo/tools/ci/server-assert.sh ${VM_KIND} ''" > "$W/assert.log" 2>&1 || a_rc=$?
     ci_redact_file "$W/assert.log"; cat "$W/assert.log"
     if ! grep -q '^ASSERT-DONE$' "$W/assert.log"; then fail "server-assert.sh did not run to the end (exit ${a_rc})"
     elif grep -q '^  FAIL  ' "$W/assert.log" || (( a_rc != 0 )); then fail "server-assert.sh failed (exit ${a_rc})"
-    else pass "server-assert.sh (STRICT=1)"; fi
+    else pass "server-assert.sh (no allow-list)"; fi
     endgroup
   fi
 
@@ -267,7 +267,7 @@ main() {
   group "4. reboot, then the same machine again"
   if reboot_vm; then
     vm_wait_ssh 300
-    vm_ssh root 'cloud-init status --wait' >/dev/null 2>&1 || true
+    timeout 600 ssh "${SSH_BASE[@]}" root@127.0.0.1 'cloud-init status --wait' >/dev/null 2>&1 || true
     guest_checks reboot
     [[ "$VM_ROLE" == server ]] && ops_check "after reboot"
     [[ "$VM_ROLE" == server ]] && failed_log_empty "after reboot"
@@ -278,7 +278,7 @@ main() {
     group "5. server-init.sh again: idempotent"
     snapshot > "$W/state-1.txt"
     local r_rc=0
-    vm_ssh root '/usr/local/sbin/server-init.sh' > "$W/rerun.log" 2>&1 || r_rc=$?
+    timeout 900 ssh "${SSH_BASE[@]}" root@127.0.0.1 '/usr/local/sbin/server-init.sh' > "$W/rerun.log" 2>&1 || r_rc=$?
     ci_redact_file "$W/rerun.log"; tail -15 "$W/rerun.log"
     expect_eq "server-init.sh rerun exit code" "$r_rc" 0
     grep -q 'done, all steps ok' "$W/rerun.log" && pass "rerun: all steps ok" || fail "rerun: not 'done, all steps ok'"

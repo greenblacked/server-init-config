@@ -72,6 +72,8 @@ jobs:
       - name: Self test (checksum parser, catalogue, seed ISO)
         run: tools/ci/vm-selftest.sh
       - name: Boot and test (${{ matrix.key }})
+        # Shorter than the job limit on purpose: a step timeout fails only this step, so the log upload below still runs.
+        timeout-minutes: 24
         env:
           VM_CACHE: ${{ github.workspace }}/.vm-cache
         run: tools/ci/vm-e2e.sh "${{ matrix.key }}"
