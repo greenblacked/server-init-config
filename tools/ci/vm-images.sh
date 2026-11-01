@@ -56,7 +56,11 @@ vm_catalogue() {
     debian13 | runner-debian13)
       VM_BASE=https://cloud.debian.org/images/cloud/trixie/latest/
       VM_FILE=debian-13-genericcloud-amd64.qcow2
-      VM_SUMS=SHA512SUMS VM_ALGO=sha512 VM_KIND=debian VM_USERDATA=server/cloud-init/server-debian.yaml ;;
+      # Under SeaBIOS both Debian jobs looped forever: GRUB shows "Booting Debian GNU/Linux", the guest resets itself within half
+      # a second (a triple fault before the kernel prints anything) and starts again, with -cpu host and with a fixed CPU model
+      # alike. Rocky 10, which went silent under SeaBIOS in the same way, boots with UEFI; the Debian cloud image is a hybrid
+      # (BIOS boot partition and ESP) and its kernel then starts through the EFI stub instead of GRUB's legacy loader.
+      VM_SUMS=SHA512SUMS VM_ALGO=sha512 VM_BOOT=uefi VM_KIND=debian VM_USERDATA=server/cloud-init/server-debian.yaml ;;
     ubuntu2604)
       # The README uses server-debian.yaml for Ubuntu 26.04 too. The directory redirects to .../resolute/release/.
       VM_BASE=https://cloud-images.ubuntu.com/releases/26.04/release/
