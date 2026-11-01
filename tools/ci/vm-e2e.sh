@@ -90,6 +90,7 @@ vm_start() { # IMAGE SEED BOOT
   qemu-system-x86_64 "${args[@]}"
   QEMU_PID=$(cat "$PIDFILE")
   log "qemu started, pid ${QEMU_PID}, ${CPUS} CPU, ${MEM_MB} MB, ${boot}, ssh on 127.0.0.1:${SSH_PORT}"
+  log "host: $(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1), qemu $(qemu-system-x86_64 --version | sed -n '1s/.*version //p'), kernel $(uname -r), guest cpu ${VM_CPU:-host}"
 }
 
 # Wait until root answers over ssh with our key. cloud-init writes the key late in the first boot, so early failures are normal.
