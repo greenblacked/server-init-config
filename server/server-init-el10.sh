@@ -4,13 +4,14 @@
 # sysctl, journald limit, chrony, admin tools, weekly cleanup.
 # Root keeps login by SSH key on port 22, so nothing here can lock you out.
 #
-# Self-contained and idempotent; rerun as root any time: /usr/local/sbin/server-init.sh (settings: /etc/server-init.conf).
+# Self-contained and idempotent; rerun as root: /usr/local/sbin/server-init.sh (settings: /etc/server-init.conf).
 # After SSH hardening a failed step is logged and the next one still runs.
 set -Eeuo pipefail
 
 FAILED_LOG=/var/log/server-init-failed.log
 DOCKER_LOG=/var/log/server-init-docker.log
 REBOOT_AT_END=0
+REBOOT_HINT=
 CONF_FILE=/etc/server-init.conf
 (( EUID == 0 )) || { echo "run as root" >&2; exit 1; }
 # shellcheck source=/dev/null
@@ -74,7 +75,6 @@ packages() {
   done
 }
 
-# Write a file only when its content changes; prints nothing.
 put() {
   local path="$1" mode="$2" tmp
   tmp=$(mktemp)
@@ -378,11 +378,13 @@ docker_start() {
     (( i == 3 )) || sleep $((i * 3))
   done
   n=$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort -V | tail -1)
-  if [[ -n "$n" && "$n" != "$k" && $(systemctl is-active cloud-final.service) == activating ]]; then
-    # The entry stays until docker.service starts after the reboot (the drop-in removes both). Failed tries: $DOCKER_LOG.
-    d=/etc/systemd/system/docker.service.d/reboot.conf
-    printf '[Service]\nExecStartPost=-/bin/sed -i /docker-reboot-pending/d %s\nExecStartPost=-/bin/rm -f %s\n' "$FAILED_LOG" "$d" | put "$d" 0644
-    fail "docker-reboot-pending: no Docker on kernel ${k}, rebooting into ${n} after the init"; REBOOT_AT_END=1; return 0
+  if [[ -n "$n" && "$n" != "$k" ]]; then
+    if [[ $(systemctl is-active cloud-final.service) == activating ]]; then
+      d=/etc/systemd/system/docker.service.d/reboot.conf
+      printf '[Service]\nExecStartPost=-/bin/sed -i /docker-reboot-pending/d %s\nExecStartPost=-/bin/rm -f %s\n' "$FAILED_LOG" "$d" | put "$d" 0644
+      fail "docker-reboot-pending: no Docker on kernel ${k}, rebooting into ${n} after the init"; REBOOT_AT_END=1; return 0
+    fi
+    REBOOT_HINT="reboot needed for docker (new kernel ${n} installed, running ${k}): reboot the server"; fail "$REBOOT_HINT"
   fi
   tail -n 30 "$DOCKER_LOG" | sed 's/^/docker: /' >> "$FAILED_LOG"; return 1
 }
@@ -607,10 +609,11 @@ rc=0
 if (( ${#FAILED_STEPS[@]} )); then log "done with failures: ${FAILED_STEPS[*]} (details: $FAILED_LOG)"; rc=1
 elif (( REBOOT_AT_END )); then log "done, reboot pending for docker (see $FAILED_LOG)"
 else log "done, all steps ok"; fi
+[[ -z "$REBOOT_HINT" ]] || log "$REBOOT_HINT"
 if (( REBOOT_AT_END )); then
-  # Under cloud-init a reboot here would kill modules-final: a unit ordered after cloud-final.service does it. A manual rerun never reboots.
+  # Deferred: a reboot inside cloud-init would kill modules-final. Outside cloud-init nothing reboots.
   if [[ "$(systemctl is-active cloud-final.service 2>/dev/null)" == activating ]]; then
     log "rebooting now (once)"; systemd-run --no-block -p After=cloud-final.service systemctl reboot
-  else log "reboot needed for docker: reboot the server manually"; fi
+  fi
 fi
 exit "$rc"
