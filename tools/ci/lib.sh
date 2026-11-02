@@ -83,6 +83,10 @@ ci_redact() {
     -e 's#.*/(on|online|sisi)/js/.*#    [line hidden: it may hold a device key]#' | tr -d '\001'
 }
 ci_redact_file() { local t; t=$(mktemp); ci_redact < "$1" > "$t" && cat "$t" > "$1"; rm -f "$t"; }
+# ci_env_keys SRC DEST   a debugging view of an env file for the public artifact: key names only, never a value (the file
+# holds generated credentials and ci_redact cannot know every secret). DEST is a new file with the normal umask, so the
+# artifact upload (runs as the runner user) can read it; a root-only copy of SRC would make the upload fail with EACCES.
+ci_env_keys() { sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2=<set>/p' "$1" > "$2" 2>/dev/null || true; }
 # ci_run LOG TAIL_LINES cmd...   runs cmd; the raw output (it may hold generated passwords) stays in a private temp file
 # (path in CI_RAW, removed unless CI_KEEP_RAW=1, then the caller removes it); LOG and the console only get the redacted view. Returns cmd's exit code.
 ci_run() {
