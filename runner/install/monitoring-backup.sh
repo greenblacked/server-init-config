@@ -55,9 +55,15 @@ if [[ -z "$vol" ]]; then
   log "grafana backup: no Grafana data volume yet, nothing to back up"
   exit 0
 fi
-if ! docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 test -s /v/grafana.db; then
+# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
+if (( ! DRYRUN )) && ! docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 test -s /v/grafana.db; then
   log "grafana backup: ${vol} holds no database yet, nothing to back up"
   exit 0
+fi
+
+# No compose file (reinstall over a leftover volume): the version is on the stopped container that last used the volume, if any.
+if [[ -z "$FROM_TAG" ]]; then
+  FROM_TAG=$(docker ps -a --filter "volume=${vol}" --format '{{.Image}}' | awk -F: '/^grafana\/grafana:/ { print $2; exit }')
 fi
 
 if (( ! FORCE )) && [[ -n "$FROM_TAG" && "$(major "$FROM_TAG")" == "$(major "$TO_TAG")" ]]; then
@@ -68,7 +74,7 @@ fi
 label=$(printf '%s' "${FROM_TAG:-unknown}" | tr -c 'A-Za-z0-9._-' '_')
 target="${BACKUP_DIR}/grafana-${label}-$(date +%Y%m%d-%H%M%S).tar.gz"
 if (( DRYRUN )); then
-  log "[dry-run] would back up ${vol} (${FROM_TAG:-unknown} -> ${TO_TAG}) to ${target}"
+  log "[dry-run] would back up ${vol}, if it holds a database (${FROM_TAG:-unknown} -> ${TO_TAG}) to ${target}"
   exit 0
 fi
 

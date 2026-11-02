@@ -18,7 +18,13 @@ command -v jq >/dev/null || pkg_install jq
 [[ -f "$DIR/docker-compose.yml" ]] && die "$DIR/docker-compose.yml exists, stack already installed"
 
 # A Grafana volume left over from an earlier install is archived before a new major can migrate it (no-op on a clean host).
-bash "$(dirname "$0")/monitoring-backup.sh"
+# The copy-paste block (runner/COMMANDS.md) carries monitoring.sh alone, without the backup script: skip it there.
+backup_script="$(dirname "$0")/monitoring-backup.sh"
+if [[ -f "$backup_script" ]]; then
+  bash "$backup_script"
+else
+  log "WARN: ${backup_script} not found, a Grafana volume left over from an earlier install is not archived"
+fi
 
 selinux_label_dir "$DIR"
 curl -fsS http://127.0.0.1:9252/metrics >/dev/null 2>&1 || log "WARN: runner metrics on 127.0.0.1:9252 not reachable"

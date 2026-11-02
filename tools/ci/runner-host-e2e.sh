@@ -262,6 +262,14 @@ gapi -X POST -H 'Content-Type: application/json' -d '{"title":"ci-upgrade-marker
 # same major: no archive
 bash runner/install/monitoring-backup.sh --from-tag "$MON_OLD" --to-tag 12.4.13 2>&1 | tail -1
 [[ -z "$(ls -A /var/backups/monitoring 2>/dev/null)" ]] && pass "same major: no backup is made" || fail "a backup was made without a major change"
+# a dry run only reads: a docker shim refuses run/pull/stop (no image pull, no container, no Grafana restart)
+mkdir -p "$W/shim"
+printf '#!/usr/bin/env bash\ncase "$1" in run|pull|stop|start) echo "docker $1 in a dry run" >&2; exit 99 ;; esac\nexec %s "$@"\n' "$(command -v docker)" > "$W/shim/docker"
+chmod +x "$W/shim/docker"
+dry=$(PATH="$W/shim:$PATH" bash runner/install/monitoring-backup.sh --dry-run 2>&1) && pass "backup --dry-run runs without docker run, pull or stop" || fail "backup --dry-run called docker run/pull/stop: ${dry}"
+grep -q '\[dry-run\] would back up' <<<"$dry" && pass "backup --dry-run reports the archive it would write" || fail "backup --dry-run did not report: ${dry}"
+[[ -z "$(ls -A /var/backups/monitoring 2>/dev/null)" ]] && pass "backup --dry-run wrote nothing" || fail "backup --dry-run wrote an archive"
+grafana_ok && pass "backup --dry-run left Grafana running" || fail "backup --dry-run stopped Grafana"
 # the installer step update.sh runs: installed compose says the old tag, the repo says the new one
 bash runner/install/monitoring-backup.sh 2>&1 | tail -4
 mapfile -t ARCH < <(find /var/backups/monitoring -maxdepth 1 -type f -name 'grafana-*.tar.gz')
@@ -284,6 +292,22 @@ expect_eq "no OOM kill and no restart during the migration" "$(docker inspect -f
 expect_eq "folder made on ${MON_OLD} survived" "$(gapi "${GURL}/api/folders/ci-marker" 2>/dev/null | jq -r .title)" ci-upgrade-marker
 expect_eq "dashboard made on ${MON_OLD} survived" "$(gapi "${GURL}/api/dashboards/uid/ci-dash" 2>/dev/null | jq -r .dashboard.title)" ci-upgrade-dash
 mon_retry 30 ds_healthy && pass "provisioned datasource is healthy after the migration" || fail "datasource is not healthy after the migration"
+# update.sh --rollback and the failure path restore the old compose file; they must not put the old Grafana on migrated data
+echo "-- file rollback never lowers the Grafana major"
+printf '    image: grafana/grafana:%s\n' 12.0.0 > "$W/old-compose.yml"
+printf '    image: grafana/grafana:%s\n' 13.3.0 > "$W/new-compose.yml"
+gkeep() { (source runner/install/update.sh; keep_grafana_major "$@"); }
+expect_eq "newer installed major than the backup: keep it" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml")" 13.3.0
+expect_eq "older installed major than the backup: restore allowed" "$(gkeep "$W/old-compose.yml" "$W/new-compose.yml")" ""
+expect_eq "same major: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/new-compose.yml")" ""
+expect_eq "no backup of the compose file: nothing to keep" "$(gkeep "$W/new-compose.yml" "$W/none.yml")" ""
+mkdir -p "$W/bk/opt/monitoring"; cp "$W/old-compose.yml" "$W/bk/opt/monitoring/docker-compose.yml"
+( source runner/install/update.sh; BACKUP_DIR="$W/bk" GRAFANA_STARTED=1; restore_files ) >"$W/restore1.log" 2>&1 || fail "restore_files failed: $(tail -3 "$W/restore1.log")"
+expect_eq "restore_files after the new Grafana started keeps its image" "$(awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1 }' "$MD/docker-compose.yml")" "$GTAG"
+grep -q 'WARN: grafana' "$W/restore1.log" && pass "restore_files says why the image was kept" || fail "restore_files kept the image silently"
+( source runner/install/update.sh; BACKUP_DIR="$W/bk" GRAFANA_STARTED=0; restore_files ) >/dev/null 2>&1 || true
+expect_eq "control: before the new Grafana started the restore is a plain undo" "$(awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1 }' "$MD/docker-compose.yml")" 12.0.0
+install -m 0644 runner/stacks/monitoring/docker-compose.yml "$MD/docker-compose.yml"
 # the rollback from runner/README.md, word for word apart from the file name
 echo "-- rollback with the documented commands"
 gapi -X DELETE "${GURL}/api/dashboards/uid/ci-dash" >/dev/null 2>&1 || true
@@ -293,6 +317,11 @@ bash -c 'cd /opt/monitoring && sed -i "s|image: grafana/grafana:.*|image: grafan
 mon_retry 60 grafana_ok && pass "the old image starts on the restored data" || { grafana_logs; fail "old image did not start after the restore"; }
 expect_eq "rolled back to the old version" "$(grafana_version)" "$MON_OLD"
 expect_eq "dashboard deleted after the upgrade is back (state is the backup's)" "$(gapi "${GURL}/api/dashboards/uid/ci-dash" 2>/dev/null | jq -r .dashboard.title)" ci-upgrade-dash
+# no compose file (reinstall over a leftover volume): the version comes from the container that used the volume
+unk=$(MON_DIR=/nonexistent bash runner/install/monitoring-backup.sh --to-tag 12.4.13 2>&1 | tail -1)
+grep -q "stays on major 12" <<<"$unk" && pass "without a compose file the old version is read from the container: same major, no archive" || fail "leftover volume, same major, was not recognized: ${unk}"
+unk=$(MON_DIR=/nonexistent bash runner/install/monitoring-backup.sh --dry-run --to-tag "$GTAG" 2>&1 | tail -1)
+grep -q "(${MON_OLD} -> ${GTAG})" <<<"$unk" && pass "leftover volume, new major: archive named after ${MON_OLD}" || fail "leftover volume, new major, was not recognized: ${unk}"
 # retention: 3 newest archives are kept
 for i in 1 2 3; do
   f="/var/backups/monitoring/grafana-0.0.${i}-2020010${i}-000000.tar.gz"; : > "$f"; touch -d "2020-01-0${i}" "$f"
@@ -304,5 +333,18 @@ expect_eq "retention: 3 archives kept" "$(find /var/backups/monitoring -maxdepth
 echo "-- teardown"
 mcompose down -v >/dev/null 2>&1 && pass "monitoring stack removed" || fail "docker compose down failed"
 rm -rf /var/backups/monitoring
+
+# runner/COMMANDS.md (copy-paste install) writes monitoring.sh without monitoring-backup.sh: the installer must still work.
+echo "-- install from the copy-paste file set (no monitoring-backup.sh)"
+PT="$W/paste-tree"
+mkdir -p "$PT/common" "$PT/runner/install" "$PT/runner/stacks"
+cp common/lib.sh "$PT/common/"
+cp runner/install/monitoring.sh "$PT/runner/install/"
+cp -r runner/stacks/monitoring "$PT/runner/stacks/"
+rm -rf "$MD"
+if ci_run "$W/monitoring-2.log" 6 bash "$PT/runner/install/monitoring.sh"; then pass "monitoring.sh installs when monitoring-backup.sh is not there"; else fail "monitoring.sh failed without monitoring-backup.sh (see monitoring-2.log)"; fi
+grep -q 'monitoring-backup.sh not found' "$W/monitoring-2.log" && pass "it says the backup step was skipped" || fail "no note about the skipped backup step"
+mon_retry 60 grafana_ok && pass "Grafana is healthy after the copy-paste style install" || fail "Grafana is not healthy after the copy-paste style install"
+mcompose down -v >/dev/null 2>&1 || fail "docker compose down failed"
 endgroup
 finish
