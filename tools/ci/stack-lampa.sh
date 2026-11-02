@@ -30,7 +30,7 @@ collect() {
   docker ps -a > "$W/docker-ps.txt" 2>&1
   local c; for c in $(docker ps -a --filter label=com.docker.compose.project=lampa-stack --format '{{.Names}}'); do docker logs "$c" > "$W/$c.log" 2>&1; ci_redact_file "$W/$c.log"; done
   iptables-save > "$W/iptables.txt" 2>&1; ip -br addr > "$W/ip-addr.txt" 2>&1; wg show > "$W/wg-show.txt" 2>&1
-  cp "$DIR/.env" "$W/env.txt" 2>/dev/null && ci_redact_file "$W/env.txt"
+  ci_env_keys "$DIR/.env" "$W/env-keys.txt"
   true
 }
 on_exit() { local rc=$?; set +e; collect; rm -rf "$PRIV"; rm -f "${CI_RAW:-}"; ip netns pids "$NS" 2>/dev/null | xargs -r kill; ip netns del "$NS" 2>/dev/null; ip link del vwg0 2>/dev/null; exit "$rc"; }
