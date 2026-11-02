@@ -51,6 +51,7 @@ trap cleanup EXIT
 dexec() { docker run --rm --label ci-e2e=1 "$@"; }
 # the helper image that runs as root next to stack volumes: one pin, in common/lib.sh (alpine 3.20 is end of life), by index digest
 ALPINE=$(awk -F'"' '/^HELPER_IMAGE=/ { print $2 }' common/lib.sh)
+[[ "$ALPINE" == alpine:*@sha256:* ]] || die "no pinned HELPER_IMAGE in common/lib.sh (got '${ALPINE}')"
 # can a container fetch URL within 5 s? (alpine's busybox wget)
 reach() { dexec "${NET_ARGS[@]}" "$ALPINE" wget -q -T 5 -O /dev/null "$1" >/dev/null 2>&1; }
 NET_ARGS=()

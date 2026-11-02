@@ -11233,9 +11233,11 @@ keep_grafana_major() {
 }
 
 restore_files() {
-  local f dst keep="" mon=/opt/monitoring/docker-compose.yml
+  local f dst keep="" ran how="has already run" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
-  keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$(grafana_ran_tag)")
+  ran=$(grafana_ran_tag)
+  [[ -n "$ran" ]] || how="may have run (no started Grafana container on record)"
+  keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$ran")
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
     dst="${f#"${BACKUP_DIR}"}"
@@ -11250,7 +11252,7 @@ restore_files() {
     fi
   done < <(find "$BACKUP_DIR" -type f -print0)
   if [[ -n "$keep" ]]; then
-    log "WARN: grafana ${keep} has already run on the data and cannot be rolled back with files; ${mon} stays as installed (image grafana/grafana:${keep} and its settings), everything else is restored. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
+    log "WARN: grafana ${keep} ${how} on the data and cannot be rolled back with files; ${mon} stays as installed (image grafana/grafana:${keep} and its settings), everything else is restored. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
   fi
   run systemctl daemon-reload
 }
@@ -16427,9 +16429,11 @@ keep_grafana_major() {
 }
 
 restore_files() {
-  local f dst keep="" mon=/opt/monitoring/docker-compose.yml
+  local f dst keep="" ran how="has already run" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
-  keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$(grafana_ran_tag)")
+  ran=$(grafana_ran_tag)
+  [[ -n "$ran" ]] || how="may have run (no started Grafana container on record)"
+  keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$ran")
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
     dst="${f#"${BACKUP_DIR}"}"
@@ -16444,7 +16448,7 @@ restore_files() {
     fi
   done < <(find "$BACKUP_DIR" -type f -print0)
   if [[ -n "$keep" ]]; then
-    log "WARN: grafana ${keep} has already run on the data and cannot be rolled back with files; ${mon} stays as installed (image grafana/grafana:${keep} and its settings), everything else is restored. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
+    log "WARN: grafana ${keep} ${how} on the data and cannot be rolled back with files; ${mon} stays as installed (image grafana/grafana:${keep} and its settings), everything else is restored. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
   fi
   run systemctl daemon-reload
 }
