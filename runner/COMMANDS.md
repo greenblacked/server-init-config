@@ -5939,12 +5939,12 @@ name: registry-cache
 
 services:
   registry:
-    image: registry:2.8.3
+    image: registry:3.1.2
     restart: unless-stopped
     network_mode: host
     mem_limit: 128m
     volumes:
-      - ./config.yml:/etc/docker/registry/config.yml:ro
+      - ./config.yml:/etc/distribution/config.yml:ro
       - registry-data:/var/lib/registry
 
 volumes:
@@ -6252,7 +6252,7 @@ name: monitoring
 
 services:
   prometheus:
-    image: prom/prometheus:v3.4.0
+    image: prom/prometheus:v3.15.1
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -6270,7 +6270,7 @@ services:
       - prometheus-data:/prometheus
 
   node-exporter:
-    image: prom/node-exporter:v1.9.1
+    image: prom/node-exporter:v1.12.1
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -6902,7 +6902,7 @@ name: logging
 
 services:
   loki:
-    image: grafana/loki:3.7.7
+    image: grafana/loki:3.7.9
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -6917,7 +6917,7 @@ services:
   # The journal group is added by docker-compose.override.yml, which stack_ids (common/lib.sh) writes
   # only when its gid differs from the docker gid: compose rejects a group_add list with equal items.
   alloy:
-    image: grafana/alloy:v1.19.2
+    image: grafana/alloy:v1.21.3
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
@@ -12042,7 +12042,7 @@ name: logging
 
 services:
   loki:
-    image: grafana/loki:3.7.7
+    image: grafana/loki:3.7.9
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -12057,7 +12057,7 @@ services:
   # The journal group is added by docker-compose.override.yml, which stack_ids (common/lib.sh) writes
   # only when its gid differs from the docker gid: compose rejects a group_add list with equal items.
   alloy:
-    image: grafana/alloy:v1.19.2
+    image: grafana/alloy:v1.21.3
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
@@ -12193,7 +12193,7 @@ name: monitoring
 
 services:
   prometheus:
-    image: prom/prometheus:v3.4.0
+    image: prom/prometheus:v3.15.1
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -12211,7 +12211,7 @@ services:
       - prometheus-data:/prometheus
 
   node-exporter:
-    image: prom/node-exporter:v1.9.1
+    image: prom/node-exporter:v1.12.1
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -12524,12 +12524,12 @@ name: registry-cache
 
 services:
   registry:
-    image: registry:2.8.3
+    image: registry:3.1.2
     restart: unless-stopped
     network_mode: host
     mem_limit: 128m
     volumes:
-      - ./config.yml:/etc/docker/registry/config.yml:ro
+      - ./config.yml:/etc/distribution/config.yml:ro
       - registry-data:/var/lib/registry
 
 volumes:
@@ -16935,7 +16935,7 @@ name: logging
 
 services:
   loki:
-    image: grafana/loki:3.7.7
+    image: grafana/loki:3.7.9
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -16950,7 +16950,7 @@ services:
   # The journal group is added by docker-compose.override.yml, which stack_ids (common/lib.sh) writes
   # only when its gid differs from the docker gid: compose rejects a group_add list with equal items.
   alloy:
-    image: grafana/alloy:v1.19.2
+    image: grafana/alloy:v1.21.3
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
@@ -17086,7 +17086,7 @@ name: monitoring
 
 services:
   prometheus:
-    image: prom/prometheus:v3.4.0
+    image: prom/prometheus:v3.15.1
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -17104,7 +17104,7 @@ services:
       - prometheus-data:/prometheus
 
   node-exporter:
-    image: prom/node-exporter:v1.9.1
+    image: prom/node-exporter:v1.12.1
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -17417,12 +17417,12 @@ name: registry-cache
 
 services:
   registry:
-    image: registry:2.8.3
+    image: registry:3.1.2
     restart: unless-stopped
     network_mode: host
     mem_limit: 128m
     volumes:
-      - ./config.yml:/etc/docker/registry/config.yml:ro
+      - ./config.yml:/etc/distribution/config.yml:ro
       - registry-data:/var/lib/registry
 
 volumes:
