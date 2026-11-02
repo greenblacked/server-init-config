@@ -34,8 +34,19 @@ cp -a "$REPO_ROOT/runner/stacks/monitoring/prometheus" "$REPO_ROOT/runner/stacks
 
 if [[ ! -f "$DIR/.env" ]]; then
   pw=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)
-  (umask 077; sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env")
-  unset pw
+  # Grafana encrypts stored credentials (data source passwords, API keys) with secret_key, which is a public default unless set.
+  # Generated only on a first install: data that exists under the default key (a volume left over from an earlier install) cannot be
+  # read with a new one, so there the default stays. The key belongs next to every backup archive (runner/README.md).
+  sk=""
+  if [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data)" ]]; then
+    sk=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-40)
+  else
+    log "NOTE: a Grafana data volume exists, so Grafana keeps its built-in default encryption key (see runner/README.md, Grafana upgrade and rollback)"
+  fi
+  (umask 077
+   sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
+   if [[ -n "$sk" ]]; then printf 'GF_SECURITY_SECRET_KEY=%s\n' "$sk" >> "$DIR/.env"; fi)
+  unset pw sk
 fi
 chmod 600 "$DIR/.env"
 stack_ids "$DIR"
