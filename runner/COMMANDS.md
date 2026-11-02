@@ -506,6 +506,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -513,7 +518,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -1074,6 +1081,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -1081,7 +1093,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -1497,6 +1511,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -1504,7 +1523,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -3600,6 +3621,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -3607,7 +3633,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -4030,6 +4058,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -4037,7 +4070,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -5119,6 +5154,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -5126,7 +5166,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -5556,6 +5598,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -5563,7 +5610,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -5927,6 +5976,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -5934,7 +5988,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -6290,6 +6346,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -6297,7 +6358,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -6345,15 +6408,20 @@ if [[ ! -f "$DIR/.env" ]]; then
   # Generated only on a first install: data that exists under the default key (a volume left over from an earlier install) cannot be
   # read with a new one, so there the default stays. The key belongs next to every backup archive (runner/README.md).
   sk=""
-  if [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data)" ]]; then
+  # A failed `docker volume ls` (daemon down) must not read as "no volume": a key generated over a default-key volume locks its data.
+  vols=$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data) \
+    || die "cannot list docker volumes (is the Docker daemon running?)"
+  if [[ -z "$vols" ]]; then
     sk=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-40)
   else
-    log "NOTE: a Grafana data volume exists, so Grafana keeps its built-in default encryption key (see runner/README.md, Grafana upgrade and rollback)"
+    # The volume may have been written under a key of the earlier install; this run has no way to know it, so it adds none.
+    log "NOTE: a Grafana data volume exists, so no new encryption key is generated and Grafana uses its built-in default key"
+    log "NOTE: if the earlier install's .env had a GF_SECURITY_SECRET_KEY line, put that same line back in ${DIR}/.env before Grafana starts (restore the earlier .env there before running this installer: an existing .env is kept); see runner/README.md, Grafana upgrade and rollback"
   fi
   (umask 077
    sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
    if [[ -n "$sk" ]]; then printf 'GF_SECURITY_SECRET_KEY=%s\n' "$sk" >> "$DIR/.env"; fi)
-  unset pw sk
+  unset pw sk vols
 fi
 chmod 600 "$DIR/.env"
 stack_ids "$DIR"
@@ -6855,6 +6923,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -6862,7 +6935,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -7410,6 +7485,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -7417,7 +7497,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -7576,7 +7658,7 @@ configs:
       # Record the major now, before the secret step: a crash after the move must not make the next start take the fresh 7.x
       # storage for 6.x and move it aside too. Backups can hold old credentials (htpasswd, secret): only the verdaccio uid reads them.
       [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
-      for b in "$$S"/backup-*; do [ -d "$$b" ] && chmod 700 "$$b"; done
+      for b in "$$S"/backup-*; do [ -d "$$b" ] && { chmod 700 "$$b" || say "cannot chmod $$b"; }; done
       # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
       # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
       mkdir -p "$$S/data"
@@ -7827,6 +7909,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -7834,7 +7921,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -8115,6 +8204,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -8122,7 +8216,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -8522,6 +8618,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -8529,7 +8630,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -8896,6 +8999,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -8903,7 +9011,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -9168,6 +9278,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -9175,7 +9290,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -9752,6 +9869,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -9759,7 +9881,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -10474,9 +10598,7 @@ set -Eeuo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
 
 DIR="${MON_DIR:-/opt/monitoring}"
-# Helper container for reading the volume. alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64),
-# so a moved tag cannot change what runs as root next to the Grafana database; bump tag and digest together (also in runner/README.md).
-HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+# HELPER_IMAGE (alpine, pinned by digest) comes from common/lib.sh, the one place to bump it (also in runner/README.md).
 # Read-only root filesystem, no network, no capabilities except reading files of the service user (the volume is owned by it, mode 600/700).
 # Without DAC_READ_SEARCH root cannot even enter the directory and `test -s` answers "no database": a silent skip of the backup.
 HELPER_ARGS=(--rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH)
@@ -10636,15 +10758,20 @@ if [[ ! -f "$DIR/.env" ]]; then
   # Generated only on a first install: data that exists under the default key (a volume left over from an earlier install) cannot be
   # read with a new one, so there the default stays. The key belongs next to every backup archive (runner/README.md).
   sk=""
-  if [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data)" ]]; then
+  # A failed `docker volume ls` (daemon down) must not read as "no volume": a key generated over a default-key volume locks its data.
+  vols=$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data) \
+    || die "cannot list docker volumes (is the Docker daemon running?)"
+  if [[ -z "$vols" ]]; then
     sk=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-40)
   else
-    log "NOTE: a Grafana data volume exists, so Grafana keeps its built-in default encryption key (see runner/README.md, Grafana upgrade and rollback)"
+    # The volume may have been written under a key of the earlier install; this run has no way to know it, so it adds none.
+    log "NOTE: a Grafana data volume exists, so no new encryption key is generated and Grafana uses its built-in default key"
+    log "NOTE: if the earlier install's .env had a GF_SECURITY_SECRET_KEY line, put that same line back in ${DIR}/.env before Grafana starts (restore the earlier .env there before running this installer: an existing .env is kept); see runner/README.md, Grafana upgrade and rollback"
   fi
   (umask 077
    sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
    if [[ -n "$sk" ]]; then printf 'GF_SECURITY_SECRET_KEY=%s\n' "$sk" >> "$DIR/.env"; fi)
-  unset pw sk
+  unset pw sk vols
 fi
 chmod 600 "$DIR/.env"
 stack_ids "$DIR"
@@ -11074,31 +11201,30 @@ grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "")
 
 # grafana_ran_tag: which Grafana has (or may have) touched the data volume, by what actually ran, not by the compose file on disk
 # (an update can sync the new compose file and abort before `docker compose up`, the old Grafana then still runs on unmigrated data).
-# Prints the tag of the newest Grafana container that was ever started, "none" when Grafana containers exist but none started,
-# nothing when it cannot tell (no docker, no container).
+# Prints the tag of the newest Grafana container that was ever started; nothing when it cannot tell (no docker, no container, or no
+# container with a start record). "No started container" is unknown, not "never ran": `docker compose up --force-recreate` removes a
+# started container and its start record, and the replacement may have failed before it started.
 grafana_ran_tag() {
-  local ids rows tag
+  local ids rows
   command -v docker >/dev/null 2>&1 || return 0
   ids=$(docker ps -aq --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.service=grafana 2>/dev/null || true)
   [[ -n "$ids" ]] || return 0
   # shellcheck disable=SC2086
   rows=$(docker inspect -f '{{.State.StartedAt}} {{.Config.Image}}' $ids 2>/dev/null) || return 0
-  # A started container whose image is not grafana/grafana:TAG is unknown, not "none".
-  awk '$1 !~ /^0001-/ { started++ } END { exit !started }' <<<"$rows" || { echo none; return 0; }
-  tag=$(awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1)
-  printf '%s\n' "$tag"
+  # A started container whose image is not grafana/grafana:TAG prints nothing as well.
+  awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1
 }
 
 # keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE [RAN_TAG]: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
 # Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
-# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides
-# ("none" = never started, so the restore is a clean undo); without it the tag in CURRENT_COMPOSE is assumed to have run.
+# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides.
+# When it is empty (unknown) the tag in CURRENT_COMPOSE is assumed to have run: the safe side, keeping a newer image on unmigrated
+# data only means the planned upgrade happens, while an older image on migrated data breaks Grafana.
 # Prints the tag to keep, or nothing when the restore is safe.
 keep_grafana_major() {
   local cur old
   [[ -f "$1" && -f "$2" ]] || return 0
   cur="${3:-$(grafana_tag "$1")}"
-  [[ "$cur" != none ]] || return 0
   old=$(grafana_tag "$2")
   [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
   if (( ${cur%%.*} > ${old%%.*} )); then
@@ -11588,12 +11714,13 @@ main() {
   if (( DO_OS )); then
     update_os
   fi
+  # After update_os (--os can upgrade Compose), before anything else changes: an old compose would fail npm-cache's "config -q"
+  # after the host tools and monitoring were already upgraded.
+  if command -v docker >/dev/null 2>&1 && [[ -f /opt/npm-cache/docker-compose.yml ]]; then
+    require_compose_min 2.23.1 "npm-cache"
+  fi
   update_host_tools
   if command -v docker >/dev/null 2>&1; then
-    # Before any stack is touched: an old compose would fail npm-cache's "config -q" after monitoring was already upgraded.
-    if [[ -f /opt/npm-cache/docker-compose.yml ]]; then
-      require_compose_min 2.23.1 "npm-cache"
-    fi
     update_monitoring
     update_logging
     update_registry_cache
@@ -13058,7 +13185,7 @@ configs:
       # Record the major now, before the secret step: a crash after the move must not make the next start take the fresh 7.x
       # storage for 6.x and move it aside too. Backups can hold old credentials (htpasswd, secret): only the verdaccio uid reads them.
       [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
-      for b in "$$S"/backup-*; do [ -d "$$b" ] && chmod 700 "$$b"; done
+      for b in "$$S"/backup-*; do [ -d "$$b" ] && { chmod 700 "$$b" || say "cannot chmod $$b"; }; done
       # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
       # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
       mkdir -p "$$S/data"
@@ -14936,6 +15063,11 @@ own_stack_dir() {
   fi
 }
 
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; runner/README.md (restore command) must carry the same string.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -14943,7 +15075,9 @@ chown_volumes() {
   project=$(cd "$dir" && docker compose config --format json | jq -r .name)
   (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
   for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
-    docker run --rm --network none -v "${v}:/v" alpine:3.20 chown -R "${MON_UID}:${MON_GID}" /v
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -R "${MON_UID}:${MON_GID}" /v
   done
 }
 __SIC_EOF__
@@ -15658,9 +15792,7 @@ set -Eeuo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
 
 DIR="${MON_DIR:-/opt/monitoring}"
-# Helper container for reading the volume. alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64),
-# so a moved tag cannot change what runs as root next to the Grafana database; bump tag and digest together (also in runner/README.md).
-HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+# HELPER_IMAGE (alpine, pinned by digest) comes from common/lib.sh, the one place to bump it (also in runner/README.md).
 # Read-only root filesystem, no network, no capabilities except reading files of the service user (the volume is owned by it, mode 600/700).
 # Without DAC_READ_SEARCH root cannot even enter the directory and `test -s` answers "no database": a silent skip of the backup.
 HELPER_ARGS=(--rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH)
@@ -15820,15 +15952,20 @@ if [[ ! -f "$DIR/.env" ]]; then
   # Generated only on a first install: data that exists under the default key (a volume left over from an earlier install) cannot be
   # read with a new one, so there the default stays. The key belongs next to every backup archive (runner/README.md).
   sk=""
-  if [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data)" ]]; then
+  # A failed `docker volume ls` (daemon down) must not read as "no volume": a key generated over a default-key volume locks its data.
+  vols=$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data) \
+    || die "cannot list docker volumes (is the Docker daemon running?)"
+  if [[ -z "$vols" ]]; then
     sk=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-40)
   else
-    log "NOTE: a Grafana data volume exists, so Grafana keeps its built-in default encryption key (see runner/README.md, Grafana upgrade and rollback)"
+    # The volume may have been written under a key of the earlier install; this run has no way to know it, so it adds none.
+    log "NOTE: a Grafana data volume exists, so no new encryption key is generated and Grafana uses its built-in default key"
+    log "NOTE: if the earlier install's .env had a GF_SECURITY_SECRET_KEY line, put that same line back in ${DIR}/.env before Grafana starts (restore the earlier .env there before running this installer: an existing .env is kept); see runner/README.md, Grafana upgrade and rollback"
   fi
   (umask 077
    sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
    if [[ -n "$sk" ]]; then printf 'GF_SECURITY_SECRET_KEY=%s\n' "$sk" >> "$DIR/.env"; fi)
-  unset pw sk
+  unset pw sk vols
 fi
 chmod 600 "$DIR/.env"
 stack_ids "$DIR"
@@ -16258,31 +16395,30 @@ grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "")
 
 # grafana_ran_tag: which Grafana has (or may have) touched the data volume, by what actually ran, not by the compose file on disk
 # (an update can sync the new compose file and abort before `docker compose up`, the old Grafana then still runs on unmigrated data).
-# Prints the tag of the newest Grafana container that was ever started, "none" when Grafana containers exist but none started,
-# nothing when it cannot tell (no docker, no container).
+# Prints the tag of the newest Grafana container that was ever started; nothing when it cannot tell (no docker, no container, or no
+# container with a start record). "No started container" is unknown, not "never ran": `docker compose up --force-recreate` removes a
+# started container and its start record, and the replacement may have failed before it started.
 grafana_ran_tag() {
-  local ids rows tag
+  local ids rows
   command -v docker >/dev/null 2>&1 || return 0
   ids=$(docker ps -aq --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.service=grafana 2>/dev/null || true)
   [[ -n "$ids" ]] || return 0
   # shellcheck disable=SC2086
   rows=$(docker inspect -f '{{.State.StartedAt}} {{.Config.Image}}' $ids 2>/dev/null) || return 0
-  # A started container whose image is not grafana/grafana:TAG is unknown, not "none".
-  awk '$1 !~ /^0001-/ { started++ } END { exit !started }' <<<"$rows" || { echo none; return 0; }
-  tag=$(awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1)
-  printf '%s\n' "$tag"
+  # A started container whose image is not grafana/grafana:TAG prints nothing as well.
+  awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1
 }
 
 # keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE [RAN_TAG]: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
 # Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
-# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides
-# ("none" = never started, so the restore is a clean undo); without it the tag in CURRENT_COMPOSE is assumed to have run.
+# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides.
+# When it is empty (unknown) the tag in CURRENT_COMPOSE is assumed to have run: the safe side, keeping a newer image on unmigrated
+# data only means the planned upgrade happens, while an older image on migrated data breaks Grafana.
 # Prints the tag to keep, or nothing when the restore is safe.
 keep_grafana_major() {
   local cur old
   [[ -f "$1" && -f "$2" ]] || return 0
   cur="${3:-$(grafana_tag "$1")}"
-  [[ "$cur" != none ]] || return 0
   old=$(grafana_tag "$2")
   [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
   if (( ${cur%%.*} > ${old%%.*} )); then
@@ -16772,12 +16908,13 @@ main() {
   if (( DO_OS )); then
     update_os
   fi
+  # After update_os (--os can upgrade Compose), before anything else changes: an old compose would fail npm-cache's "config -q"
+  # after the host tools and monitoring were already upgraded.
+  if command -v docker >/dev/null 2>&1 && [[ -f /opt/npm-cache/docker-compose.yml ]]; then
+    require_compose_min 2.23.1 "npm-cache"
+  fi
   update_host_tools
   if command -v docker >/dev/null 2>&1; then
-    # Before any stack is touched: an old compose would fail npm-cache's "config -q" after monitoring was already upgraded.
-    if [[ -f /opt/npm-cache/docker-compose.yml ]]; then
-      require_compose_min 2.23.1 "npm-cache"
-    fi
     update_monitoring
     update_logging
     update_registry_cache
@@ -18242,7 +18379,7 @@ configs:
       # Record the major now, before the secret step: a crash after the move must not make the next start take the fresh 7.x
       # storage for 6.x and move it aside too. Backups can hold old credentials (htpasswd, secret): only the verdaccio uid reads them.
       [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
-      for b in "$$S"/backup-*; do [ -d "$$b" ] && chmod 700 "$$b"; done
+      for b in "$$S"/backup-*; do [ -d "$$b" ] && { chmod 700 "$$b" || say "cannot chmod $$b"; }; done
       # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
       # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
       mkdir -p "$$S/data"
