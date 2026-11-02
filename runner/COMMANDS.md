@@ -6198,6 +6198,15 @@ docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v jq >/dev/null || pkg_install jq
 [[ -f "$DIR/docker-compose.yml" ]] && die "$DIR/docker-compose.yml exists, stack already installed"
 
+# A Grafana volume left over from an earlier install is archived before a new major can migrate it (no-op on a clean host).
+# The copy-paste block (runner/COMMANDS.md) carries monitoring.sh alone, without the backup script: skip it there.
+backup_script="$(dirname "$0")/monitoring-backup.sh"
+if [[ -f "$backup_script" ]]; then
+  bash "$backup_script"
+else
+  log "WARN: ${backup_script} not found, a Grafana volume left over from an earlier install is not archived"
+fi
+
 selinux_label_dir "$DIR"
 curl -fsS http://127.0.0.1:9252/metrics >/dev/null 2>&1 || log "WARN: runner metrics on 127.0.0.1:9252 not reachable"
 
@@ -6285,11 +6294,12 @@ services:
       - /:/host:ro,rslave
 
   grafana:
-    image: grafana/grafana:12.0.0
+    image: grafana/grafana:13.3.0
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
-    mem_limit: 256m
+    # Grafana 13 migrates dashboards and folders into unified storage on the first start; 512 MB is the documented minimum.
+    mem_limit: 512m
     env_file: .env
     depends_on: [prometheus]
     volumes:
@@ -7249,6 +7259,8 @@ cat > "$R/runner/install/npm-cache.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Verdaccio npm pull-through cache on the docker0 bridge IP, exposed to CI jobs via runner env.
 # If the cache is down, npm ci in jobs fails (npm has no automatic fallback).
+# Storage and the server secret are prepared by the container itself at every start (config "start" in the compose file):
+# storage of an older major is moved aside to backup-*, Verdaccio 7 needs a secret of exactly 32 characters.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -7279,6 +7291,7 @@ docker compose pull -q
 docker compose up -d
 for _ in $(seq 1 20); do curl -fsS "${REG}-/ping" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "verdaccio did not start"; }
+docker compose logs --no-log-prefix verdaccio 2>&1 | grep '^npm-cache:' || true
 
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
@@ -7300,6 +7313,8 @@ chmod 755 "$R/runner/install/npm-cache.sh"
 
 install -d "$R/runner/stacks/npm-cache"
 cat > "$R/runner/stacks/npm-cache/config.yaml" <<'__SIC_EOF__'
+# Verdaccio 7. The server secret is not a setting here: 7.x reads it only from data/.verdaccio-db.json in the storage and
+# accepts exactly 32 characters. The start script in docker-compose.yml creates it (mode 600) and moves older storage aside.
 storage: /verdaccio/storage/data
 plugins: /verdaccio/plugins
 
@@ -7347,17 +7362,64 @@ name: npm-cache
 
 services:
   verdaccio:
-    image: verdaccio/verdaccio:6.1.2
+    image: verdaccio/verdaccio:7.0.2
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
     # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
     # and exposes the cache (access: $all) on every interface. runner/install/npm-cache.sh and update.sh
     # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
-    command: ["verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
+    # npm-cache-start.sh (the config below) runs first and then execs verdaccio.
+    command: ["sh", "/usr/local/bin/npm-cache-start.sh", "verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
+    configs:
+      - source: start
+        target: /usr/local/bin/npm-cache-start.sh
     volumes:
       - ./config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio-storage:/verdaccio/storage
+
+# Runs on every start, so it also covers update.sh, which only syncs this file and config.yaml. In "content:" a literal
+# dollar sign is written $$ (compose would interpolate a single one).
+configs:
+  start:
+    content: |
+      set -eu
+      S=/verdaccio/storage
+      DB=$$S/data/.verdaccio-db.json
+      STATE=$$S/.deployed-major
+      WANT=7
+      say() { echo "npm-cache: $$*" >&2; }
+      # live storage = everything except the state file and earlier backups
+      live() { for e in "$$S"/* "$$S"/.[!.]*; do [ -e "$$e" ] || continue; case $${e##*/} in backup-*|.deployed-major) ;; *) echo "$$e" ;; esac; done; }
+      have=$$(cat "$$STATE" 2>/dev/null || true)
+      if [ -z "$$have" ]; then
+        if [ -n "$$(live)" ]; then have=6; say "no $$STATE but storage exists: treating it as 6.x"; else have=none; fi
+      fi
+      if [ "$$have" != "$$WANT" ] && [ -n "$$(live)" ]; then
+        B=$$S/backup-$$have.x-$$(date +%Y%m%d-%H%M%S)
+        say "storage of $$have.x found, moving it to $$B (nothing is deleted; $$WANT.x starts empty and refills from npmjs)"
+        mkdir "$$B"
+        live | while IFS= read -r e; do mv "$$e" "$$B/"; done
+      fi
+      # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
+      # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
+      mkdir -p "$$S/data"
+      cur=$$(sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$$DB" 2>/dev/null || true)
+      if [ "$${#cur}" -ne 32 ]; then
+        new=$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        [ "$${#new}" -eq 32 ] || { say "cannot generate a secret"; exit 1; }
+        if [ -s "$$DB" ]; then
+          grep -q '"secret":"' "$$DB" || { say "$$DB has no secret field, not touching it"; exit 1; }
+          ( umask 077; sed "s/\"secret\":\"[^\"]*\"/\"secret\":\"$$new\"/" "$$DB" > "$$DB.new" )
+        else
+          ( umask 077; printf '{"list":[],"secret":"%s"}' "$$new" > "$$DB.new" )
+        fi
+        mv "$$DB.new" "$$DB"
+        say "wrote a new server secret to $$DB (32 characters, mode 600)"
+      fi
+      chmod 600 "$$DB"
+      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
+      exec "$$@"
 
 volumes:
   verdaccio-storage:
@@ -10140,6 +10202,120 @@ __SIC_EOF__
 chmod 755 "$R/runner/install/logging.sh"
 
 install -d "$R/runner/install"
+cat > "$R/runner/install/monitoring-backup.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Back up the Grafana data volume (SQLite database, plugins) before the first start of a new Grafana major.
+# Grafana migrates its database forward on start and cannot downgrade: the only way back is this backup plus the old image tag
+# (runner/README.md, "Grafana upgrade and rollback"). Called by monitoring.sh and by update.sh before they change the stack.
+# Idempotent: it backs up only when the installed image tag and the repo tag are on different majors (or the installed
+# version is unknown); a rerun after the compose file was updated is a no-op and the first backup stays.
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
+
+DIR="${MON_DIR:-/opt/monitoring}"
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/monitoring}"
+KEEP=3
+FROM_TAG=""
+TO_TAG=""
+FORCE=0
+DRYRUN=0
+
+usage() {
+  cat <<USAGE
+Usage: $0 [--dry-run] [--force] [--from-tag TAG] [--to-tag TAG]
+
+Archives the Grafana data volume to ${BACKUP_DIR}/grafana-<from-version>-<date>.tar.gz (mode 0600, last ${KEEP} kept)
+when the Grafana major changes. Grafana is stopped for the copy so the SQLite file is consistent, and started again afterwards.
+  --from-tag  version the data belongs to (default: image tag in ${DIR}/docker-compose.yml)
+  --to-tag    version about to start (default: image tag in this repo's monitoring compose file)
+  --force     back up even when the major does not change
+USAGE
+}
+
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -n|--dry-run) DRYRUN=1 ;;
+    --force) FORCE=1 ;;
+    --from-tag) FROM_TAG="${2:?--from-tag needs a value}"; shift ;;
+    --to-tag) TO_TAG="${2:?--to-tag needs a value}"; shift ;;
+    *) usage >&2; exit 1 ;;
+  esac
+  shift
+done
+
+grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1; exit }' "$1"; }
+major() { echo "${1%%.*}"; }
+
+require_root
+command -v docker >/dev/null || die "docker not installed"
+
+[[ -n "$TO_TAG" ]] || TO_TAG=$(grafana_tag "${REPO_ROOT}/runner/stacks/monitoring/docker-compose.yml")
+[[ -n "$TO_TAG" ]] || die "cannot read the Grafana tag from the repo compose file"
+if [[ -z "$FROM_TAG" && -f "${DIR}/docker-compose.yml" ]]; then FROM_TAG=$(grafana_tag "${DIR}/docker-compose.yml"); fi
+
+vol=$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data | head -n1)
+if [[ -z "$vol" ]]; then
+  log "grafana backup: no Grafana data volume yet, nothing to back up"
+  exit 0
+fi
+# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
+if (( ! DRYRUN )) && ! docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 test -s /v/grafana.db; then
+  log "grafana backup: ${vol} holds no database yet, nothing to back up"
+  exit 0
+fi
+
+# No compose file (reinstall over a leftover volume): the version is on the stopped container that last used the volume, if any.
+if [[ -z "$FROM_TAG" ]]; then
+  FROM_TAG=$(docker ps -a --filter "volume=${vol}" --format '{{.Image}}' | awk -F: '/^grafana\/grafana:/ { print $2; exit }')
+fi
+
+if (( ! FORCE )) && [[ -n "$FROM_TAG" && "$(major "$FROM_TAG")" == "$(major "$TO_TAG")" ]]; then
+  log "grafana backup: ${FROM_TAG} -> ${TO_TAG} stays on major $(major "$TO_TAG"), no backup needed"
+  exit 0
+fi
+
+label=$(printf '%s' "${FROM_TAG:-unknown}" | tr -c 'A-Za-z0-9._-' '_')
+target="${BACKUP_DIR}/grafana-${label}-$(date +%Y%m%d-%H%M%S).tar.gz"
+if (( DRYRUN )); then
+  log "[dry-run] would back up ${vol}, if it holds a database (${FROM_TAG:-unknown} -> ${TO_TAG}) to ${target}"
+  exit 0
+fi
+
+install -d -m 0700 "$BACKUP_DIR"
+tmp=$(umask 077; mktemp "${BACKUP_DIR}/.grafana-backup.XXXXXX")
+stopped=$(docker ps -q --filter "volume=${vol}")
+cleanup() {
+  rm -f "$tmp"
+  if [[ -n "$stopped" ]]; then
+    # shellcheck disable=SC2086
+    docker start $stopped >/dev/null || log "WARN: could not start the Grafana container again, run docker compose up -d in ${DIR}"
+  fi
+}
+trap cleanup EXIT
+
+if [[ -n "$stopped" ]]; then
+  log "grafana backup: stopping Grafana for a consistent copy"
+  # shellcheck disable=SC2086
+  docker stop $stopped >/dev/null
+fi
+log "grafana backup: ${vol} (${FROM_TAG:-unknown} -> ${TO_TAG})"
+docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 tar -C /v -czf - . > "$tmp"
+# Read the listing into a variable first: grep -q exiting early would SIGPIPE tar under pipefail.
+listing=$(tar -tzf "$tmp")
+grep -Eq '^(\./)?grafana\.db$' <<<"$listing" || die "the archive has no grafana.db, backup discarded"
+chmod 600 "$tmp"
+mv "$tmp" "$target"
+log "grafana backup: wrote ${target} ($(du -h "$target" | cut -f1))"
+
+# Keep the newest ${KEEP} archives.
+find "$BACKUP_DIR" -maxdepth 1 -type f -name 'grafana-*.tar.gz' -printf '%T@ %p\n' | sort -rn | tail -n "+$((KEEP + 1))" | cut -d' ' -f2- \
+  | xargs -r rm -f --
+__SIC_EOF__
+chmod 755 "$R/runner/install/monitoring-backup.sh"
+
+install -d "$R/runner/install"
 cat > "$R/runner/install/monitoring.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Install Prometheus + node_exporter + Grafana (all bound to 127.0.0.1) with the runner dashboard.
@@ -10159,6 +10335,15 @@ command -v docker >/dev/null || die "docker not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v jq >/dev/null || pkg_install jq
 [[ -f "$DIR/docker-compose.yml" ]] && die "$DIR/docker-compose.yml exists, stack already installed"
+
+# A Grafana volume left over from an earlier install is archived before a new major can migrate it (no-op on a clean host).
+# The copy-paste block (runner/COMMANDS.md) carries monitoring.sh alone, without the backup script: skip it there.
+backup_script="$(dirname "$0")/monitoring-backup.sh"
+if [[ -f "$backup_script" ]]; then
+  bash "$backup_script"
+else
+  log "WARN: ${backup_script} not found, a Grafana volume left over from an earlier install is not archived"
+fi
 
 selinux_label_dir "$DIR"
 curl -fsS http://127.0.0.1:9252/metrics >/dev/null 2>&1 || log "WARN: runner metrics on 127.0.0.1:9252 not reachable"
@@ -10213,6 +10398,8 @@ cat > "$R/runner/install/npm-cache.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Verdaccio npm pull-through cache on the docker0 bridge IP, exposed to CI jobs via runner env.
 # If the cache is down, npm ci in jobs fails (npm has no automatic fallback).
+# Storage and the server secret are prepared by the container itself at every start (config "start" in the compose file):
+# storage of an older major is moved aside to backup-*, Verdaccio 7 needs a secret of exactly 32 characters.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -10243,6 +10430,7 @@ docker compose pull -q
 docker compose up -d
 for _ in $(seq 1 20); do curl -fsS "${REG}-/ping" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "verdaccio did not start"; }
+docker compose logs --no-log-prefix verdaccio 2>&1 | grep '^npm-cache:' || true
 
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
@@ -10505,6 +10693,8 @@ DO_ROLLBACK=0
 CHANGED=()
 SKIPPED=()
 WORK=""
+# Set once update_monitoring has started containers from the new compose file: from then on the Grafana volume may be migrated.
+GRAFANA_STARTED=0
 
 usage() {
   cat <<USAGE
@@ -10513,6 +10703,7 @@ Usage: $0 [--dry-run] [--pull] [--os] [--rollback]
 Updates what is installed on this server to the state of this repo checkout:
   host tools     health, cleanup, disk guard (+ prewarm if configured), their systemd units, kernel hardening and core dump settings
   monitoring     /opt/monitoring (Prometheus, Grafana, node_exporter, Caddy override if present)
+                 (a new Grafana major first archives its data volume to /var/backups/monitoring, last 3 kept)
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
   npm-cache      /opt/npm-cache
@@ -10522,6 +10713,7 @@ Components that are not installed are skipped.
       --pull     git pull --ff-only in this checkout first (needs a git clone, not an scp copy)
       --os       also upgrade OS packages (Docker, GitLab Runner included); never reboots
       --rollback restore the files from the newest backup in ${BACKUP_ROOT} and recreate the stacks
+                 (Grafana keeps its newer image once it has migrated its data: that part is the archive restore in runner/README.md)
 
 Steps that restart Docker-based caches or upgrade packages are skipped while CI jobs are running
 and the script exits with code 3; rerun it when the runner is idle.
@@ -10589,9 +10781,29 @@ sync_tree() {
   return "$rc"
 }
 
+grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1; exit }' "$1"; }
+
+# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
+# Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
+# (runner/README.md, "Grafana upgrade and rollback"). Prints the tag to keep, or nothing when the restore is safe.
+keep_grafana_major() {
+  local cur old
+  [[ -f "$1" && -f "$2" ]] || return 0
+  cur=$(grafana_tag "$1")
+  old=$(grafana_tag "$2")
+  [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
+  if (( ${cur%%.*} > ${old%%.*} )); then
+    printf '%s\n' "$cur"
+  fi
+}
+
 restore_files() {
-  local f
+  local f keep="" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
+  # Only once the new Grafana has started can its data be on the new major; before that the restore is a clean undo.
+  if (( GRAFANA_STARTED )); then
+    keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}")
+  fi
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
     if (( DRYRUN )); then
@@ -10600,6 +10812,12 @@ restore_files() {
       cp -a "$f" "${f#"${BACKUP_DIR}"}"
     fi
   done < <(find "$BACKUP_DIR" -type f -print0)
+  if [[ -n "$keep" ]]; then
+    log "WARN: grafana ${keep} already migrated its data and cannot be rolled back with files; the image stays grafana/grafana:${keep}. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
+    if (( ! DRYRUN )); then
+      sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:${keep}|" "$mon"
+    fi
+  fi
   run systemctl daemon-reload
 }
 
@@ -10795,6 +11013,13 @@ YAML
   docker run --rm --entrypoint promtool -v "${stage}:/etc/prometheus:ro${zopt}" "$prom_image" \
     check config /etc/prometheus/prometheus.yml || die "promtool rejected the new Prometheus config, nothing changed"
 
+  # Grafana migrates its database forward on a new major and cannot go back: archive the data volume first (see runner/README.md).
+  if (( DRYRUN )); then
+    bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" --dry-run || log "WARN: the Grafana backup check failed (dry run only, nothing changed)"
+  else
+    bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" || die "monitoring: Grafana data backup failed, nothing changed"
+  fi
+
   if sync_file "${stage}/prometheus.yml" "${dir}/prometheus/prometheus.yml" 0644 inplace; then
     prom=1
     CHANGED+=("monitoring/prometheus.yml")
@@ -10826,6 +11051,7 @@ YAML
     (cd "$dir" && docker compose pull -q)
   fi
   chown_volumes "$dir"
+  GRAFANA_STARTED=1
   (cd "$dir" && docker compose up -d)
   if ! wait_url http://127.0.0.1:9090/-/ready 30; then
     (cd "$dir" && docker compose logs --tail 30 prometheus) || true
@@ -10976,6 +11202,8 @@ do_rollback() {
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
   [[ -n "$latest" ]] || die "no backups in ${BACKUP_ROOT}"
   BACKUP_DIR="$latest"
+  # The installed compose file is what last ran: its Grafana may have migrated the data, whatever the update that made the backup did.
+  GRAFANA_STARTED=1
   restore_files
   if (( DRYRUN )); then
     return 0
@@ -11035,7 +11263,7 @@ main() {
   flock -n 9 || die "another update is running"
   WORK=$(mktemp -d)
   trap 'rm -rf "$WORK"' EXIT
-  trap 'log "ERROR at line ${LINENO}: update aborted. Changed files are backed up in ${BACKUP_DIR} (runner/install/update.sh --rollback)"' ERR
+  trap 'log "ERROR at line ${LINENO}: update aborted. Changed files are backed up in ${BACKUP_DIR} (runner/install/update.sh --rollback, files only: Grafana data is restored from /var/backups/monitoring, see runner/README.md)"' ERR
 
   if (( DO_ROLLBACK )); then
     do_rollback
@@ -12226,11 +12454,12 @@ services:
       - /:/host:ro,rslave
 
   grafana:
-    image: grafana/grafana:12.0.0
+    image: grafana/grafana:13.3.0
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
-    mem_limit: 256m
+    # Grafana 13 migrates dashboards and folders into unified storage on the first start; 512 MB is the documented minimum.
+    mem_limit: 512m
     env_file: .env
     depends_on: [prometheus]
     volumes:
@@ -12421,6 +12650,8 @@ chmod 644 "$R/runner/stacks/monitoring/prometheus/prometheus.yml"
 
 install -d "$R/runner/stacks/npm-cache"
 cat > "$R/runner/stacks/npm-cache/config.yaml" <<'__SIC_EOF__'
+# Verdaccio 7. The server secret is not a setting here: 7.x reads it only from data/.verdaccio-db.json in the storage and
+# accepts exactly 32 characters. The start script in docker-compose.yml creates it (mode 600) and moves older storage aside.
 storage: /verdaccio/storage/data
 plugins: /verdaccio/plugins
 
@@ -12468,17 +12699,64 @@ name: npm-cache
 
 services:
   verdaccio:
-    image: verdaccio/verdaccio:6.1.2
+    image: verdaccio/verdaccio:7.0.2
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
     # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
     # and exposes the cache (access: $all) on every interface. runner/install/npm-cache.sh and update.sh
     # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
-    command: ["verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
+    # npm-cache-start.sh (the config below) runs first and then execs verdaccio.
+    command: ["sh", "/usr/local/bin/npm-cache-start.sh", "verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
+    configs:
+      - source: start
+        target: /usr/local/bin/npm-cache-start.sh
     volumes:
       - ./config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio-storage:/verdaccio/storage
+
+# Runs on every start, so it also covers update.sh, which only syncs this file and config.yaml. In "content:" a literal
+# dollar sign is written $$ (compose would interpolate a single one).
+configs:
+  start:
+    content: |
+      set -eu
+      S=/verdaccio/storage
+      DB=$$S/data/.verdaccio-db.json
+      STATE=$$S/.deployed-major
+      WANT=7
+      say() { echo "npm-cache: $$*" >&2; }
+      # live storage = everything except the state file and earlier backups
+      live() { for e in "$$S"/* "$$S"/.[!.]*; do [ -e "$$e" ] || continue; case $${e##*/} in backup-*|.deployed-major) ;; *) echo "$$e" ;; esac; done; }
+      have=$$(cat "$$STATE" 2>/dev/null || true)
+      if [ -z "$$have" ]; then
+        if [ -n "$$(live)" ]; then have=6; say "no $$STATE but storage exists: treating it as 6.x"; else have=none; fi
+      fi
+      if [ "$$have" != "$$WANT" ] && [ -n "$$(live)" ]; then
+        B=$$S/backup-$$have.x-$$(date +%Y%m%d-%H%M%S)
+        say "storage of $$have.x found, moving it to $$B (nothing is deleted; $$WANT.x starts empty and refills from npmjs)"
+        mkdir "$$B"
+        live | while IFS= read -r e; do mv "$$e" "$$B/"; done
+      fi
+      # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
+      # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
+      mkdir -p "$$S/data"
+      cur=$$(sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$$DB" 2>/dev/null || true)
+      if [ "$${#cur}" -ne 32 ]; then
+        new=$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        [ "$${#new}" -eq 32 ] || { say "cannot generate a secret"; exit 1; }
+        if [ -s "$$DB" ]; then
+          grep -q '"secret":"' "$$DB" || { say "$$DB has no secret field, not touching it"; exit 1; }
+          ( umask 077; sed "s/\"secret\":\"[^\"]*\"/\"secret\":\"$$new\"/" "$$DB" > "$$DB.new" )
+        else
+          ( umask 077; printf '{"list":[],"secret":"%s"}' "$$new" > "$$DB.new" )
+        fi
+        mv "$$DB.new" "$$DB"
+        say "wrote a new server secret to $$DB (32 characters, mode 600)"
+      fi
+      chmod 600 "$$DB"
+      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
+      exec "$$@"
 
 volumes:
   verdaccio-storage:
@@ -14112,7 +14390,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 51"
+echo "files written to $R: 52"
 INSTALL
 sudo bash /root/server-init-config/runner/install/update.sh
 ````
@@ -15033,6 +15311,120 @@ __SIC_EOF__
 chmod 755 "$R/runner/install/logging.sh"
 
 install -d "$R/runner/install"
+cat > "$R/runner/install/monitoring-backup.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Back up the Grafana data volume (SQLite database, plugins) before the first start of a new Grafana major.
+# Grafana migrates its database forward on start and cannot downgrade: the only way back is this backup plus the old image tag
+# (runner/README.md, "Grafana upgrade and rollback"). Called by monitoring.sh and by update.sh before they change the stack.
+# Idempotent: it backs up only when the installed image tag and the repo tag are on different majors (or the installed
+# version is unknown); a rerun after the compose file was updated is a no-op and the first backup stays.
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
+
+DIR="${MON_DIR:-/opt/monitoring}"
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/monitoring}"
+KEEP=3
+FROM_TAG=""
+TO_TAG=""
+FORCE=0
+DRYRUN=0
+
+usage() {
+  cat <<USAGE
+Usage: $0 [--dry-run] [--force] [--from-tag TAG] [--to-tag TAG]
+
+Archives the Grafana data volume to ${BACKUP_DIR}/grafana-<from-version>-<date>.tar.gz (mode 0600, last ${KEEP} kept)
+when the Grafana major changes. Grafana is stopped for the copy so the SQLite file is consistent, and started again afterwards.
+  --from-tag  version the data belongs to (default: image tag in ${DIR}/docker-compose.yml)
+  --to-tag    version about to start (default: image tag in this repo's monitoring compose file)
+  --force     back up even when the major does not change
+USAGE
+}
+
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -n|--dry-run) DRYRUN=1 ;;
+    --force) FORCE=1 ;;
+    --from-tag) FROM_TAG="${2:?--from-tag needs a value}"; shift ;;
+    --to-tag) TO_TAG="${2:?--to-tag needs a value}"; shift ;;
+    *) usage >&2; exit 1 ;;
+  esac
+  shift
+done
+
+grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1; exit }' "$1"; }
+major() { echo "${1%%.*}"; }
+
+require_root
+command -v docker >/dev/null || die "docker not installed"
+
+[[ -n "$TO_TAG" ]] || TO_TAG=$(grafana_tag "${REPO_ROOT}/runner/stacks/monitoring/docker-compose.yml")
+[[ -n "$TO_TAG" ]] || die "cannot read the Grafana tag from the repo compose file"
+if [[ -z "$FROM_TAG" && -f "${DIR}/docker-compose.yml" ]]; then FROM_TAG=$(grafana_tag "${DIR}/docker-compose.yml"); fi
+
+vol=$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data | head -n1)
+if [[ -z "$vol" ]]; then
+  log "grafana backup: no Grafana data volume yet, nothing to back up"
+  exit 0
+fi
+# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
+if (( ! DRYRUN )) && ! docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 test -s /v/grafana.db; then
+  log "grafana backup: ${vol} holds no database yet, nothing to back up"
+  exit 0
+fi
+
+# No compose file (reinstall over a leftover volume): the version is on the stopped container that last used the volume, if any.
+if [[ -z "$FROM_TAG" ]]; then
+  FROM_TAG=$(docker ps -a --filter "volume=${vol}" --format '{{.Image}}' | awk -F: '/^grafana\/grafana:/ { print $2; exit }')
+fi
+
+if (( ! FORCE )) && [[ -n "$FROM_TAG" && "$(major "$FROM_TAG")" == "$(major "$TO_TAG")" ]]; then
+  log "grafana backup: ${FROM_TAG} -> ${TO_TAG} stays on major $(major "$TO_TAG"), no backup needed"
+  exit 0
+fi
+
+label=$(printf '%s' "${FROM_TAG:-unknown}" | tr -c 'A-Za-z0-9._-' '_')
+target="${BACKUP_DIR}/grafana-${label}-$(date +%Y%m%d-%H%M%S).tar.gz"
+if (( DRYRUN )); then
+  log "[dry-run] would back up ${vol}, if it holds a database (${FROM_TAG:-unknown} -> ${TO_TAG}) to ${target}"
+  exit 0
+fi
+
+install -d -m 0700 "$BACKUP_DIR"
+tmp=$(umask 077; mktemp "${BACKUP_DIR}/.grafana-backup.XXXXXX")
+stopped=$(docker ps -q --filter "volume=${vol}")
+cleanup() {
+  rm -f "$tmp"
+  if [[ -n "$stopped" ]]; then
+    # shellcheck disable=SC2086
+    docker start $stopped >/dev/null || log "WARN: could not start the Grafana container again, run docker compose up -d in ${DIR}"
+  fi
+}
+trap cleanup EXIT
+
+if [[ -n "$stopped" ]]; then
+  log "grafana backup: stopping Grafana for a consistent copy"
+  # shellcheck disable=SC2086
+  docker stop $stopped >/dev/null
+fi
+log "grafana backup: ${vol} (${FROM_TAG:-unknown} -> ${TO_TAG})"
+docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 tar -C /v -czf - . > "$tmp"
+# Read the listing into a variable first: grep -q exiting early would SIGPIPE tar under pipefail.
+listing=$(tar -tzf "$tmp")
+grep -Eq '^(\./)?grafana\.db$' <<<"$listing" || die "the archive has no grafana.db, backup discarded"
+chmod 600 "$tmp"
+mv "$tmp" "$target"
+log "grafana backup: wrote ${target} ($(du -h "$target" | cut -f1))"
+
+# Keep the newest ${KEEP} archives.
+find "$BACKUP_DIR" -maxdepth 1 -type f -name 'grafana-*.tar.gz' -printf '%T@ %p\n' | sort -rn | tail -n "+$((KEEP + 1))" | cut -d' ' -f2- \
+  | xargs -r rm -f --
+__SIC_EOF__
+chmod 755 "$R/runner/install/monitoring-backup.sh"
+
+install -d "$R/runner/install"
 cat > "$R/runner/install/monitoring.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Install Prometheus + node_exporter + Grafana (all bound to 127.0.0.1) with the runner dashboard.
@@ -15052,6 +15444,15 @@ command -v docker >/dev/null || die "docker not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v jq >/dev/null || pkg_install jq
 [[ -f "$DIR/docker-compose.yml" ]] && die "$DIR/docker-compose.yml exists, stack already installed"
+
+# A Grafana volume left over from an earlier install is archived before a new major can migrate it (no-op on a clean host).
+# The copy-paste block (runner/COMMANDS.md) carries monitoring.sh alone, without the backup script: skip it there.
+backup_script="$(dirname "$0")/monitoring-backup.sh"
+if [[ -f "$backup_script" ]]; then
+  bash "$backup_script"
+else
+  log "WARN: ${backup_script} not found, a Grafana volume left over from an earlier install is not archived"
+fi
 
 selinux_label_dir "$DIR"
 curl -fsS http://127.0.0.1:9252/metrics >/dev/null 2>&1 || log "WARN: runner metrics on 127.0.0.1:9252 not reachable"
@@ -15106,6 +15507,8 @@ cat > "$R/runner/install/npm-cache.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Verdaccio npm pull-through cache on the docker0 bridge IP, exposed to CI jobs via runner env.
 # If the cache is down, npm ci in jobs fails (npm has no automatic fallback).
+# Storage and the server secret are prepared by the container itself at every start (config "start" in the compose file):
+# storage of an older major is moved aside to backup-*, Verdaccio 7 needs a secret of exactly 32 characters.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -15136,6 +15539,7 @@ docker compose pull -q
 docker compose up -d
 for _ in $(seq 1 20); do curl -fsS "${REG}-/ping" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "verdaccio did not start"; }
+docker compose logs --no-log-prefix verdaccio 2>&1 | grep '^npm-cache:' || true
 
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
@@ -15398,6 +15802,8 @@ DO_ROLLBACK=0
 CHANGED=()
 SKIPPED=()
 WORK=""
+# Set once update_monitoring has started containers from the new compose file: from then on the Grafana volume may be migrated.
+GRAFANA_STARTED=0
 
 usage() {
   cat <<USAGE
@@ -15406,6 +15812,7 @@ Usage: $0 [--dry-run] [--pull] [--os] [--rollback]
 Updates what is installed on this server to the state of this repo checkout:
   host tools     health, cleanup, disk guard (+ prewarm if configured), their systemd units, kernel hardening and core dump settings
   monitoring     /opt/monitoring (Prometheus, Grafana, node_exporter, Caddy override if present)
+                 (a new Grafana major first archives its data volume to /var/backups/monitoring, last 3 kept)
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
   npm-cache      /opt/npm-cache
@@ -15415,6 +15822,7 @@ Components that are not installed are skipped.
       --pull     git pull --ff-only in this checkout first (needs a git clone, not an scp copy)
       --os       also upgrade OS packages (Docker, GitLab Runner included); never reboots
       --rollback restore the files from the newest backup in ${BACKUP_ROOT} and recreate the stacks
+                 (Grafana keeps its newer image once it has migrated its data: that part is the archive restore in runner/README.md)
 
 Steps that restart Docker-based caches or upgrade packages are skipped while CI jobs are running
 and the script exits with code 3; rerun it when the runner is idle.
@@ -15482,9 +15890,29 @@ sync_tree() {
   return "$rc"
 }
 
+grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1; exit }' "$1"; }
+
+# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
+# Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
+# (runner/README.md, "Grafana upgrade and rollback"). Prints the tag to keep, or nothing when the restore is safe.
+keep_grafana_major() {
+  local cur old
+  [[ -f "$1" && -f "$2" ]] || return 0
+  cur=$(grafana_tag "$1")
+  old=$(grafana_tag "$2")
+  [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
+  if (( ${cur%%.*} > ${old%%.*} )); then
+    printf '%s\n' "$cur"
+  fi
+}
+
 restore_files() {
-  local f
+  local f keep="" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
+  # Only once the new Grafana has started can its data be on the new major; before that the restore is a clean undo.
+  if (( GRAFANA_STARTED )); then
+    keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}")
+  fi
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
     if (( DRYRUN )); then
@@ -15493,6 +15921,12 @@ restore_files() {
       cp -a "$f" "${f#"${BACKUP_DIR}"}"
     fi
   done < <(find "$BACKUP_DIR" -type f -print0)
+  if [[ -n "$keep" ]]; then
+    log "WARN: grafana ${keep} already migrated its data and cannot be rolled back with files; the image stays grafana/grafana:${keep}. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
+    if (( ! DRYRUN )); then
+      sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:${keep}|" "$mon"
+    fi
+  fi
   run systemctl daemon-reload
 }
 
@@ -15688,6 +16122,13 @@ YAML
   docker run --rm --entrypoint promtool -v "${stage}:/etc/prometheus:ro${zopt}" "$prom_image" \
     check config /etc/prometheus/prometheus.yml || die "promtool rejected the new Prometheus config, nothing changed"
 
+  # Grafana migrates its database forward on a new major and cannot go back: archive the data volume first (see runner/README.md).
+  if (( DRYRUN )); then
+    bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" --dry-run || log "WARN: the Grafana backup check failed (dry run only, nothing changed)"
+  else
+    bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" || die "monitoring: Grafana data backup failed, nothing changed"
+  fi
+
   if sync_file "${stage}/prometheus.yml" "${dir}/prometheus/prometheus.yml" 0644 inplace; then
     prom=1
     CHANGED+=("monitoring/prometheus.yml")
@@ -15719,6 +16160,7 @@ YAML
     (cd "$dir" && docker compose pull -q)
   fi
   chown_volumes "$dir"
+  GRAFANA_STARTED=1
   (cd "$dir" && docker compose up -d)
   if ! wait_url http://127.0.0.1:9090/-/ready 30; then
     (cd "$dir" && docker compose logs --tail 30 prometheus) || true
@@ -15869,6 +16311,8 @@ do_rollback() {
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
   [[ -n "$latest" ]] || die "no backups in ${BACKUP_ROOT}"
   BACKUP_DIR="$latest"
+  # The installed compose file is what last ran: its Grafana may have migrated the data, whatever the update that made the backup did.
+  GRAFANA_STARTED=1
   restore_files
   if (( DRYRUN )); then
     return 0
@@ -15928,7 +16372,7 @@ main() {
   flock -n 9 || die "another update is running"
   WORK=$(mktemp -d)
   trap 'rm -rf "$WORK"' EXIT
-  trap 'log "ERROR at line ${LINENO}: update aborted. Changed files are backed up in ${BACKUP_DIR} (runner/install/update.sh --rollback)"' ERR
+  trap 'log "ERROR at line ${LINENO}: update aborted. Changed files are backed up in ${BACKUP_DIR} (runner/install/update.sh --rollback, files only: Grafana data is restored from /var/backups/monitoring, see runner/README.md)"' ERR
 
   if (( DO_ROLLBACK )); then
     do_rollback
@@ -17119,11 +17563,12 @@ services:
       - /:/host:ro,rslave
 
   grafana:
-    image: grafana/grafana:12.0.0
+    image: grafana/grafana:13.3.0
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
-    mem_limit: 256m
+    # Grafana 13 migrates dashboards and folders into unified storage on the first start; 512 MB is the documented minimum.
+    mem_limit: 512m
     env_file: .env
     depends_on: [prometheus]
     volumes:
@@ -17314,6 +17759,8 @@ chmod 644 "$R/runner/stacks/monitoring/prometheus/prometheus.yml"
 
 install -d "$R/runner/stacks/npm-cache"
 cat > "$R/runner/stacks/npm-cache/config.yaml" <<'__SIC_EOF__'
+# Verdaccio 7. The server secret is not a setting here: 7.x reads it only from data/.verdaccio-db.json in the storage and
+# accepts exactly 32 characters. The start script in docker-compose.yml creates it (mode 600) and moves older storage aside.
 storage: /verdaccio/storage/data
 plugins: /verdaccio/plugins
 
@@ -17361,17 +17808,64 @@ name: npm-cache
 
 services:
   verdaccio:
-    image: verdaccio/verdaccio:6.1.2
+    image: verdaccio/verdaccio:7.0.2
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
     # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
     # and exposes the cache (access: $all) on every interface. runner/install/npm-cache.sh and update.sh
     # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
-    command: ["verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
+    # npm-cache-start.sh (the config below) runs first and then execs verdaccio.
+    command: ["sh", "/usr/local/bin/npm-cache-start.sh", "verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
+    configs:
+      - source: start
+        target: /usr/local/bin/npm-cache-start.sh
     volumes:
       - ./config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio-storage:/verdaccio/storage
+
+# Runs on every start, so it also covers update.sh, which only syncs this file and config.yaml. In "content:" a literal
+# dollar sign is written $$ (compose would interpolate a single one).
+configs:
+  start:
+    content: |
+      set -eu
+      S=/verdaccio/storage
+      DB=$$S/data/.verdaccio-db.json
+      STATE=$$S/.deployed-major
+      WANT=7
+      say() { echo "npm-cache: $$*" >&2; }
+      # live storage = everything except the state file and earlier backups
+      live() { for e in "$$S"/* "$$S"/.[!.]*; do [ -e "$$e" ] || continue; case $${e##*/} in backup-*|.deployed-major) ;; *) echo "$$e" ;; esac; done; }
+      have=$$(cat "$$STATE" 2>/dev/null || true)
+      if [ -z "$$have" ]; then
+        if [ -n "$$(live)" ]; then have=6; say "no $$STATE but storage exists: treating it as 6.x"; else have=none; fi
+      fi
+      if [ "$$have" != "$$WANT" ] && [ -n "$$(live)" ]; then
+        B=$$S/backup-$$have.x-$$(date +%Y%m%d-%H%M%S)
+        say "storage of $$have.x found, moving it to $$B (nothing is deleted; $$WANT.x starts empty and refills from npmjs)"
+        mkdir "$$B"
+        live | while IFS= read -r e; do mv "$$e" "$$B/"; done
+      fi
+      # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
+      # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
+      mkdir -p "$$S/data"
+      cur=$$(sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$$DB" 2>/dev/null || true)
+      if [ "$${#cur}" -ne 32 ]; then
+        new=$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        [ "$${#new}" -eq 32 ] || { say "cannot generate a secret"; exit 1; }
+        if [ -s "$$DB" ]; then
+          grep -q '"secret":"' "$$DB" || { say "$$DB has no secret field, not touching it"; exit 1; }
+          ( umask 077; sed "s/\"secret\":\"[^\"]*\"/\"secret\":\"$$new\"/" "$$DB" > "$$DB.new" )
+        else
+          ( umask 077; printf '{"list":[],"secret":"%s"}' "$$new" > "$$DB.new" )
+        fi
+        mv "$$DB.new" "$$DB"
+        say "wrote a new server secret to $$DB (32 characters, mode 600)"
+      fi
+      chmod 600 "$$DB"
+      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
+      exec "$$@"
 
 volumes:
   verdaccio-storage:
@@ -19005,7 +19499,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 51"
+echo "files written to $R: 52"
 bash "$R/runner/install/users.sh" </dev/null
 bash "$R/common/admin-tools.sh" </dev/null
 bash "$R/runner/install/host-tools.sh" </dev/null
