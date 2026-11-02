@@ -38,15 +38,20 @@ if [[ ! -f "$DIR/.env" ]]; then
   # Generated only on a first install: data that exists under the default key (a volume left over from an earlier install) cannot be
   # read with a new one, so there the default stays. The key belongs next to every backup archive (runner/README.md).
   sk=""
-  if [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data)" ]]; then
+  # A failed `docker volume ls` (daemon down) must not read as "no volume": a key generated over a default-key volume locks its data.
+  vols=$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data) \
+    || die "cannot list docker volumes (is the Docker daemon running?)"
+  if [[ -z "$vols" ]]; then
     sk=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-40)
   else
-    log "NOTE: a Grafana data volume exists, so Grafana keeps its built-in default encryption key (see runner/README.md, Grafana upgrade and rollback)"
+    # The volume may have been written under a key of the earlier install; this run has no way to know it, so it adds none.
+    log "NOTE: a Grafana data volume exists, so no new encryption key is generated and Grafana uses its built-in default key"
+    log "NOTE: if the earlier install's .env had a GF_SECURITY_SECRET_KEY line, put that same line back in ${DIR}/.env before Grafana starts (restore the earlier .env there before running this installer: an existing .env is kept); see runner/README.md, Grafana upgrade and rollback"
   fi
   (umask 077
    sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
    if [[ -n "$sk" ]]; then printf 'GF_SECURITY_SECRET_KEY=%s\n' "$sk" >> "$DIR/.env"; fi)
-  unset pw sk
+  unset pw sk vols
 fi
 chmod 600 "$DIR/.env"
 stack_ids "$DIR"
