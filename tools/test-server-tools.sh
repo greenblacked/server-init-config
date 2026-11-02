@@ -268,7 +268,9 @@ rm -f "$T/bin/df"
 check "brief does not call dnf" '! grep -q . <<<"$(calls dnf)"'
 bash "$H" --brief --write >/dev/null 2>&1; rc=$?
 check "--write: brief.txt written, mode 0644, no stdout needed" '[[ $rc -eq 0 && -f "$T/hb/brief.txt" && "$(stat -c %a "$T/hb/brief.txt")" == 644 ]]'
-check "--write: the cached file equals a fresh render" 'diff <(sed "s/(as of [0-9:]*)//" "$T/hb/brief.txt") <(bash "$H" --brief --no-color | sed "s/(as of [0-9:]*)//") >/dev/null'
+# The brief reads load, uptime, memory and disk live, so they can move between the two renders on a busy host.
+brief_static() { sed -E 's/\(as of [0-9:]*\)//; s/up [0-9]+d[0-9]+h//; s/load [0-9. ]+//; s/[0-9]+% (used|free)/N% \1/g'; }
+check "--write: the cached file equals a fresh render" 'diff <(brief_static < "$T/hb/brief.txt") <(bash "$H" --brief --no-color | brief_static) >/dev/null'
 rm -f "$T/hb/full"
 bash "$H" --brief --write >/dev/null 2>&1
 check "--write with no recent full run: runs one and stores counts" 'grep -qE "^time=[0-9]+ warn=[0-9]+ fail=[0-9]+" "$T/hb/full" && [[ "$(stat -c %a "$T/hb/last-full.log")" == 600 ]]'
