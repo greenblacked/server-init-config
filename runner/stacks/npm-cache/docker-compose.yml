@@ -46,7 +46,7 @@ configs:
       # Record the major now, before the secret step: a crash after the move must not make the next start take the fresh 7.x
       # storage for 6.x and move it aside too. Backups can hold old credentials (htpasswd, secret): only the verdaccio uid reads them.
       [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
-      for b in "$$S"/backup-*; do [ -d "$$b" ] && chmod 700 "$$b"; done
+      for b in "$$S"/backup-*; do [ -d "$$b" ] && { chmod 700 "$$b" || say "cannot chmod $$b"; }; done
       # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
       # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
       mkdir -p "$$S/data"

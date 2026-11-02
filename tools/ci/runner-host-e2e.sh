@@ -30,6 +30,7 @@ NS=ci-meta
 cleanup() {
   local rc=$?
   set +e
+  rm -f "${TRUNC:-}"
   { docker ps -aq --filter label=ci-e2e=1 | xargs -r docker rm -f
     docker network rm ci-e2e-br
     docker compose -f /opt/npm-cache/docker-compose.yml down -v
@@ -48,8 +49,10 @@ cleanup() {
 trap cleanup EXIT
 
 dexec() { docker run --rm --label ci-e2e=1 "$@"; }
+# the helper image that runs as root next to stack volumes: one pin, in common/lib.sh (alpine 3.20 is end of life), by index digest
+ALPINE=$(awk -F'"' '/^HELPER_IMAGE=/ { print $2 }' common/lib.sh)
 # can a container fetch URL within 5 s? (alpine's busybox wget)
-reach() { dexec "${NET_ARGS[@]}" alpine:3.20 wget -q -T 5 -O /dev/null "$1" >/dev/null 2>&1; }
+reach() { dexec "${NET_ARGS[@]}" "$ALPINE" wget -q -T 5 -O /dev/null "$1" >/dev/null 2>&1; }
 NET_ARGS=()
 
 group "1. registry cache"
@@ -239,8 +242,6 @@ dash_listed() { gapi "${GURL}/api/search?type=dash-db" | jq -e --arg t "$1" 'any
 up_via_grafana() { [[ "$(gapi --data-urlencode "query=up{job=\"node\"}" -G "${GURL}/api/datasources/proxy/uid/prometheus/api/v1/query" | jq -r '.data.result[0].value[1] // "none"')" == 1 ]]; }
 ds_healthy() { [[ "$(gapi "${GURL}/api/datasources/uid/prometheus/health" | jq -r .status)" == OK ]]; }
 grafana_logs() { mcompose logs --no-color --tail 40 grafana 2>&1 | ci_redact; }
-# the helper image of the backup script and of the README restore command (pinned by index digest, alpine 3.20 is end of life)
-ALPINE=$(awk -F'"' '/^HELPER_IMAGE=/ { print $2 }' runner/install/monitoring-backup.sh)
 grafana_mem() { docker inspect -f '{{.HostConfig.Memory}}' monitoring-grafana-1; }
 # update.sh functions run in their own bash: a `||`/`if` around a subshell would switch set -e off inside the function.
 #   [UPD_BACKUP_DIR=dir] upd FUNCTION [ARGS]   (the real update.sh is sourced, its main is not run)
@@ -258,7 +259,8 @@ upd() { bash "$W/upd.sh" "$CI_ROOT/runner/install/update.sh" "$@"; }
 # bash -c, with FILE as the archive. The test runs what the README says, not a copy of it.
 readme_cmd() { grep -F -m1 -- "$1" runner/README.md | sed -e "s/^sudo bash -c '//" -e "s/'\$//" -e "s|/var/backups/monitoring/FILE|$2|g"; }
 [[ -n "$GTAG" ]] || fail "cannot read the Grafana tag from the repo compose file"
-[[ "$ALPINE" =~ ^alpine:3\.22@sha256:[0-9a-f]{64}$ ]] && pass "backup helper image is alpine 3.22 pinned by digest" || fail "backup helper image is not alpine:3.22@sha256:<digest>: '${ALPINE}'"
+[[ "$ALPINE" =~ ^alpine:3\.22@sha256:[0-9a-f]{64}$ ]] && pass "helper image (common/lib.sh) is alpine 3.22 pinned by digest" || fail "helper image is not alpine:3.22@sha256:<digest>: '${ALPINE}'"
+grep -q '^HELPER_IMAGE=' runner/install/monitoring-backup.sh && fail "monitoring-backup.sh has its own helper image pin, the pin lives in common/lib.sh" || pass "monitoring-backup.sh takes the helper image from common/lib.sh (one pin)"
 grep -qF -- "$ALPINE" runner/README.md && pass "the README restore command uses the same pinned image" || fail "runner/README.md does not use ${ALPINE}"
 
 # The installer needs the service user (users.sh also hardens SSH, which a CI VM must not get) and, for the gitlab-runner scrape
@@ -435,9 +437,24 @@ expect_eq "older installed major than the backup: restore allowed" "$(gkeep "$W/
 expect_eq "same major: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/new-compose.yml")" ""
 expect_eq "no backup of the compose file: nothing to keep" "$(gkeep "$W/new-compose.yml" "$W/none.yml")" ""
 expect_eq "new file on disk but the 12 container is what ran: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" 12.0.0)" ""
-expect_eq "new file on disk and no Grafana container ever started: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" none)" ""
+expect_eq "new file on disk and no started container found (unknown): keep the installed major, the safe side" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" "")" 13.3.0
 expect_eq "the 13 container ran: keep" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" 13.3.0)" 13.3.0
 expect_eq "grafana_ran_tag reads the container that ran" "$(upd grafana_ran_tag)" "$GTAG"
+# grafana_ran_tag with a docker shim: containers that were created but never started give no answer (unknown, not "never ran")
+mkdir -p "$W/shim-ran"
+cat > "$W/shim-ran/docker" <<'SHIM'
+#!/usr/bin/env bash
+case "$1" in
+  ps) printf 'c1\nc2\n' ;;
+  inspect) printf '%s\n' "${SHIM_ROWS}" ;;
+  *) exit 1 ;;
+esac
+SHIM
+chmod +x "$W/shim-ran/docker"
+ran_shim() { SHIM_ROWS=$1 PATH="$W/shim-ran:$PATH" upd grafana_ran_tag; }
+expect_eq "grafana_ran_tag: created but never started containers: no answer" "$(ran_shim $'0001-01-01T00:00:00Z grafana/grafana:13.3.0\n0001-01-01T00:00:00Z grafana/grafana:13.3.0')" ""
+expect_eq "grafana_ran_tag: the 13 container is new and failed, the old started 12 container still exists: 12" "$(ran_shim $'0001-01-01T00:00:00Z grafana/grafana:13.3.0\n2026-01-01T00:00:00Z grafana/grafana:12.0.0')" 12.0.0
+expect_eq "grafana_ran_tag: a started 12 and a started 13: the newest tag" "$(ran_shim $'2026-01-01T00:00:00Z grafana/grafana:12.0.0\n2026-02-01T00:00:00Z grafana/grafana:13.3.0')" 13.3.0
 # the old compose file as the 12.0.0 era had it: older image, 256m
 awk '/^  grafana:/ { g = 1 } g && /mem_limit:/ { sub(/512m/, "256m") } { print }' runner/stacks/monitoring/docker-compose.yml \
   | sed "s|image: grafana/grafana:.*|image: grafana/grafana:${MON_OLD}|" > "$W/compose-old-full.yml"
@@ -469,10 +486,13 @@ install -m 0644 runner/stacks/monitoring/docker-compose.yml "$MD/docker-compose.
 echo "-- rollback with the documented commands"
 gapi -X DELETE "${GURL}/api/dashboards/uid/ci-dash" >/dev/null 2>&1 || true
 # a truncated archive is refused before anything is stopped or deleted
-head -c "$(( $(stat -c %s "$BK") / 2 ))" "$BK" > "$W/truncated.tar.gz"
-RESTORE_CMD=$(readme_cmd 'docker run --rm -i --network none -v monitoring_grafana-data' "$W/truncated.tar.gz")
+# (a half Grafana database: kept outside $W, which is uploaded as the public failure artifact, and removed right after use)
+TRUNC=$(umask 077; mktemp /tmp/ci-truncated.XXXXXX.tar.gz)
+head -c "$(( $(stat -c %s "$BK") / 2 ))" "$BK" > "$TRUNC"
+RESTORE_CMD=$(readme_cmd 'docker run --rm -i --network none -v monitoring_grafana-data' "$TRUNC")
 [[ "$RESTORE_CMD" == *'tar -tzf'* ]] && pass "the README restore command checks the archive first (found in the README)" || fail "could not read the restore command from runner/README.md: '${RESTORE_CMD}'"
 if bash -c "$RESTORE_CMD" >/dev/null 2>&1; then fail "the restore command accepted a truncated archive"; else pass "restore of a truncated archive fails"; fi
+rm -f "$TRUNC"
 grafana_ok && expect_eq "truncated archive: Grafana was not stopped and its volume not wiped (folder still there)" "$(gapi "${GURL}/api/folders/ci-marker" 2>/dev/null | jq -r .title)" ci-upgrade-marker || fail "the truncated archive stopped Grafana or wiped the volume"
 RESTORE_CMD=$(readme_cmd 'docker run --rm -i --network none -v monitoring_grafana-data' "$BK")
 bash -c "$RESTORE_CMD" >/dev/null 2>&1 && pass "restore command succeeded" || fail "restore command failed"
@@ -535,7 +555,8 @@ mcompose down >/dev/null 2>&1 || fail "docker compose down failed"
 rm -rf "$MD"
 if ci_run "$W/monitoring-3.log" 0 bash runner/install/monitoring.sh; then pass "monitoring.sh installs over a leftover Grafana volume"; else fail "monitoring.sh failed over a leftover volume (see monitoring-3.log)"; tail -15 "$W/monitoring-3.log"; fi
 grep -q '^GF_SECURITY_SECRET_KEY=' "$MD/.env" && fail "a new encryption key was generated for an existing volume" || pass "existing volume: no encryption key was added to .env"
-grep -q 'built-in default encryption key' "$W/monitoring-3.log" && pass "the installer says the default key stays" || fail "no note about the default encryption key"
+grep -q 'built-in default key' "$W/monitoring-3.log" && pass "the installer says the default key stays" || fail "no note about the default encryption key"
+grep -q "GF_SECURITY_SECRET_KEY line, put that same line back" "$W/monitoring-3.log" && pass "the installer says how to bring the earlier install's key back" || fail "no note about restoring the earlier GF_SECURITY_SECRET_KEY"
 [[ -n "$(find /var/backups/monitoring -maxdepth 1 -name 'grafana-*.tar.gz' 2>/dev/null)" ]] && pass "the leftover volume was archived before the start" || fail "the leftover volume was not archived"
 mon_retry 60 grafana_ok && pass "Grafana is healthy on the leftover volume" || fail "Grafana is not healthy on the leftover volume"
 # an archive of data under the default key says so (the .env of this install has no key line)

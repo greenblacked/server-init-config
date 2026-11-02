@@ -109,31 +109,30 @@ grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "")
 
 # grafana_ran_tag: which Grafana has (or may have) touched the data volume, by what actually ran, not by the compose file on disk
 # (an update can sync the new compose file and abort before `docker compose up`, the old Grafana then still runs on unmigrated data).
-# Prints the tag of the newest Grafana container that was ever started, "none" when Grafana containers exist but none started,
-# nothing when it cannot tell (no docker, no container).
+# Prints the tag of the newest Grafana container that was ever started; nothing when it cannot tell (no docker, no container, or no
+# container with a start record). "No started container" is unknown, not "never ran": `docker compose up --force-recreate` removes a
+# started container and its start record, and the replacement may have failed before it started.
 grafana_ran_tag() {
-  local ids rows tag
+  local ids rows
   command -v docker >/dev/null 2>&1 || return 0
   ids=$(docker ps -aq --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.service=grafana 2>/dev/null || true)
   [[ -n "$ids" ]] || return 0
   # shellcheck disable=SC2086
   rows=$(docker inspect -f '{{.State.StartedAt}} {{.Config.Image}}' $ids 2>/dev/null) || return 0
-  # A started container whose image is not grafana/grafana:TAG is unknown, not "none".
-  awk '$1 !~ /^0001-/ { started++ } END { exit !started }' <<<"$rows" || { echo none; return 0; }
-  tag=$(awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1)
-  printf '%s\n' "$tag"
+  # A started container whose image is not grafana/grafana:TAG prints nothing as well.
+  awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1
 }
 
 # keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE [RAN_TAG]: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
 # Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
-# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides
-# ("none" = never started, so the restore is a clean undo); without it the tag in CURRENT_COMPOSE is assumed to have run.
+# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides.
+# When it is empty (unknown) the tag in CURRENT_COMPOSE is assumed to have run: the safe side, keeping a newer image on unmigrated
+# data only means the planned upgrade happens, while an older image on migrated data breaks Grafana.
 # Prints the tag to keep, or nothing when the restore is safe.
 keep_grafana_major() {
   local cur old
   [[ -f "$1" && -f "$2" ]] || return 0
   cur="${3:-$(grafana_tag "$1")}"
-  [[ "$cur" != none ]] || return 0
   old=$(grafana_tag "$2")
   [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
   if (( ${cur%%.*} > ${old%%.*} )); then
@@ -623,12 +622,13 @@ main() {
   if (( DO_OS )); then
     update_os
   fi
+  # After update_os (--os can upgrade Compose), before anything else changes: an old compose would fail npm-cache's "config -q"
+  # after the host tools and monitoring were already upgraded.
+  if command -v docker >/dev/null 2>&1 && [[ -f /opt/npm-cache/docker-compose.yml ]]; then
+    require_compose_min 2.23.1 "npm-cache"
+  fi
   update_host_tools
   if command -v docker >/dev/null 2>&1; then
-    # Before any stack is touched: an old compose would fail npm-cache's "config -q" after monitoring was already upgraded.
-    if [[ -f /opt/npm-cache/docker-compose.yml ]]; then
-      require_compose_min 2.23.1 "npm-cache"
-    fi
     update_monitoring
     update_logging
     update_registry_cache

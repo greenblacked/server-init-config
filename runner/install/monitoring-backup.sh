@@ -10,9 +10,7 @@ set -Eeuo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
 
 DIR="${MON_DIR:-/opt/monitoring}"
-# Helper container for reading the volume. alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64),
-# so a moved tag cannot change what runs as root next to the Grafana database; bump tag and digest together (also in runner/README.md).
-HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+# HELPER_IMAGE (alpine, pinned by digest) comes from common/lib.sh, the one place to bump it (also in runner/README.md).
 # Read-only root filesystem, no network, no capabilities except reading files of the service user (the volume is owned by it, mode 600/700).
 # Without DAC_READ_SEARCH root cannot even enter the directory and `test -s` answers "no database": a silent skip of the backup.
 HELPER_ARGS=(--rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH)
