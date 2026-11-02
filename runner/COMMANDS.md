@@ -362,6 +362,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -916,6 +930,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -1323,6 +1351,20 @@ ensure_secure_path() {
     echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
   fi
   rm -f "$tmp"
+}
+
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
@@ -3414,6 +3456,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -3828,6 +3884,20 @@ ensure_secure_path() {
     echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
   fi
   rm -f "$tmp"
+}
+
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
@@ -4905,6 +4975,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -5328,6 +5412,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -5685,6 +5783,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -6034,6 +6146,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -6215,8 +6341,19 @@ cp -a "$REPO_ROOT/runner/stacks/monitoring/prometheus" "$REPO_ROOT/runner/stacks
 
 if [[ ! -f "$DIR/.env" ]]; then
   pw=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)
-  (umask 077; sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env")
-  unset pw
+  # Grafana encrypts stored credentials (data source passwords, API keys) with secret_key, which is a public default unless set.
+  # Generated only on a first install: data that exists under the default key (a volume left over from an earlier install) cannot be
+  # read with a new one, so there the default stays. The key belongs next to every backup archive (runner/README.md).
+  sk=""
+  if [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data)" ]]; then
+    sk=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-40)
+  else
+    log "NOTE: a Grafana data volume exists, so Grafana keeps its built-in default encryption key (see runner/README.md, Grafana upgrade and rollback)"
+  fi
+  (umask 077
+   sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
+   if [[ -n "$sk" ]]; then printf 'GF_SECURITY_SECRET_KEY=%s\n' "$sk" >> "$DIR/.env"; fi)
+  unset pw sk
 fi
 chmod 600 "$DIR/.env"
 stack_ids "$DIR"
@@ -6316,6 +6453,10 @@ chmod 644 "$R/runner/stacks/monitoring/docker-compose.yml"
 install -d "$R/runner/stacks/monitoring"
 cat > "$R/runner/stacks/monitoring/env.example" <<'__SIC_EOF__'
 # Copied to /opt/monitoring/.env by runner/install/monitoring.sh; the password is generated there.
+# On a first install the installer also appends GF_SECURITY_SECRET_KEY (random, 40 characters). Grafana encrypts stored credentials
+# with it; without it Grafana uses a default key that is public, so a copy of grafana.db could be decrypted by anyone. Never add or
+# change it on an install that already has data: what was encrypted under the old key becomes unreadable. Keep the key with every
+# backup archive (runner/README.md, "Grafana upgrade and rollback").
 GF_SECURITY_ADMIN_USER=admin
 GF_SECURITY_ADMIN_PASSWORD=generated-on-install
 GF_SERVER_HTTP_ADDR=127.0.0.1
@@ -6568,6 +6709,20 @@ ensure_secure_path() {
     echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
   fi
   rm -f "$tmp"
+}
+
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
@@ -7111,6 +7266,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -7273,6 +7442,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+require_compose_min 2.23.1 "npm-cache"   # the compose file carries its start script as inline "configs: content:"
 if ! { [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG"; }; then die "runner not registered yet, run runner/install/register-runner.sh first"; fi
 
 BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1)
@@ -7379,7 +7549,8 @@ services:
       - verdaccio-storage:/verdaccio/storage
 
 # Runs on every start, so it also covers update.sh, which only syncs this file and config.yaml. In "content:" a literal
-# dollar sign is written $$ (compose would interpolate a single one).
+# dollar sign is written $$ (compose would interpolate a single one). Inline "content:" needs Docker Compose >= 2.23.1
+# (npm-cache.sh and update.sh check it first).
 configs:
   start:
     content: |
@@ -7399,8 +7570,13 @@ configs:
         B=$$S/backup-$$have.x-$$(date +%Y%m%d-%H%M%S)
         say "storage of $$have.x found, moving it to $$B (nothing is deleted; $$WANT.x starts empty and refills from npmjs)"
         mkdir "$$B"
+        chmod 700 "$$B"
         live | while IFS= read -r e; do mv "$$e" "$$B/"; done
       fi
+      # Record the major now, before the secret step: a crash after the move must not make the next start take the fresh 7.x
+      # storage for 6.x and move it aside too. Backups can hold old credentials (htpasswd, secret): only the verdaccio uid reads them.
+      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
+      for b in "$$S"/backup-*; do [ -d "$$b" ] && chmod 700 "$$b"; done
       # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
       # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
       mkdir -p "$$S/data"
@@ -7418,7 +7594,6 @@ configs:
         say "wrote a new server secret to $$DB (32 characters, mode 600)"
       fi
       chmod 600 "$$DB"
-      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
       exec "$$@"
 
 volumes:
@@ -7506,6 +7681,20 @@ ensure_secure_path() {
     echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
   fi
   rm -f "$tmp"
+}
+
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
@@ -7780,6 +7969,20 @@ ensure_secure_path() {
     echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
   fi
   rm -f "$tmp"
+}
+
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
@@ -8175,6 +8378,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -8535,6 +8752,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -8791,6 +9022,20 @@ ensure_secure_path() {
     echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
   fi
   rm -f "$tmp"
+}
+
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
@@ -9361,6 +9606,20 @@ ensure_secure_path() {
     echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
   fi
   rm -f "$tmp"
+}
+
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
@@ -10209,11 +10468,18 @@ cat > "$R/runner/install/monitoring-backup.sh" <<'__SIC_EOF__'
 # (runner/README.md, "Grafana upgrade and rollback"). Called by monitoring.sh and by update.sh before they change the stack.
 # Idempotent: it backs up only when the installed image tag and the repo tag are on different majors (or the installed
 # version is unknown); a rerun after the compose file was updated is a no-op and the first backup stays.
+# It fails (non-zero) when it cannot tell whether there is data to protect (the helper container does not run): never a silent skip.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
 
 DIR="${MON_DIR:-/opt/monitoring}"
+# Helper container for reading the volume. alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64),
+# so a moved tag cannot change what runs as root next to the Grafana database; bump tag and digest together (also in runner/README.md).
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+# Read-only root filesystem, no network, no capabilities except reading files of the service user (the volume is owned by it, mode 600/700).
+# Without DAC_READ_SEARCH root cannot even enter the directory and `test -s` answers "no database": a silent skip of the backup.
+HELPER_ARGS=(--rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH)
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/monitoring}"
 KEEP=3
 FROM_TAG=""
@@ -10260,20 +10526,29 @@ if [[ -z "$vol" ]]; then
   log "grafana backup: no Grafana data volume yet, nothing to back up"
   exit 0
 fi
-# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
-if (( ! DRYRUN )) && ! docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 test -s /v/grafana.db; then
-  log "grafana backup: ${vol} holds no database yet, nothing to back up"
-  exit 0
-fi
 
 # No compose file (reinstall over a leftover volume): the version is on the stopped container that last used the volume, if any.
 if [[ -z "$FROM_TAG" ]]; then
   FROM_TAG=$(docker ps -a --filter "volume=${vol}" --format '{{.Image}}' | awk -F: '/^grafana\/grafana:/ { print $2; exit }')
 fi
 
+# Before any container runs, so a normal update on the same major needs no image pull.
 if (( ! FORCE )) && [[ -n "$FROM_TAG" && "$(major "$FROM_TAG")" == "$(major "$TO_TAG")" ]]; then
   log "grafana backup: ${FROM_TAG} -> ${TO_TAG} stays on major $(major "$TO_TAG"), no backup needed"
   exit 0
+fi
+
+# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
+if (( ! DRYRUN )); then
+  # y/n on stdout: a failed docker run (image pull refused or rate limited, no network, daemon down) must not read as "no database",
+  # or update.sh would start the new Grafana on data that has no backup.
+  has_db=$(docker run "${HELPER_ARGS[@]}" -v "${vol}:/v:ro" "$HELPER_IMAGE" sh -c 'if test -s /v/grafana.db; then echo y; else echo n; fi') \
+    || die "grafana backup: cannot check ${vol} (docker run of ${HELPER_IMAGE} failed, image pull or daemon?); not going on without a backup"
+  case "$has_db" in
+    y) ;;
+    n) log "grafana backup: ${vol} holds no database yet, nothing to back up"; exit 0 ;;
+    *) die "grafana backup: unexpected answer '${has_db}' while checking ${vol}" ;;
+  esac
 fi
 
 label=$(printf '%s' "${FROM_TAG:-unknown}" | tr -c 'A-Za-z0-9._-' '_')
@@ -10301,13 +10576,17 @@ if [[ -n "$stopped" ]]; then
   docker stop $stopped >/dev/null
 fi
 log "grafana backup: ${vol} (${FROM_TAG:-unknown} -> ${TO_TAG})"
-docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 tar -C /v -czf - . > "$tmp"
+docker run "${HELPER_ARGS[@]}" -v "${vol}:/v:ro" "$HELPER_IMAGE" tar -C /v -czf - . > "$tmp"
 # Read the listing into a variable first: grep -q exiting early would SIGPIPE tar under pipefail.
 listing=$(tar -tzf "$tmp")
 grep -Eq '^(\./)?grafana\.db$' <<<"$listing" || die "the archive has no grafana.db, backup discarded"
 chmod 600 "$tmp"
 mv "$tmp" "$target"
 log "grafana backup: wrote ${target} ($(du -h "$target" | cut -f1))"
+# An install from before the generated encryption key: its stored credentials are encrypted with Grafana's public default key.
+if [[ -f "${DIR}/.env" ]] && ! grep -q '^GF_SECURITY_SECRET_KEY=' "${DIR}/.env"; then
+  log "NOTE: this Grafana uses its built-in default encryption key, so whoever gets the archive can decrypt the data source credentials in it (runner/README.md, Grafana upgrade and rollback)"
+fi
 
 # Keep the newest ${KEEP} archives.
 find "$BACKUP_DIR" -maxdepth 1 -type f -name 'grafana-*.tar.gz' -printf '%T@ %p\n' | sort -rn | tail -n "+$((KEEP + 1))" | cut -d' ' -f2- \
@@ -10353,8 +10632,19 @@ cp -a "$REPO_ROOT/runner/stacks/monitoring/prometheus" "$REPO_ROOT/runner/stacks
 
 if [[ ! -f "$DIR/.env" ]]; then
   pw=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)
-  (umask 077; sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env")
-  unset pw
+  # Grafana encrypts stored credentials (data source passwords, API keys) with secret_key, which is a public default unless set.
+  # Generated only on a first install: data that exists under the default key (a volume left over from an earlier install) cannot be
+  # read with a new one, so there the default stays. The key belongs next to every backup archive (runner/README.md).
+  sk=""
+  if [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data)" ]]; then
+    sk=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-40)
+  else
+    log "NOTE: a Grafana data volume exists, so Grafana keeps its built-in default encryption key (see runner/README.md, Grafana upgrade and rollback)"
+  fi
+  (umask 077
+   sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
+   if [[ -n "$sk" ]]; then printf 'GF_SECURITY_SECRET_KEY=%s\n' "$sk" >> "$DIR/.env"; fi)
+  unset pw sk
 fi
 chmod 600 "$DIR/.env"
 stack_ids "$DIR"
@@ -10412,6 +10702,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+require_compose_min 2.23.1 "npm-cache"   # the compose file carries its start script as inline "configs: content:"
 if ! { [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG"; }; then die "runner not registered yet, run runner/install/register-runner.sh first"; fi
 
 BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1)
@@ -10693,8 +10984,6 @@ DO_ROLLBACK=0
 CHANGED=()
 SKIPPED=()
 WORK=""
-# Set once update_monitoring has started containers from the new compose file: from then on the Grafana volume may be migrated.
-GRAFANA_STARTED=0
 
 usage() {
   cat <<USAGE
@@ -10713,7 +11002,7 @@ Components that are not installed are skipped.
       --pull     git pull --ff-only in this checkout first (needs a git clone, not an scp copy)
       --os       also upgrade OS packages (Docker, GitLab Runner included); never reboots
       --rollback restore the files from the newest backup in ${BACKUP_ROOT} and recreate the stacks
-                 (Grafana keeps its newer image once it has migrated its data: that part is the archive restore in runner/README.md)
+                 (Grafana keeps its newer compose file once the newer Grafana has started on its data: that part is the archive restore in runner/README.md)
 
 Steps that restart Docker-based caches or upgrade packages are skipped while CI jobs are running
 and the script exits with code 3; rerun it when the runner is idle.
@@ -10783,13 +11072,33 @@ sync_tree() {
 
 grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1; exit }' "$1"; }
 
-# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
+# grafana_ran_tag: which Grafana has (or may have) touched the data volume, by what actually ran, not by the compose file on disk
+# (an update can sync the new compose file and abort before `docker compose up`, the old Grafana then still runs on unmigrated data).
+# Prints the tag of the newest Grafana container that was ever started, "none" when Grafana containers exist but none started,
+# nothing when it cannot tell (no docker, no container).
+grafana_ran_tag() {
+  local ids rows tag
+  command -v docker >/dev/null 2>&1 || return 0
+  ids=$(docker ps -aq --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.service=grafana 2>/dev/null || true)
+  [[ -n "$ids" ]] || return 0
+  # shellcheck disable=SC2086
+  rows=$(docker inspect -f '{{.State.StartedAt}} {{.Config.Image}}' $ids 2>/dev/null) || return 0
+  # A started container whose image is not grafana/grafana:TAG is unknown, not "none".
+  awk '$1 !~ /^0001-/ { started++ } END { exit !started }' <<<"$rows" || { echo none; return 0; }
+  tag=$(awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1)
+  printf '%s\n' "$tag"
+}
+
+# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE [RAN_TAG]: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
 # Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
-# (runner/README.md, "Grafana upgrade and rollback"). Prints the tag to keep, or nothing when the restore is safe.
+# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides
+# ("none" = never started, so the restore is a clean undo); without it the tag in CURRENT_COMPOSE is assumed to have run.
+# Prints the tag to keep, or nothing when the restore is safe.
 keep_grafana_major() {
   local cur old
   [[ -f "$1" && -f "$2" ]] || return 0
-  cur=$(grafana_tag "$1")
+  cur="${3:-$(grafana_tag "$1")}"
+  [[ "$cur" != none ]] || return 0
   old=$(grafana_tag "$2")
   [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
   if (( ${cur%%.*} > ${old%%.*} )); then
@@ -10798,25 +11107,24 @@ keep_grafana_major() {
 }
 
 restore_files() {
-  local f keep="" mon=/opt/monitoring/docker-compose.yml
+  local f dst keep="" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
-  # Only once the new Grafana has started can its data be on the new major; before that the restore is a clean undo.
-  if (( GRAFANA_STARTED )); then
-    keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}")
-  fi
+  keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$(grafana_ran_tag)")
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
+    dst="${f#"${BACKUP_DIR}"}"
+    if [[ -n "$keep" && "$dst" == "$mon" ]]; then
+      # Not the old file with the image line patched: that would also bring back its older limits (Grafana 13 needs 512m, not 256m).
+      continue
+    fi
     if (( DRYRUN )); then
-      log "[dry-run] would restore ${f#"${BACKUP_DIR}"}"
+      log "[dry-run] would restore ${dst}"
     else
-      cp -a "$f" "${f#"${BACKUP_DIR}"}"
+      cp -a "$f" "$dst"
     fi
   done < <(find "$BACKUP_DIR" -type f -print0)
   if [[ -n "$keep" ]]; then
-    log "WARN: grafana ${keep} already migrated its data and cannot be rolled back with files; the image stays grafana/grafana:${keep}. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
-    if (( ! DRYRUN )); then
-      sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:${keep}|" "$mon"
-    fi
+    log "WARN: grafana ${keep} has already run on the data and cannot be rolled back with files; ${mon} stays as installed (image grafana/grafana:${keep} and its settings), everything else is restored. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
   fi
   run systemctl daemon-reload
 }
@@ -11051,7 +11359,6 @@ YAML
     (cd "$dir" && docker compose pull -q)
   fi
   chown_volumes "$dir"
-  GRAFANA_STARTED=1
   (cd "$dir" && docker compose up -d)
   if ! wait_url http://127.0.0.1:9090/-/ready 30; then
     (cd "$dir" && docker compose logs --tail 30 prometheus) || true
@@ -11202,8 +11509,8 @@ do_rollback() {
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
   [[ -n "$latest" ]] || die "no backups in ${BACKUP_ROOT}"
   BACKUP_DIR="$latest"
-  # The installed compose file is what last ran: its Grafana may have migrated the data, whatever the update that made the backup did.
-  GRAFANA_STARTED=1
+  # restore_files looks at the Grafana container that actually ran, not at the compose file: an update that synced the new file and
+  # aborted before `docker compose up` (pull failed) left the old Grafana on unmigrated data, and the restore may put the old file back.
   restore_files
   if (( DRYRUN )); then
     return 0
@@ -11283,6 +11590,10 @@ main() {
   fi
   update_host_tools
   if command -v docker >/dev/null 2>&1; then
+    # Before any stack is touched: an old compose would fail npm-cache's "config -q" after monitoring was already upgraded.
+    if [[ -f /opt/npm-cache/docker-compose.yml ]]; then
+      require_compose_min 2.23.1 "npm-cache"
+    fi
     update_monitoring
     update_logging
     update_registry_cache
@@ -12476,6 +12787,10 @@ chmod 644 "$R/runner/stacks/monitoring/docker-compose.yml"
 install -d "$R/runner/stacks/monitoring"
 cat > "$R/runner/stacks/monitoring/env.example" <<'__SIC_EOF__'
 # Copied to /opt/monitoring/.env by runner/install/monitoring.sh; the password is generated there.
+# On a first install the installer also appends GF_SECURITY_SECRET_KEY (random, 40 characters). Grafana encrypts stored credentials
+# with it; without it Grafana uses a default key that is public, so a copy of grafana.db could be decrypted by anyone. Never add or
+# change it on an install that already has data: what was encrypted under the old key becomes unreadable. Keep the key with every
+# backup archive (runner/README.md, "Grafana upgrade and rollback").
 GF_SECURITY_ADMIN_USER=admin
 GF_SECURITY_ADMIN_PASSWORD=generated-on-install
 GF_SERVER_HTTP_ADDR=127.0.0.1
@@ -12716,7 +13031,8 @@ services:
       - verdaccio-storage:/verdaccio/storage
 
 # Runs on every start, so it also covers update.sh, which only syncs this file and config.yaml. In "content:" a literal
-# dollar sign is written $$ (compose would interpolate a single one).
+# dollar sign is written $$ (compose would interpolate a single one). Inline "content:" needs Docker Compose >= 2.23.1
+# (npm-cache.sh and update.sh check it first).
 configs:
   start:
     content: |
@@ -12736,8 +13052,13 @@ configs:
         B=$$S/backup-$$have.x-$$(date +%Y%m%d-%H%M%S)
         say "storage of $$have.x found, moving it to $$B (nothing is deleted; $$WANT.x starts empty and refills from npmjs)"
         mkdir "$$B"
+        chmod 700 "$$B"
         live | while IFS= read -r e; do mv "$$e" "$$B/"; done
       fi
+      # Record the major now, before the secret step: a crash after the move must not make the next start take the fresh 7.x
+      # storage for 6.x and move it aside too. Backups can hold old credentials (htpasswd, secret): only the verdaccio uid reads them.
+      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
+      for b in "$$S"/backup-*; do [ -d "$$b" ] && chmod 700 "$$b"; done
       # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
       # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
       mkdir -p "$$S/data"
@@ -12755,7 +13076,6 @@ configs:
         say "wrote a new server secret to $$DB (32 characters, mode 600)"
       fi
       chmod 600 "$$DB"
-      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
       exec "$$@"
 
 volumes:
@@ -14472,6 +14792,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
@@ -15318,11 +15652,18 @@ cat > "$R/runner/install/monitoring-backup.sh" <<'__SIC_EOF__'
 # (runner/README.md, "Grafana upgrade and rollback"). Called by monitoring.sh and by update.sh before they change the stack.
 # Idempotent: it backs up only when the installed image tag and the repo tag are on different majors (or the installed
 # version is unknown); a rerun after the compose file was updated is a no-op and the first backup stays.
+# It fails (non-zero) when it cannot tell whether there is data to protect (the helper container does not run): never a silent skip.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
 
 DIR="${MON_DIR:-/opt/monitoring}"
+# Helper container for reading the volume. alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64),
+# so a moved tag cannot change what runs as root next to the Grafana database; bump tag and digest together (also in runner/README.md).
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+# Read-only root filesystem, no network, no capabilities except reading files of the service user (the volume is owned by it, mode 600/700).
+# Without DAC_READ_SEARCH root cannot even enter the directory and `test -s` answers "no database": a silent skip of the backup.
+HELPER_ARGS=(--rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH)
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/monitoring}"
 KEEP=3
 FROM_TAG=""
@@ -15369,20 +15710,29 @@ if [[ -z "$vol" ]]; then
   log "grafana backup: no Grafana data volume yet, nothing to back up"
   exit 0
 fi
-# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
-if (( ! DRYRUN )) && ! docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 test -s /v/grafana.db; then
-  log "grafana backup: ${vol} holds no database yet, nothing to back up"
-  exit 0
-fi
 
 # No compose file (reinstall over a leftover volume): the version is on the stopped container that last used the volume, if any.
 if [[ -z "$FROM_TAG" ]]; then
   FROM_TAG=$(docker ps -a --filter "volume=${vol}" --format '{{.Image}}' | awk -F: '/^grafana\/grafana:/ { print $2; exit }')
 fi
 
+# Before any container runs, so a normal update on the same major needs no image pull.
 if (( ! FORCE )) && [[ -n "$FROM_TAG" && "$(major "$FROM_TAG")" == "$(major "$TO_TAG")" ]]; then
   log "grafana backup: ${FROM_TAG} -> ${TO_TAG} stays on major $(major "$TO_TAG"), no backup needed"
   exit 0
+fi
+
+# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
+if (( ! DRYRUN )); then
+  # y/n on stdout: a failed docker run (image pull refused or rate limited, no network, daemon down) must not read as "no database",
+  # or update.sh would start the new Grafana on data that has no backup.
+  has_db=$(docker run "${HELPER_ARGS[@]}" -v "${vol}:/v:ro" "$HELPER_IMAGE" sh -c 'if test -s /v/grafana.db; then echo y; else echo n; fi') \
+    || die "grafana backup: cannot check ${vol} (docker run of ${HELPER_IMAGE} failed, image pull or daemon?); not going on without a backup"
+  case "$has_db" in
+    y) ;;
+    n) log "grafana backup: ${vol} holds no database yet, nothing to back up"; exit 0 ;;
+    *) die "grafana backup: unexpected answer '${has_db}' while checking ${vol}" ;;
+  esac
 fi
 
 label=$(printf '%s' "${FROM_TAG:-unknown}" | tr -c 'A-Za-z0-9._-' '_')
@@ -15410,13 +15760,17 @@ if [[ -n "$stopped" ]]; then
   docker stop $stopped >/dev/null
 fi
 log "grafana backup: ${vol} (${FROM_TAG:-unknown} -> ${TO_TAG})"
-docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 tar -C /v -czf - . > "$tmp"
+docker run "${HELPER_ARGS[@]}" -v "${vol}:/v:ro" "$HELPER_IMAGE" tar -C /v -czf - . > "$tmp"
 # Read the listing into a variable first: grep -q exiting early would SIGPIPE tar under pipefail.
 listing=$(tar -tzf "$tmp")
 grep -Eq '^(\./)?grafana\.db$' <<<"$listing" || die "the archive has no grafana.db, backup discarded"
 chmod 600 "$tmp"
 mv "$tmp" "$target"
 log "grafana backup: wrote ${target} ($(du -h "$target" | cut -f1))"
+# An install from before the generated encryption key: its stored credentials are encrypted with Grafana's public default key.
+if [[ -f "${DIR}/.env" ]] && ! grep -q '^GF_SECURITY_SECRET_KEY=' "${DIR}/.env"; then
+  log "NOTE: this Grafana uses its built-in default encryption key, so whoever gets the archive can decrypt the data source credentials in it (runner/README.md, Grafana upgrade and rollback)"
+fi
 
 # Keep the newest ${KEEP} archives.
 find "$BACKUP_DIR" -maxdepth 1 -type f -name 'grafana-*.tar.gz' -printf '%T@ %p\n' | sort -rn | tail -n "+$((KEEP + 1))" | cut -d' ' -f2- \
@@ -15462,8 +15816,19 @@ cp -a "$REPO_ROOT/runner/stacks/monitoring/prometheus" "$REPO_ROOT/runner/stacks
 
 if [[ ! -f "$DIR/.env" ]]; then
   pw=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)
-  (umask 077; sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env")
-  unset pw
+  # Grafana encrypts stored credentials (data source passwords, API keys) with secret_key, which is a public default unless set.
+  # Generated only on a first install: data that exists under the default key (a volume left over from an earlier install) cannot be
+  # read with a new one, so there the default stays. The key belongs next to every backup archive (runner/README.md).
+  sk=""
+  if [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.volume=grafana-data)" ]]; then
+    sk=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-40)
+  else
+    log "NOTE: a Grafana data volume exists, so Grafana keeps its built-in default encryption key (see runner/README.md, Grafana upgrade and rollback)"
+  fi
+  (umask 077
+   sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
+   if [[ -n "$sk" ]]; then printf 'GF_SECURITY_SECRET_KEY=%s\n' "$sk" >> "$DIR/.env"; fi)
+  unset pw sk
 fi
 chmod 600 "$DIR/.env"
 stack_ids "$DIR"
@@ -15521,6 +15886,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+require_compose_min 2.23.1 "npm-cache"   # the compose file carries its start script as inline "configs: content:"
 if ! { [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG"; }; then die "runner not registered yet, run runner/install/register-runner.sh first"; fi
 
 BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1)
@@ -15802,8 +16168,6 @@ DO_ROLLBACK=0
 CHANGED=()
 SKIPPED=()
 WORK=""
-# Set once update_monitoring has started containers from the new compose file: from then on the Grafana volume may be migrated.
-GRAFANA_STARTED=0
 
 usage() {
   cat <<USAGE
@@ -15822,7 +16186,7 @@ Components that are not installed are skipped.
       --pull     git pull --ff-only in this checkout first (needs a git clone, not an scp copy)
       --os       also upgrade OS packages (Docker, GitLab Runner included); never reboots
       --rollback restore the files from the newest backup in ${BACKUP_ROOT} and recreate the stacks
-                 (Grafana keeps its newer image once it has migrated its data: that part is the archive restore in runner/README.md)
+                 (Grafana keeps its newer compose file once the newer Grafana has started on its data: that part is the archive restore in runner/README.md)
 
 Steps that restart Docker-based caches or upgrade packages are skipped while CI jobs are running
 and the script exits with code 3; rerun it when the runner is idle.
@@ -15892,13 +16256,33 @@ sync_tree() {
 
 grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1; exit }' "$1"; }
 
-# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
+# grafana_ran_tag: which Grafana has (or may have) touched the data volume, by what actually ran, not by the compose file on disk
+# (an update can sync the new compose file and abort before `docker compose up`, the old Grafana then still runs on unmigrated data).
+# Prints the tag of the newest Grafana container that was ever started, "none" when Grafana containers exist but none started,
+# nothing when it cannot tell (no docker, no container).
+grafana_ran_tag() {
+  local ids rows tag
+  command -v docker >/dev/null 2>&1 || return 0
+  ids=$(docker ps -aq --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.service=grafana 2>/dev/null || true)
+  [[ -n "$ids" ]] || return 0
+  # shellcheck disable=SC2086
+  rows=$(docker inspect -f '{{.State.StartedAt}} {{.Config.Image}}' $ids 2>/dev/null) || return 0
+  # A started container whose image is not grafana/grafana:TAG is unknown, not "none".
+  awk '$1 !~ /^0001-/ { started++ } END { exit !started }' <<<"$rows" || { echo none; return 0; }
+  tag=$(awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1)
+  printf '%s\n' "$tag"
+}
+
+# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE [RAN_TAG]: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
 # Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
-# (runner/README.md, "Grafana upgrade and rollback"). Prints the tag to keep, or nothing when the restore is safe.
+# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides
+# ("none" = never started, so the restore is a clean undo); without it the tag in CURRENT_COMPOSE is assumed to have run.
+# Prints the tag to keep, or nothing when the restore is safe.
 keep_grafana_major() {
   local cur old
   [[ -f "$1" && -f "$2" ]] || return 0
-  cur=$(grafana_tag "$1")
+  cur="${3:-$(grafana_tag "$1")}"
+  [[ "$cur" != none ]] || return 0
   old=$(grafana_tag "$2")
   [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
   if (( ${cur%%.*} > ${old%%.*} )); then
@@ -15907,25 +16291,24 @@ keep_grafana_major() {
 }
 
 restore_files() {
-  local f keep="" mon=/opt/monitoring/docker-compose.yml
+  local f dst keep="" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
-  # Only once the new Grafana has started can its data be on the new major; before that the restore is a clean undo.
-  if (( GRAFANA_STARTED )); then
-    keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}")
-  fi
+  keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$(grafana_ran_tag)")
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
+    dst="${f#"${BACKUP_DIR}"}"
+    if [[ -n "$keep" && "$dst" == "$mon" ]]; then
+      # Not the old file with the image line patched: that would also bring back its older limits (Grafana 13 needs 512m, not 256m).
+      continue
+    fi
     if (( DRYRUN )); then
-      log "[dry-run] would restore ${f#"${BACKUP_DIR}"}"
+      log "[dry-run] would restore ${dst}"
     else
-      cp -a "$f" "${f#"${BACKUP_DIR}"}"
+      cp -a "$f" "$dst"
     fi
   done < <(find "$BACKUP_DIR" -type f -print0)
   if [[ -n "$keep" ]]; then
-    log "WARN: grafana ${keep} already migrated its data and cannot be rolled back with files; the image stays grafana/grafana:${keep}. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
-    if (( ! DRYRUN )); then
-      sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:${keep}|" "$mon"
-    fi
+    log "WARN: grafana ${keep} has already run on the data and cannot be rolled back with files; ${mon} stays as installed (image grafana/grafana:${keep} and its settings), everything else is restored. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
   fi
   run systemctl daemon-reload
 }
@@ -16160,7 +16543,6 @@ YAML
     (cd "$dir" && docker compose pull -q)
   fi
   chown_volumes "$dir"
-  GRAFANA_STARTED=1
   (cd "$dir" && docker compose up -d)
   if ! wait_url http://127.0.0.1:9090/-/ready 30; then
     (cd "$dir" && docker compose logs --tail 30 prometheus) || true
@@ -16311,8 +16693,8 @@ do_rollback() {
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
   [[ -n "$latest" ]] || die "no backups in ${BACKUP_ROOT}"
   BACKUP_DIR="$latest"
-  # The installed compose file is what last ran: its Grafana may have migrated the data, whatever the update that made the backup did.
-  GRAFANA_STARTED=1
+  # restore_files looks at the Grafana container that actually ran, not at the compose file: an update that synced the new file and
+  # aborted before `docker compose up` (pull failed) left the old Grafana on unmigrated data, and the restore may put the old file back.
   restore_files
   if (( DRYRUN )); then
     return 0
@@ -16392,6 +16774,10 @@ main() {
   fi
   update_host_tools
   if command -v docker >/dev/null 2>&1; then
+    # Before any stack is touched: an old compose would fail npm-cache's "config -q" after monitoring was already upgraded.
+    if [[ -f /opt/npm-cache/docker-compose.yml ]]; then
+      require_compose_min 2.23.1 "npm-cache"
+    fi
     update_monitoring
     update_logging
     update_registry_cache
@@ -17585,6 +17971,10 @@ chmod 644 "$R/runner/stacks/monitoring/docker-compose.yml"
 install -d "$R/runner/stacks/monitoring"
 cat > "$R/runner/stacks/monitoring/env.example" <<'__SIC_EOF__'
 # Copied to /opt/monitoring/.env by runner/install/monitoring.sh; the password is generated there.
+# On a first install the installer also appends GF_SECURITY_SECRET_KEY (random, 40 characters). Grafana encrypts stored credentials
+# with it; without it Grafana uses a default key that is public, so a copy of grafana.db could be decrypted by anyone. Never add or
+# change it on an install that already has data: what was encrypted under the old key becomes unreadable. Keep the key with every
+# backup archive (runner/README.md, "Grafana upgrade and rollback").
 GF_SECURITY_ADMIN_USER=admin
 GF_SECURITY_ADMIN_PASSWORD=generated-on-install
 GF_SERVER_HTTP_ADDR=127.0.0.1
@@ -17825,7 +18215,8 @@ services:
       - verdaccio-storage:/verdaccio/storage
 
 # Runs on every start, so it also covers update.sh, which only syncs this file and config.yaml. In "content:" a literal
-# dollar sign is written $$ (compose would interpolate a single one).
+# dollar sign is written $$ (compose would interpolate a single one). Inline "content:" needs Docker Compose >= 2.23.1
+# (npm-cache.sh and update.sh check it first).
 configs:
   start:
     content: |
@@ -17845,8 +18236,13 @@ configs:
         B=$$S/backup-$$have.x-$$(date +%Y%m%d-%H%M%S)
         say "storage of $$have.x found, moving it to $$B (nothing is deleted; $$WANT.x starts empty and refills from npmjs)"
         mkdir "$$B"
+        chmod 700 "$$B"
         live | while IFS= read -r e; do mv "$$e" "$$B/"; done
       fi
+      # Record the major now, before the secret step: a crash after the move must not make the next start take the fresh 7.x
+      # storage for 6.x and move it aside too. Backups can hold old credentials (htpasswd, secret): only the verdaccio uid reads them.
+      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
+      for b in "$$S"/backup-*; do [ -d "$$b" ] && chmod 700 "$$b"; done
       # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
       # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
       mkdir -p "$$S/data"
@@ -17864,7 +18260,6 @@ configs:
         say "wrote a new server secret to $$DB (32 characters, mode 600)"
       fi
       chmod 600 "$$DB"
-      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
       exec "$$@"
 
 volumes:
