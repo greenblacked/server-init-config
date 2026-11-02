@@ -83,3 +83,26 @@ test_edit_leaves_nothing_outside_the_target_directory() {
   TMPDIR="$T/tmp" edit_with_backup "$T/d/f" sed -i 's/one/two/' "$T/d/f"
   assert_eq "$(ls -A "$T/tmp" | wc -l)" 0 "snapshot is not placed in TMPDIR"
 }
+
+test_version_ge() {
+  assert_ok "equal" version_ge 2.23.1 2.23.1
+  assert_ok "newer patch" version_ge 2.23.2 2.23.1
+  assert_ok "numeric, not lexical" version_ge 2.100.0 2.23.1
+  assert_ok "newer major" version_ge 5.0.0 2.23.1
+  assert_fail "older patch" version_ge 2.23.0 2.23.1
+  assert_fail "older minor" version_ge 2.9.9 2.23.1
+  assert_fail "older major" version_ge 1.29.2 2.23.1
+}
+
+# require_compose_min with a stub "docker" that prints $FAKE_COMPOSE for "compose version --short"
+test_require_compose_min() {
+  mkdir -p "$T/bin"
+  printf '#!/bin/sh\n[ -n "$FAKE_COMPOSE" ] && echo "$FAKE_COMPOSE"\n' > "$T/bin/docker"
+  chmod +x "$T/bin/docker"
+  PATH="$T/bin:$PATH"
+  FAKE_COMPOSE=2.24.0 assert_ok "newer compose passes" require_compose_min 2.23.1 test
+  FAKE_COMPOSE=v2.23.1 assert_ok "v prefix is accepted" require_compose_min 2.23.1 test
+  FAKE_COMPOSE=2.23.1+ds1 assert_ok "distro suffix is ignored" require_compose_min 2.23.1 test
+  FAKE_COMPOSE=2.22.0 assert_fail "old compose dies" bash -c 'source "$1"; require_compose_min 2.23.1 test' _ "$REPO/common/lib.sh"
+  FAKE_COMPOSE='' assert_fail "missing compose dies" bash -c 'source "$1"; require_compose_min 2.23.1 test' _ "$REPO/common/lib.sh"
+}

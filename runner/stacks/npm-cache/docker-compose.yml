@@ -19,7 +19,8 @@ services:
       - verdaccio-storage:/verdaccio/storage
 
 # Runs on every start, so it also covers update.sh, which only syncs this file and config.yaml. In "content:" a literal
-# dollar sign is written $$ (compose would interpolate a single one).
+# dollar sign is written $$ (compose would interpolate a single one). Inline "content:" needs Docker Compose >= 2.23.1
+# (npm-cache.sh and update.sh check it first).
 configs:
   start:
     content: |
@@ -39,8 +40,13 @@ configs:
         B=$$S/backup-$$have.x-$$(date +%Y%m%d-%H%M%S)
         say "storage of $$have.x found, moving it to $$B (nothing is deleted; $$WANT.x starts empty and refills from npmjs)"
         mkdir "$$B"
+        chmod 700 "$$B"
         live | while IFS= read -r e; do mv "$$e" "$$B/"; done
       fi
+      # Record the major now, before the secret step: a crash after the move must not make the next start take the fresh 7.x
+      # storage for 6.x and move it aside too. Backups can hold old credentials (htpasswd, secret): only the verdaccio uid reads them.
+      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
+      for b in "$$S"/backup-*; do [ -d "$$b" ] && chmod 700 "$$b"; done
       # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
       # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
       mkdir -p "$$S/data"
@@ -58,7 +64,6 @@ configs:
         say "wrote a new server secret to $$DB (32 characters, mode 600)"
       fi
       chmod 600 "$$DB"
-      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
       exec "$$@"
 
 volumes:

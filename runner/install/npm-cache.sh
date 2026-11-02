@@ -15,6 +15,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+require_compose_min 2.23.1 "npm-cache"   # the compose file carries its start script as inline "configs: content:"
 if ! { [[ -f "$CFG" ]] && grep -q '^\[\[runners\]\]' "$CFG"; }; then die "runner not registered yet, run runner/install/register-runner.sh first"; fi
 
 BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1)

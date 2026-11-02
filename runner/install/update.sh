@@ -625,6 +625,10 @@ main() {
   fi
   update_host_tools
   if command -v docker >/dev/null 2>&1; then
+    # Before any stack is touched: an old compose would fail npm-cache's "config -q" after monitoring was already upgraded.
+    if [[ -f /opt/npm-cache/docker-compose.yml ]]; then
+      require_compose_min 2.23.1 "npm-cache"
+    fi
     update_monitoring
     update_logging
     update_registry_cache

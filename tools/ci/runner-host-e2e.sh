@@ -163,11 +163,12 @@ if ss -ltn | awk '/:4873 /{print $4}' | grep -qv "^${GW}:4873$"; then fail "port
 reach "http://${GW}:4873/-/ping" && pass "a job container reaches the cache through the isolation rules" || fail "job container cannot reach the npm cache"
 expect_match "verdaccio version" "$(npm_x verdaccio --version | tail -1)" '^v?7\.'
 echo "-- upgrade from 6.x: old storage is moved aside, never deleted"
-npm_c logs verdaccio > "$W/npm-cache-1.log" 2>&1 || true
+npm_c logs verdaccio 2>&1 | ci_redact > "$W/npm-cache-1.log" || true
 grep -q 'treating it as 6.x' "$W/npm-cache-1.log" && pass "start without a state file and with storage logged that it is treated as 6.x" || fail "no 6.x detection in the log"
 expect_eq "backup dirs of the old storage" "$(npm_x sh -c 'ls -d /verdaccio/storage/backup-6.x-* | wc -l')" 1
 expect_eq "old package is intact in the backup" "$(npm_x sh -c 'cat /verdaccio/storage/backup-6.x-*/data/old-pkg/marker')" 6x-marker
 check "old user file is in the backup" npm_x sh -c 'test -s /verdaccio/storage/backup-6.x-*/htpasswd'
+expect_eq "backup dir mode (old credentials inside: only the verdaccio uid reads it)" "$(npm_x sh -c 'stat -c "%a %u" /verdaccio/storage/backup-6.x-*')" "700 10001"
 check "old storage is gone from the live path" npm_x sh -c 'test ! -e /verdaccio/storage/data/old-pkg && test ! -e /verdaccio/storage/htpasswd'
 expect_eq "deployed major recorded in the state file" "$(npm_x cat /verdaccio/storage/.deployed-major)" 7
 echo "-- server secret (values are never printed)"
@@ -200,6 +201,15 @@ SECRET2=$(npm_x sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$DB")
 ci_mask "$SECRET2"
 expect_eq "replaced secret length" "${#SECRET2}" 32
 check "cached tarball survived" npm_x sh -c 'ls /verdaccio/storage/data/is-number/*.tgz'
+echo "-- crash between the move and the secret: state file present, secret missing -> live 7.x storage is kept, not moved"
+npm_x rm "$DB"
+npm_c up -d --force-recreate 2>&1 | tail -3
+npm_wait && pass "verdaccio starts when only the secret is missing" || fail "verdaccio did not start after the simulated crash"
+expect_eq "backup dirs unchanged after the simulated crash" "$(npm_x sh -c 'ls -d /verdaccio/storage/backup-6.x-* | wc -l')" 1
+check "live cached tarball was not moved aside" npm_x sh -c 'ls /verdaccio/storage/data/is-number/*.tgz'
+SECRET3=$(npm_x sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$DB")
+ci_mask "$SECRET3"
+expect_eq "a new secret was written after the simulated crash (length)" "${#SECRET3}" 32
 echo "-- no state file but storage present: treated as 6.x again, moved aside, nothing deleted"
 npm_x rm /verdaccio/storage/.deployed-major
 npm_c up -d --force-recreate 2>&1 | tail -3
@@ -207,6 +217,7 @@ npm_wait && pass "verdaccio starts on the emptied storage" || fail "verdaccio di
 expect_eq "backup dirs" "$(npm_x sh -c 'ls -d /verdaccio/storage/backup-6.x-* | wc -l')" 2
 check "first backup still holds the old package" npm_x sh -c 'test -s /verdaccio/storage/backup-6.x-*/data/old-pkg/marker'
 check "second backup holds the cached tarball" npm_x sh -c 'ls /verdaccio/storage/backup-6.x-*/data/is-number/*.tgz'
+expect_eq "all backup dirs are mode 700" "$(npm_x sh -c 'stat -c %a /verdaccio/storage/backup-6.x-*' | sort -u | tr '\n' ' ')" "700 "
 endgroup
 group "4. monitoring stack"
 MD=/opt/monitoring
