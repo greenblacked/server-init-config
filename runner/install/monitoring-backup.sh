@@ -4,11 +4,18 @@
 # (runner/README.md, "Grafana upgrade and rollback"). Called by monitoring.sh and by update.sh before they change the stack.
 # Idempotent: it backs up only when the installed image tag and the repo tag are on different majors (or the installed
 # version is unknown); a rerun after the compose file was updated is a no-op and the first backup stays.
+# It fails (non-zero) when it cannot tell whether there is data to protect (the helper container does not run): never a silent skip.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
 
 DIR="${MON_DIR:-/opt/monitoring}"
+# Helper container for reading the volume. alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64),
+# so a moved tag cannot change what runs as root next to the Grafana database; bump tag and digest together (also in runner/README.md).
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+# Read-only root filesystem, no network, no capabilities except reading files of the service user (the volume is owned by it, mode 600/700).
+# Without DAC_READ_SEARCH root cannot even enter the directory and `test -s` answers "no database": a silent skip of the backup.
+HELPER_ARGS=(--rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH)
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/monitoring}"
 KEEP=3
 FROM_TAG=""
@@ -55,20 +62,29 @@ if [[ -z "$vol" ]]; then
   log "grafana backup: no Grafana data volume yet, nothing to back up"
   exit 0
 fi
-# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
-if (( ! DRYRUN )) && ! docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 test -s /v/grafana.db; then
-  log "grafana backup: ${vol} holds no database yet, nothing to back up"
-  exit 0
-fi
 
 # No compose file (reinstall over a leftover volume): the version is on the stopped container that last used the volume, if any.
 if [[ -z "$FROM_TAG" ]]; then
   FROM_TAG=$(docker ps -a --filter "volume=${vol}" --format '{{.Image}}' | awk -F: '/^grafana\/grafana:/ { print $2; exit }')
 fi
 
+# Before any container runs, so a normal update on the same major needs no image pull.
 if (( ! FORCE )) && [[ -n "$FROM_TAG" && "$(major "$FROM_TAG")" == "$(major "$TO_TAG")" ]]; then
   log "grafana backup: ${FROM_TAG} -> ${TO_TAG} stays on major $(major "$TO_TAG"), no backup needed"
   exit 0
+fi
+
+# A dry run only reads: no container, so no image pull. It assumes a database is in the volume.
+if (( ! DRYRUN )); then
+  # y/n on stdout: a failed docker run (image pull refused or rate limited, no network, daemon down) must not read as "no database",
+  # or update.sh would start the new Grafana on data that has no backup.
+  has_db=$(docker run "${HELPER_ARGS[@]}" -v "${vol}:/v:ro" "$HELPER_IMAGE" sh -c 'if test -s /v/grafana.db; then echo y; else echo n; fi') \
+    || die "grafana backup: cannot check ${vol} (docker run of ${HELPER_IMAGE} failed, image pull or daemon?); not going on without a backup"
+  case "$has_db" in
+    y) ;;
+    n) log "grafana backup: ${vol} holds no database yet, nothing to back up"; exit 0 ;;
+    *) die "grafana backup: unexpected answer '${has_db}' while checking ${vol}" ;;
+  esac
 fi
 
 label=$(printf '%s' "${FROM_TAG:-unknown}" | tr -c 'A-Za-z0-9._-' '_')
@@ -96,13 +112,17 @@ if [[ -n "$stopped" ]]; then
   docker stop $stopped >/dev/null
 fi
 log "grafana backup: ${vol} (${FROM_TAG:-unknown} -> ${TO_TAG})"
-docker run --rm --network none -v "${vol}:/v:ro" alpine:3.20 tar -C /v -czf - . > "$tmp"
+docker run "${HELPER_ARGS[@]}" -v "${vol}:/v:ro" "$HELPER_IMAGE" tar -C /v -czf - . > "$tmp"
 # Read the listing into a variable first: grep -q exiting early would SIGPIPE tar under pipefail.
 listing=$(tar -tzf "$tmp")
 grep -Eq '^(\./)?grafana\.db$' <<<"$listing" || die "the archive has no grafana.db, backup discarded"
 chmod 600 "$tmp"
 mv "$tmp" "$target"
 log "grafana backup: wrote ${target} ($(du -h "$target" | cut -f1))"
+# An install from before the generated encryption key: its stored credentials are encrypted with Grafana's public default key.
+if [[ -f "${DIR}/.env" ]] && ! grep -q '^GF_SECURITY_SECRET_KEY=' "${DIR}/.env"; then
+  log "NOTE: this Grafana uses its built-in default encryption key, so whoever gets the archive can decrypt the data source credentials in it (runner/README.md, Grafana upgrade and rollback)"
+fi
 
 # Keep the newest ${KEEP} archives.
 find "$BACKUP_DIR" -maxdepth 1 -type f -name 'grafana-*.tar.gz' -printf '%T@ %p\n' | sort -rn | tail -n "+$((KEEP + 1))" | cut -d' ' -f2- \

@@ -11,8 +11,11 @@
 #      it; the server secret is valid, mode 600 and never logged; simulated 6.x storage is moved aside (not deleted) on the 7.x
 #      upgrade and a restart changes nothing
 #   4. monitoring stack (runner/install/monitoring.sh, the product's own installer): Grafana healthy, provisioned Prometheus
-#      datasource present and healthy, Prometheus ready and scraping node_exporter; Grafana data backed up before a new major,
-#      data made by the old version survives the upgrade, and the documented rollback restores it
+#      datasource present and healthy, Prometheus ready and scraping node_exporter; a generated Grafana encryption key on a first
+#      install only; update.sh's update_monitoring takes the Grafana data backup before it touches anything and stops when the
+#      backup cannot run; data made by the old version survives the 12 -> 13 upgrade; update.sh --rollback decides by the Grafana
+#      container that ran (13 ran: its compose file stays whole; 12 still runs: the old file and image come back) and the
+#      documented archive restore (read from runner/README.md) works and refuses a truncated archive
 # It changes /etc/docker/daemon.json, restarts Docker and adds iptables rules: CI only (or ALLOW_LOCAL=1 in a VM).
 #   Usage: sudo tools/ci/runner-host-e2e.sh
 set -Eeuo pipefail
@@ -225,7 +228,27 @@ dash_listed() { gapi "${GURL}/api/search?type=dash-db" | jq -e --arg t "$1" 'any
 up_via_grafana() { [[ "$(gapi --data-urlencode "query=up{job=\"node\"}" -G "${GURL}/api/datasources/proxy/uid/prometheus/api/v1/query" | jq -r '.data.result[0].value[1] // "none"')" == 1 ]]; }
 ds_healthy() { [[ "$(gapi "${GURL}/api/datasources/uid/prometheus/health" | jq -r .status)" == OK ]]; }
 grafana_logs() { mcompose logs --no-color --tail 40 grafana 2>&1 | ci_redact; }
+# the helper image of the backup script and of the README restore command (pinned by index digest, alpine 3.20 is end of life)
+ALPINE=$(awk -F'"' '/^HELPER_IMAGE=/ { print $2 }' runner/install/monitoring-backup.sh)
+grafana_mem() { docker inspect -f '{{.HostConfig.Memory}}' monitoring-grafana-1; }
+# update.sh functions run in their own bash: a `||`/`if` around a subshell would switch set -e off inside the function.
+#   [UPD_BACKUP_DIR=dir] upd FUNCTION [ARGS]   (the real update.sh is sourced, its main is not run)
+cat > "$W/upd.sh" <<'UPD'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+src=$1; shift
+source "$src"
+if [[ -n "${UPD_BACKUP_DIR:-}" ]]; then BACKUP_DIR=$UPD_BACKUP_DIR; fi
+WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+"$@"
+UPD
+upd() { bash "$W/upd.sh" "$CI_ROOT/runner/install/update.sh" "$@"; }
+# readme_cmd MARKER FILE: the one-line `sudo bash -c '...'` command of runner/README.md that contains MARKER, as the argument of
+# bash -c, with FILE as the archive. The test runs what the README says, not a copy of it.
+readme_cmd() { grep -F -m1 -- "$1" runner/README.md | sed -e "s/^sudo bash -c '//" -e "s/'\$//" -e "s|/var/backups/monitoring/FILE|$2|g"; }
 [[ -n "$GTAG" ]] || fail "cannot read the Grafana tag from the repo compose file"
+[[ "$ALPINE" =~ ^alpine:3\.22@sha256:[0-9a-f]{64}$ ]] && pass "backup helper image is alpine 3.22 pinned by digest" || fail "backup helper image is not alpine:3.22@sha256:<digest>: '${ALPINE}'"
+grep -qF -- "$ALPINE" runner/README.md && pass "the README restore command uses the same pinned image" || fail "runner/README.md does not use ${ALPINE}"
 
 # The installer needs the service user (users.sh also hardens SSH, which a CI VM must not get) and, for the gitlab-runner scrape
 # job, something on 127.0.0.1:9252 (a stand-in serving Prometheus text on /metrics).
@@ -260,10 +283,17 @@ GF_USER=$(grep '^GF_SECURITY_ADMIN_USER=' "$MD/.env" | cut -d= -f2-)
 GF_PW=$(grep '^GF_SECURITY_ADMIN_PASSWORD=' "$MD/.env" | cut -d= -f2-)
 ci_mask "$GF_PW"
 [[ -n "$GF_USER" && -n "$GF_PW" && "$GF_PW" != generated-on-install ]] && pass "an admin credential was generated at install time" || fail "no generated admin credential in .env"
+# Grafana's own encryption key: generated on a first install only, never printed
+SK=$(grep '^GF_SECURITY_SECRET_KEY=' "$MD/.env" | cut -d= -f2-)
+ci_mask "$SK"
+[[ "$SK" =~ ^[A-Za-z0-9]{32,}$ ]] && pass "a random Grafana encryption key (32+ alphanumerics) was generated on the first install" || fail "no valid generated Grafana encryption key in .env (length ${#SK})"
+expect_eq "exactly one encryption key line in .env" "$(grep -c '^GF_SECURITY_SECRET_KEY=' "$MD/.env")" 1
+[[ -n "$SK" ]] && ! grep -qF -- "$SK" "$W/monitoring-1.log" && pass "the installer did not print the encryption key" || fail "the encryption key is in the installer output (or missing)"
 
 echo "-- Grafana"
 mon_retry 60 grafana_ok && pass "Grafana /api/health reports database ok" || { grafana_logs; fail "Grafana never became healthy"; }
 expect_eq "Grafana runs the pinned tag" "$(grafana_version)" "$GTAG"
+[[ -n "$SK" && "$(docker exec monitoring-grafana-1 printenv GF_SECURITY_SECRET_KEY)" == "$SK" ]] && pass "the Grafana container got the key from .env" || fail "the Grafana container does not have the generated key"
 expect_eq "Grafana container was not OOM-killed under its memory limit" "$(docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}}' monitoring-grafana-1)" "false 0"
 gapi "${GURL}/api/datasources/uid/prometheus" > "$W/datasource.json" 2>/dev/null || true
 expect_eq "provisioned datasource: type" "$(jq -r .type "$W/datasource.json" 2>/dev/null)" prometheus
@@ -307,7 +337,7 @@ mcompose rm -f grafana >/dev/null 2>&1
 docker volume rm monitoring_grafana-data >/dev/null
 sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:${MON_OLD}|" "$MD/docker-compose.yml"
 mcompose up --no-start grafana >/dev/null 2>&1
-docker run --rm --network none -v monitoring_grafana-data:/v alpine:3.20 chown -R "$(id -u monitoring):$(id -g monitoring)" /v
+docker run --rm --network none -v monitoring_grafana-data:/v "$ALPINE" chown -R "$(id -u monitoring):$(id -g monitoring)" /v
 mcompose up -d grafana >/dev/null 2>&1
 mon_retry 60 grafana_ok && pass "control: Grafana ${MON_OLD} starts on a clean volume" || { grafana_logs; fail "Grafana ${MON_OLD} did not start"; }
 expect_eq "control: the old version is what runs" "$(grafana_version)" "$MON_OLD"
@@ -325,8 +355,44 @@ dry=$(PATH="$W/shim:$PATH" bash runner/install/monitoring-backup.sh --dry-run 2>
 grep -q '\[dry-run\] would back up' <<<"$dry" && pass "backup --dry-run reports the archive it would write" || fail "backup --dry-run did not report: ${dry}"
 [[ -z "$(ls -A /var/backups/monitoring 2>/dev/null)" ]] && pass "backup --dry-run wrote nothing" || fail "backup --dry-run wrote an archive"
 grafana_ok && pass "backup --dry-run left Grafana running" || fail "backup --dry-run stopped Grafana"
-# the installer step update.sh runs: installed compose says the old tag, the repo says the new one
-bash runner/install/monitoring-backup.sh 2>&1 | tail -4
+
+echo "-- a helper container that cannot run must stop the upgrade, never skip the backup"
+# shim: `docker run` fails like an image pull that hits a rate limit (exit 125) when an argument contains $SHIM_FAIL_ON; all else passes through
+mkdir -p "$W/shim-fail"
+printf '#!/usr/bin/env bash\n[[ "$1" == run && " $* " == *"$SHIM_FAIL_ON"* ]] && { echo "docker: simulated failure of docker run (exit 125)" >&2; exit 125; }\nexec %s "$@"\n' "$(command -v docker)" > "$W/shim-fail/docker"
+chmod +x "$W/shim-fail/docker"
+cp "$MD/docker-compose.yml" "$W/compose-before.yml"
+cp "$MD/prometheus/prometheus.yml" "$W/prom-before.yml"
+rc=0; fb=$(SHIM_FAIL_ON="$ALPINE" PATH="$W/shim-fail:$PATH" bash runner/install/monitoring-backup.sh 2>&1) || rc=$?
+printf '%s\n' "$fb" | ci_redact > "$W/backup-fail-1.log"
+[[ "$rc" != 0 ]] && pass "helper image cannot run: monitoring-backup.sh exits non-zero (${rc})" || fail "monitoring-backup.sh exited 0 although its helper container cannot run: ${fb}"
+grep -q 'not going on without a backup' <<<"$fb" && pass "it says it is not going on without a backup" || fail "no explanation in: ${fb}"
+grep -q 'nothing to back up' <<<"$fb" && fail "the failed check was reported as 'nothing to back up'" || pass "the failed check is not reported as 'no database'"
+[[ -z "$(ls -A /var/backups/monitoring 2>/dev/null)" ]] && pass "helper image cannot run: no archive" || fail "an archive exists after a failed backup"
+grafana_ok && expect_eq "Grafana was not touched by the failed check" "$(grafana_version)" "$MON_OLD" || fail "Grafana is not healthy after the failed check"
+# the data is archived, then tar fails: the archive is discarded and the stopped Grafana comes back
+rc=0; fb=$(SHIM_FAIL_ON=" tar -C " PATH="$W/shim-fail:$PATH" bash runner/install/monitoring-backup.sh 2>&1) || rc=$?
+printf '%s\n' "$fb" | ci_redact > "$W/backup-fail-2.log"
+[[ "$rc" != 0 ]] && pass "tar of the volume fails: monitoring-backup.sh exits non-zero (${rc})" || fail "monitoring-backup.sh exited 0 although tar failed"
+[[ -z "$(ls -A /var/backups/monitoring 2>/dev/null)" ]] && pass "tar fails: no archive and no temp file left" || fail "left behind: $(ls -A /var/backups/monitoring)"
+mon_retry 30 grafana_ok && expect_eq "tar fails: the stopped Grafana is started again" "$(grafana_version)" "$MON_OLD" || fail "Grafana was not started again after a failed backup"
+# same major: no container at all, so a missing helper image does not matter
+SHIM_FAIL_ON=" run " PATH="$W/shim-fail:$PATH" bash runner/install/monitoring-backup.sh --from-tag "$MON_OLD" --to-tag 12.4.13 >/dev/null 2>&1 \
+  && pass "same major: no docker run is needed (every docker run fails here), exit 0" || fail "a same-major backup check ran a container"
+# update.sh: the backup is the first change; when it fails, nothing is synced, pulled or restarted
+rc=0; SHIM_FAIL_ON="$ALPINE" PATH="$W/shim-fail:$PATH" upd update_monitoring 2>&1 | ci_redact > "$W/update-fail.log" || rc=$?
+[[ "$rc" != 0 ]] && pass "update_monitoring stops when the Grafana backup cannot run" || fail "update_monitoring went on without a backup"
+grep -q 'Grafana data backup failed, nothing changed' "$W/update-fail.log" && pass "update_monitoring says the backup failed and nothing changed" || fail "update_monitoring did not report the failed backup: $(tail -3 "$W/update-fail.log")"
+cmp -s "$MD/docker-compose.yml" "$W/compose-before.yml" && pass "backup failed: the installed compose file is unchanged (still ${MON_OLD})" || fail "the compose file was changed although the backup failed"
+cmp -s "$MD/prometheus/prometheus.yml" "$W/prom-before.yml" && pass "backup failed: prometheus.yml is unchanged" || fail "prometheus.yml was synced although the backup failed"
+expect_eq "backup failed: the old Grafana still runs" "$(grafana_version)" "$MON_OLD"
+[[ -z "$(ls -A /var/backups/monitoring 2>/dev/null)" ]] && pass "backup failed: no archive" || fail "an archive exists after the failed backup"
+
+echo "-- update.sh update_monitoring: ${MON_OLD} -> ${GTAG} (backup first, then sync, then start)"
+if upd update_monitoring 2>&1 | ci_redact > "$W/update-1.log"; then pass "update_monitoring exits 0"; else fail "update_monitoring failed (see update-1.log)"; tail -15 "$W/update-1.log"; fi
+b=$(grep -n 'grafana backup: wrote' "$W/update-1.log" | head -1 | cut -d: -f1)
+c=$(grep -n 'updated /opt/monitoring/docker-compose.yml' "$W/update-1.log" | head -1 | cut -d: -f1)
+[[ -n "$b" && -n "$c" ]] && (( b < c )) && pass "the archive is written before the compose file is synced (log lines ${b} < ${c})" || fail "backup/sync order is wrong or missing (backup line '${b}', compose line '${c}')"
 mapfile -t ARCH < <(find /var/backups/monitoring -maxdepth 1 -type f -name 'grafana-*.tar.gz')
 expect_eq "new major: one archive written" "${#ARCH[@]}" 1
 BK="${ARCH[0]:-/nonexistent}"
@@ -335,19 +401,20 @@ expect_eq "archive mode and owner" "$(stat -c '%a %U' "$BK" 2>/dev/null)" "600 r
 expect_eq "backup directory mode" "$(stat -c %a /var/backups/monitoring)" 700
 listing=$(tar -tzf "$BK" 2>/dev/null || true)   # a variable, not a pipe: grep -q would SIGPIPE tar under pipefail
 grep -Eq '^(\./)?grafana\.db$' <<<"$listing" && pass "archive contains grafana.db" || fail "archive has no grafana.db"
-mon_retry 30 grafana_ok && pass "Grafana is running again after the backup" || fail "Grafana was not restarted by the backup step"
-# update.sh syncs the compose file next; a rerun then sees the same major and must keep the one archive
-install -m 0644 runner/stacks/monitoring/docker-compose.yml "$MD/docker-compose.yml"
+grep -q 'default encryption key' "$W/update-1.log" && fail "update_monitoring warned about the default key although .env has its own" || pass "control: no default-key warning when .env has its own key"
+cmp -s runner/stacks/monitoring/docker-compose.yml "$MD/docker-compose.yml" && pass "the repo compose file was synced to ${MD}" || fail "the installed compose file differs from the repo's"
+# a rerun sees the same major now and must keep the one archive
 bash runner/install/monitoring-backup.sh 2>&1 | tail -1
 expect_eq "rerun after the compose update: still one archive" "$(find /var/backups/monitoring -maxdepth 1 -name 'grafana-*.tar.gz' | wc -l)" 1
-mcompose up -d grafana 2>&1 | tail -2
 mon_retry 90 grafana_ok && pass "Grafana ${GTAG} starts on the ${MON_OLD} data and migrates it" || { grafana_logs; fail "Grafana ${GTAG} did not become healthy on migrated data"; }
 expect_eq "now running the new tag" "$(grafana_version)" "$GTAG"
 expect_eq "no OOM kill and no restart during the migration" "$(docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}}' monitoring-grafana-1)" "false 0"
+expect_eq "Grafana runs with the 512m limit of the new compose file" "$(grafana_mem)" 536870912
 expect_eq "folder made on ${MON_OLD} survived" "$(gapi "${GURL}/api/folders/ci-marker" 2>/dev/null | jq -r .title)" ci-upgrade-marker
 expect_eq "dashboard made on ${MON_OLD} survived" "$(gapi "${GURL}/api/dashboards/uid/ci-dash" 2>/dev/null | jq -r .dashboard.title)" ci-upgrade-dash
 mon_retry 30 ds_healthy && pass "provisioned datasource is healthy after the migration" || fail "datasource is not healthy after the migration"
-# update.sh --rollback and the failure path restore the old compose file; they must not put the old Grafana on migrated data
+
+# update.sh --rollback and the failure path restore the old compose file; they decide by the Grafana container that ran
 echo "-- file rollback never lowers the Grafana major"
 printf '    image: grafana/grafana:%s\n' 12.0.0 > "$W/old-compose.yml"
 printf '    image: grafana/grafana:%s\n' 13.3.0 > "$W/new-compose.yml"
@@ -356,22 +423,68 @@ expect_eq "newer installed major than the backup: keep it" "$(gkeep "$W/new-comp
 expect_eq "older installed major than the backup: restore allowed" "$(gkeep "$W/old-compose.yml" "$W/new-compose.yml")" ""
 expect_eq "same major: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/new-compose.yml")" ""
 expect_eq "no backup of the compose file: nothing to keep" "$(gkeep "$W/new-compose.yml" "$W/none.yml")" ""
-mkdir -p "$W/bk/opt/monitoring"; cp "$W/old-compose.yml" "$W/bk/opt/monitoring/docker-compose.yml"
-( source runner/install/update.sh; BACKUP_DIR="$W/bk" GRAFANA_STARTED=1; restore_files ) >"$W/restore1.log" 2>&1 || fail "restore_files failed: $(tail -3 "$W/restore1.log")"
-expect_eq "restore_files after the new Grafana started keeps its image" "$(awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1 }' "$MD/docker-compose.yml")" "$GTAG"
-grep -q 'WARN: grafana' "$W/restore1.log" && pass "restore_files says why the image was kept" || fail "restore_files kept the image silently"
-( source runner/install/update.sh; BACKUP_DIR="$W/bk" GRAFANA_STARTED=0; restore_files ) >/dev/null 2>&1 || true
-expect_eq "control: before the new Grafana started the restore is a plain undo" "$(awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1 }' "$MD/docker-compose.yml")" 12.0.0
+expect_eq "new file on disk but the 12 container is what ran: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" 12.0.0)" ""
+expect_eq "new file on disk and no Grafana container ever started: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" none)" ""
+expect_eq "the 13 container ran: keep" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" 13.3.0)" 13.3.0
+expect_eq "grafana_ran_tag reads the container that ran" "$(upd grafana_ran_tag)" "$GTAG"
+# the old compose file as the 12.0.0 era had it: older image, 256m
+awk '/^  grafana:/ { g = 1 } g && /mem_limit:/ { sub(/512m/, "256m") } { print }' runner/stacks/monitoring/docker-compose.yml \
+  | sed "s|image: grafana/grafana:.*|image: grafana/grafana:${MON_OLD}|" > "$W/compose-old-full.yml"
+expect_eq "control: the old compose fixture differs from the new one (image, limit)" "$(diff "$W/compose-old-full.yml" runner/stacks/monitoring/docker-compose.yml | grep -c '^>')" 2
+mkdir -p "$W/bk/opt/monitoring"; cp "$W/compose-old-full.yml" "$W/bk/opt/monitoring/docker-compose.yml"
+echo marker > "$W/bk/opt/monitoring/ci-restore-marker"
+if UPD_BACKUP_DIR="$W/bk" upd restore_files 2>&1 | ci_redact > "$W/restore1.log"; then :; else fail "restore_files failed: $(tail -3 "$W/restore1.log")"; fi
+cmp -s runner/stacks/monitoring/docker-compose.yml "$MD/docker-compose.yml" && pass "restore_files after the 13 container ran leaves the installed compose file whole (image and 512m limit)" || fail "restore_files changed the installed compose file: $(grep -E 'image:|mem_limit' "$MD/docker-compose.yml" | tr -s ' ' | tr '\n' ' ')"
+grep -q 'WARN: grafana' "$W/restore1.log" && pass "restore_files says why the compose file was kept" || fail "restore_files kept the compose file silently"
+[[ "$(cat "$MD/ci-restore-marker" 2>/dev/null)" == marker ]] && pass "the other files of the backup are still restored" || fail "restore_files did not restore the other files"
+rm -f "$MD/ci-restore-marker"
+
+echo "-- update.sh --rollback, CLI: the 13 container ran"
+# the other stacks are not recreated here (they belong to sections 1 and 3): a docker shim skips `docker compose up` outside /opt/monitoring
+mkdir -p "$W/shim-skip"
+printf '#!/usr/bin/env bash\nif [[ "$1" == compose && "$2" == up && "$PWD" != /opt/monitoring ]]; then echo "docker compose up skipped in $PWD (CI shim)" >&2; exit 0; fi\nexec %s "$@"\n' "$(command -v docker)" > "$W/shim-skip/docker"
+chmod +x "$W/shim-skip/docker"
+RB=/var/backups/server-init-config/99991231-235959   # sorts after any real backup directory, so --rollback takes it
+mkdir -p "$RB/opt/monitoring"; cp "$W/compose-old-full.yml" "$RB/opt/monitoring/docker-compose.yml"
+if PATH="$W/shim-skip:$PATH" bash runner/install/update.sh --rollback 2>&1 | ci_redact > "$W/rollback-13.log"; then pass "update.sh --rollback exits 0"; else fail "update.sh --rollback failed"; tail -8 "$W/rollback-13.log"; fi
+cmp -s runner/stacks/monitoring/docker-compose.yml "$MD/docker-compose.yml" && pass "--rollback with the 13 container run: the installed compose file stays whole" || fail "--rollback replaced the installed compose file"
+grep -q 'WARN: grafana' "$W/rollback-13.log" && pass "--rollback says the Grafana image stays" || fail "--rollback kept the compose file silently"
+mon_retry 90 grafana_ok && expect_eq "Grafana still runs ${GTAG} after the rollback recreate" "$(grafana_version)" "$GTAG" || { grafana_logs; fail "Grafana is not healthy after --rollback"; }
+expect_eq "and still has its 512m limit" "$(grafana_mem)" 536870912
+expect_eq "its migrated data is intact (folder)" "$(gapi "${GURL}/api/folders/ci-marker" 2>/dev/null | jq -r .title)" ci-upgrade-marker
 install -m 0644 runner/stacks/monitoring/docker-compose.yml "$MD/docker-compose.yml"
-# the rollback from runner/README.md, word for word apart from the file name
+
+# the rollback from runner/README.md, as written there
 echo "-- rollback with the documented commands"
 gapi -X DELETE "${GURL}/api/dashboards/uid/ci-dash" >/dev/null 2>&1 || true
-bash -c 'cd /opt/monitoring && docker compose stop grafana && docker run --rm -i --network none -v monitoring_grafana-data:/v alpine:3.20 sh -c "find /v -mindepth 1 -delete && tar -xzf - -C /v" < "$0"' "$BK" >/dev/null 2>&1 \
-  && pass "restore command succeeded" || fail "restore command failed"
-bash -c 'cd /opt/monitoring && sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:$0|" docker-compose.yml && docker compose up -d grafana' "$MON_OLD" >/dev/null 2>&1
+# a truncated archive is refused before anything is stopped or deleted
+head -c "$(( $(stat -c %s "$BK") / 2 ))" "$BK" > "$W/truncated.tar.gz"
+RESTORE_CMD=$(readme_cmd 'docker run --rm -i --network none -v monitoring_grafana-data' "$W/truncated.tar.gz")
+[[ "$RESTORE_CMD" == *'tar -tzf'* ]] && pass "the README restore command checks the archive first (found in the README)" || fail "could not read the restore command from runner/README.md: '${RESTORE_CMD}'"
+if bash -c "$RESTORE_CMD" >/dev/null 2>&1; then fail "the restore command accepted a truncated archive"; else pass "restore of a truncated archive fails"; fi
+grafana_ok && expect_eq "truncated archive: Grafana was not stopped and its volume not wiped (folder still there)" "$(gapi "${GURL}/api/folders/ci-marker" 2>/dev/null | jq -r .title)" ci-upgrade-marker || fail "the truncated archive stopped Grafana or wiped the volume"
+RESTORE_CMD=$(readme_cmd 'docker run --rm -i --network none -v monitoring_grafana-data' "$BK")
+bash -c "$RESTORE_CMD" >/dev/null 2>&1 && pass "restore command succeeded" || fail "restore command failed"
+TAG_CMD=$(readme_cmd 'image: grafana/grafana:12.0.0|' x)
+[[ "$TAG_CMD" == *"grafana:${MON_OLD}|"* ]] || fail "the README start command does not name ${MON_OLD}"
+bash -c "$TAG_CMD" >/dev/null 2>&1 || true   # its closing curl may come before Grafana listens
 mon_retry 60 grafana_ok && pass "the old image starts on the restored data" || { grafana_logs; fail "old image did not start after the restore"; }
 expect_eq "rolled back to the old version" "$(grafana_version)" "$MON_OLD"
 expect_eq "dashboard deleted after the upgrade is back (state is the backup's)" "$(gapi "${GURL}/api/dashboards/uid/ci-dash" 2>/dev/null | jq -r .dashboard.title)" ci-upgrade-dash
+
+# An update synced the new compose file and aborted before `docker compose up` (pull failed): the old Grafana still runs on
+# unmigrated data. --rollback must put the old file back instead of keeping the new tag (that would migrate on the recreate).
+echo "-- update.sh --rollback, CLI: the new compose file is on disk but the ${MON_OLD} container is what ran"
+install -m 0644 runner/stacks/monitoring/docker-compose.yml "$MD/docker-compose.yml"
+expect_eq "control: the installed file says ${GTAG}, the container is ${MON_OLD}" "$(grafana_version) $(awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1 }' "$MD/docker-compose.yml")" "${MON_OLD} ${GTAG}"
+expect_eq "grafana_ran_tag reads the old container" "$(upd grafana_ran_tag)" "$MON_OLD"
+if PATH="$W/shim-skip:$PATH" bash runner/install/update.sh --rollback 2>&1 | ci_redact > "$W/rollback-12.log"; then pass "update.sh --rollback exits 0"; else fail "update.sh --rollback failed"; tail -8 "$W/rollback-12.log"; fi
+cmp -s "$W/compose-old-full.yml" "$MD/docker-compose.yml" && pass "--rollback restored the old compose file (image ${MON_OLD}, 256m)" || fail "--rollback kept the new compose file although Grafana ${MON_OLD} never ran it: $(grep -E 'image: grafana|mem_limit' "$MD/docker-compose.yml" | tr -s ' ' | tr '\n' ' ')"
+grep -q 'WARN: grafana' "$W/rollback-12.log" && fail "--rollback warned that a migrated Grafana stays, but nothing was migrated" || pass "no 'already migrated' warning: nothing was migrated"
+mon_retry 60 grafana_ok && expect_eq "Grafana ${MON_OLD} runs again after the recreate, data unmigrated" "$(grafana_version)" "$MON_OLD" || { grafana_logs; fail "Grafana is not healthy after --rollback"; }
+expect_eq "its limit is the old file's" "$(grafana_mem)" 268435456
+rm -rf "$RB"
+
 # no compose file (reinstall over a leftover volume): the version comes from the container that used the volume
 unk=$(MON_DIR=/nonexistent bash runner/install/monitoring-backup.sh --to-tag 12.4.13 2>&1 | tail -1)
 grep -q "stays on major 12" <<<"$unk" && pass "without a compose file the old version is read from the container: same major, no archive" || fail "leftover volume, same major, was not recognized: ${unk}"
@@ -400,6 +513,24 @@ rm -rf "$MD"
 if ci_run "$W/monitoring-2.log" 6 bash "$PT/runner/install/monitoring.sh"; then pass "monitoring.sh installs when monitoring-backup.sh is not there"; else fail "monitoring.sh failed without monitoring-backup.sh (see monitoring-2.log)"; fi
 grep -q 'monitoring-backup.sh not found' "$W/monitoring-2.log" && pass "it says the backup step was skipped" || fail "no note about the skipped backup step"
 mon_retry 60 grafana_ok && pass "Grafana is healthy after the copy-paste style install" || fail "Grafana is not healthy after the copy-paste style install"
+SK2=$(grep '^GF_SECURITY_SECRET_KEY=' "$MD/.env" | cut -d= -f2-)
+ci_mask "$SK2"
+[[ "$SK2" =~ ^[A-Za-z0-9]{32,}$ && "$SK2" != "$SK" ]] && pass "a fresh install gets its own new encryption key" || fail "no new valid encryption key after the second fresh install"
+
+# A volume that is left over from an earlier install may hold values encrypted with Grafana's default key: a new key would make them
+# unreadable, so the installer must not introduce one there (and must say so).
+echo "-- install over a leftover Grafana volume keeps the default encryption key"
+mcompose down >/dev/null 2>&1 || fail "docker compose down failed"
+rm -rf "$MD"
+if ci_run "$W/monitoring-3.log" 0 bash runner/install/monitoring.sh; then pass "monitoring.sh installs over a leftover Grafana volume"; else fail "monitoring.sh failed over a leftover volume (see monitoring-3.log)"; tail -15 "$W/monitoring-3.log"; fi
+grep -q '^GF_SECURITY_SECRET_KEY=' "$MD/.env" && fail "a new encryption key was generated for an existing volume" || pass "existing volume: no encryption key was added to .env"
+grep -q 'built-in default encryption key' "$W/monitoring-3.log" && pass "the installer says the default key stays" || fail "no note about the default encryption key"
+[[ -n "$(find /var/backups/monitoring -maxdepth 1 -name 'grafana-*.tar.gz' 2>/dev/null)" ]] && pass "the leftover volume was archived before the start" || fail "the leftover volume was not archived"
+mon_retry 60 grafana_ok && pass "Grafana is healthy on the leftover volume" || fail "Grafana is not healthy on the leftover volume"
+# an archive of data under the default key says so (the .env of this install has no key line)
+out=$(bash runner/install/monitoring-backup.sh --force 2>&1 | ci_redact)
+grep -q 'default encryption key, so whoever gets the archive' <<<"$out" && pass "the backup step warns that the archive is protected by the default key only" || fail "no warning about the default key in the backup step: ${out}"
 mcompose down -v >/dev/null 2>&1 || fail "docker compose down failed"
+rm -rf /var/backups/monitoring
 endgroup
 finish

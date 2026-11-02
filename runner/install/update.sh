@@ -19,8 +19,6 @@ DO_ROLLBACK=0
 CHANGED=()
 SKIPPED=()
 WORK=""
-# Set once update_monitoring has started containers from the new compose file: from then on the Grafana volume may be migrated.
-GRAFANA_STARTED=0
 
 usage() {
   cat <<USAGE
@@ -39,7 +37,7 @@ Components that are not installed are skipped.
       --pull     git pull --ff-only in this checkout first (needs a git clone, not an scp copy)
       --os       also upgrade OS packages (Docker, GitLab Runner included); never reboots
       --rollback restore the files from the newest backup in ${BACKUP_ROOT} and recreate the stacks
-                 (Grafana keeps its newer image once it has migrated its data: that part is the archive restore in runner/README.md)
+                 (Grafana keeps its newer compose file once the newer Grafana has started on its data: that part is the archive restore in runner/README.md)
 
 Steps that restart Docker-based caches or upgrade packages are skipped while CI jobs are running
 and the script exits with code 3; rerun it when the runner is idle.
@@ -109,13 +107,33 @@ sync_tree() {
 
 grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1; exit }' "$1"; }
 
-# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
+# grafana_ran_tag: which Grafana has (or may have) touched the data volume, by what actually ran, not by the compose file on disk
+# (an update can sync the new compose file and abort before `docker compose up`, the old Grafana then still runs on unmigrated data).
+# Prints the tag of the newest Grafana container that was ever started, "none" when Grafana containers exist but none started,
+# nothing when it cannot tell (no docker, no container).
+grafana_ran_tag() {
+  local ids rows tag
+  command -v docker >/dev/null 2>&1 || return 0
+  ids=$(docker ps -aq --filter label=com.docker.compose.project=monitoring --filter label=com.docker.compose.service=grafana 2>/dev/null || true)
+  [[ -n "$ids" ]] || return 0
+  # shellcheck disable=SC2086
+  rows=$(docker inspect -f '{{.State.StartedAt}} {{.Config.Image}}' $ids 2>/dev/null) || return 0
+  # A started container whose image is not grafana/grafana:TAG is unknown, not "none".
+  awk '$1 !~ /^0001-/ { started++ } END { exit !started }' <<<"$rows" || { echo none; return 0; }
+  tag=$(awk '$1 !~ /^0001-/ && $2 ~ /grafana\/grafana:/ { sub(/.*grafana\/grafana:/, "", $2); print $2 }' <<<"$rows" | sort -V | tail -n 1)
+  printf '%s\n' "$tag"
+}
+
+# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE [RAN_TAG]: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
 # Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
-# (runner/README.md, "Grafana upgrade and rollback"). Prints the tag to keep, or nothing when the restore is safe.
+# (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides
+# ("none" = never started, so the restore is a clean undo); without it the tag in CURRENT_COMPOSE is assumed to have run.
+# Prints the tag to keep, or nothing when the restore is safe.
 keep_grafana_major() {
   local cur old
   [[ -f "$1" && -f "$2" ]] || return 0
-  cur=$(grafana_tag "$1")
+  cur="${3:-$(grafana_tag "$1")}"
+  [[ "$cur" != none ]] || return 0
   old=$(grafana_tag "$2")
   [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
   if (( ${cur%%.*} > ${old%%.*} )); then
@@ -124,25 +142,24 @@ keep_grafana_major() {
 }
 
 restore_files() {
-  local f keep="" mon=/opt/monitoring/docker-compose.yml
+  local f dst keep="" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
-  # Only once the new Grafana has started can its data be on the new major; before that the restore is a clean undo.
-  if (( GRAFANA_STARTED )); then
-    keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}")
-  fi
+  keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$(grafana_ran_tag)")
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
+    dst="${f#"${BACKUP_DIR}"}"
+    if [[ -n "$keep" && "$dst" == "$mon" ]]; then
+      # Not the old file with the image line patched: that would also bring back its older limits (Grafana 13 needs 512m, not 256m).
+      continue
+    fi
     if (( DRYRUN )); then
-      log "[dry-run] would restore ${f#"${BACKUP_DIR}"}"
+      log "[dry-run] would restore ${dst}"
     else
-      cp -a "$f" "${f#"${BACKUP_DIR}"}"
+      cp -a "$f" "$dst"
     fi
   done < <(find "$BACKUP_DIR" -type f -print0)
   if [[ -n "$keep" ]]; then
-    log "WARN: grafana ${keep} already migrated its data and cannot be rolled back with files; the image stays grafana/grafana:${keep}. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
-    if (( ! DRYRUN )); then
-      sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:${keep}|" "$mon"
-    fi
+    log "WARN: grafana ${keep} has already run on the data and cannot be rolled back with files; ${mon} stays as installed (image grafana/grafana:${keep} and its settings), everything else is restored. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
   fi
   run systemctl daemon-reload
 }
@@ -377,7 +394,6 @@ YAML
     (cd "$dir" && docker compose pull -q)
   fi
   chown_volumes "$dir"
-  GRAFANA_STARTED=1
   (cd "$dir" && docker compose up -d)
   if ! wait_url http://127.0.0.1:9090/-/ready 30; then
     (cd "$dir" && docker compose logs --tail 30 prometheus) || true
@@ -528,8 +544,8 @@ do_rollback() {
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
   [[ -n "$latest" ]] || die "no backups in ${BACKUP_ROOT}"
   BACKUP_DIR="$latest"
-  # The installed compose file is what last ran: its Grafana may have migrated the data, whatever the update that made the backup did.
-  GRAFANA_STARTED=1
+  # restore_files looks at the Grafana container that actually ran, not at the compose file: an update that synced the new file and
+  # aborted before `docker compose up` (pull failed) left the old Grafana on unmigrated data, and the restore may put the old file back.
   restore_files
   if (( DRYRUN )); then
     return 0
