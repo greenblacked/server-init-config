@@ -167,6 +167,28 @@ sudo grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env
 
 Logs are in Grafana, Explore, Loki, kept 7 days: `{unit="gitlab-runner.service"}`, `{unit="docker.service"}`, `{unit="sshd.service"} |= "Failed"`, `{compose_project="registry-cache"}`. Job containers are not collected; their output is the job log in GitLab.
 
+### Grafana upgrade and rollback
+
+Grafana migrates its SQLite database forward on the first start of a new version and cannot go back (13.0 also moves folders and dashboards into a new storage; an older Grafana then reads stale tables). So `runner/update.sh` (and `setup.sh --monitoring`, if an old volume is left over) first runs `runner/install/monitoring-backup.sh`. When the Grafana major in the repo differs from the installed one, it stops Grafana, writes the data volume to `/var/backups/monitoring/grafana-<old version>-<date>.tar.gz` (root only, mode 0600, last 3 kept) and starts it again; with the same major it does nothing, and a rerun after the compose file was updated keeps the first archive. The archive holds the database and its secrets: do not copy it off the server. `update.sh --rollback` restores repo-managed files only, never this data.
+
+To go back (server, as `ops`, any directory), first put the repo checkout in `/root/server-init-config` back to the commit you upgraded from, otherwise the next `runner/update.sh` upgrades again. List the archives, newest first:
+
+```bash
+sudo ls -1t /var/backups/monitoring
+```
+
+Restore one (replace `FILE` with the archive named after the old version, for example `grafana-12.0.0-20261102-101500.tar.gz`; this replaces everything in the Grafana volume), then start the old image:
+
+```bash
+sudo bash -c 'cd /opt/monitoring && docker compose stop grafana && docker run --rm -i --network none -v monitoring_grafana-data:/v alpine:3.20 sh -c "find /v -mindepth 1 -delete && tar -xzf - -C /v" < /var/backups/monitoring/FILE'
+```
+
+```bash
+sudo bash -c 'cd /opt/monitoring && sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:12.0.0|" docker-compose.yml && docker compose up -d grafana && curl -fsS http://127.0.0.1:3000/api/health'
+```
+
+`version` in the answer should be the old one. Dashboards edited after the upgrade are lost; the provisioned runner dashboard comes back from the repo files.
+
 ## Concurrent jobs and limits
 
 `concurrent` is the number of jobs at once and `request_concurrency` the number of parallel job requests to GitLab. The init writes `concurrent = 2`, which fits a CAX11 (2 vCPU, 4 GB); keep it at or below the vCPU count.

@@ -27,6 +27,7 @@ Usage: $0 [--dry-run] [--pull] [--os] [--rollback]
 Updates what is installed on this server to the state of this repo checkout:
   host tools     health, cleanup, disk guard (+ prewarm if configured), their systemd units, kernel hardening and core dump settings
   monitoring     /opt/monitoring (Prometheus, Grafana, node_exporter, Caddy override if present)
+                 (a new Grafana major first archives its data volume to /var/backups/monitoring, last 3 kept)
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
   npm-cache      /opt/npm-cache
@@ -308,6 +309,13 @@ YAML
   prom_image=$(awk '/image: prom\/prometheus/ { print $2 }' "${REPO_ROOT}/runner/stacks/monitoring/docker-compose.yml")
   docker run --rm --entrypoint promtool -v "${stage}:/etc/prometheus:ro${zopt}" "$prom_image" \
     check config /etc/prometheus/prometheus.yml || die "promtool rejected the new Prometheus config, nothing changed"
+
+  # Grafana migrates its database forward on a new major and cannot go back: archive the data volume first (see runner/README.md).
+  if (( DRYRUN )); then
+    bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" --dry-run
+  else
+    bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" || die "monitoring: Grafana data backup failed, nothing changed"
+  fi
 
   if sync_file "${stage}/prometheus.yml" "${dir}/prometheus/prometheus.yml" 0644 inplace; then
     prom=1
