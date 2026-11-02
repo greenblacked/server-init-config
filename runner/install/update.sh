@@ -19,6 +19,8 @@ DO_ROLLBACK=0
 CHANGED=()
 SKIPPED=()
 WORK=""
+# Set once update_monitoring has started containers from the new compose file: from then on the Grafana volume may be migrated.
+GRAFANA_STARTED=0
 
 usage() {
   cat <<USAGE
@@ -37,6 +39,7 @@ Components that are not installed are skipped.
       --pull     git pull --ff-only in this checkout first (needs a git clone, not an scp copy)
       --os       also upgrade OS packages (Docker, GitLab Runner included); never reboots
       --rollback restore the files from the newest backup in ${BACKUP_ROOT} and recreate the stacks
+                 (Grafana keeps its newer image once it has migrated its data: that part is the archive restore in runner/README.md)
 
 Steps that restart Docker-based caches or upgrade packages are skipped while CI jobs are running
 and the script exits with code 3; rerun it when the runner is idle.
@@ -104,9 +107,29 @@ sync_tree() {
   return "$rc"
 }
 
+grafana_tag() { awk '/image: grafana\/grafana:/ { sub(/.*grafana\/grafana:/, ""); print $1; exit }' "$1"; }
+
+# keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
+# Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
+# (runner/README.md, "Grafana upgrade and rollback"). Prints the tag to keep, or nothing when the restore is safe.
+keep_grafana_major() {
+  local cur old
+  [[ -f "$1" && -f "$2" ]] || return 0
+  cur=$(grafana_tag "$1")
+  old=$(grafana_tag "$2")
+  [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
+  if (( ${cur%%.*} > ${old%%.*} )); then
+    printf '%s\n' "$cur"
+  fi
+}
+
 restore_files() {
-  local f
+  local f keep="" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
+  # Only once the new Grafana has started can its data be on the new major; before that the restore is a clean undo.
+  if (( GRAFANA_STARTED )); then
+    keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}")
+  fi
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
     if (( DRYRUN )); then
@@ -115,6 +138,12 @@ restore_files() {
       cp -a "$f" "${f#"${BACKUP_DIR}"}"
     fi
   done < <(find "$BACKUP_DIR" -type f -print0)
+  if [[ -n "$keep" ]]; then
+    log "WARN: grafana ${keep} already migrated its data and cannot be rolled back with files; the image stays grafana/grafana:${keep}. To go back, restore the archive (runner/README.md, Grafana upgrade and rollback)"
+    if (( ! DRYRUN )); then
+      sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:${keep}|" "$mon"
+    fi
+  fi
   run systemctl daemon-reload
 }
 
@@ -312,7 +341,7 @@ YAML
 
   # Grafana migrates its database forward on a new major and cannot go back: archive the data volume first (see runner/README.md).
   if (( DRYRUN )); then
-    bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" --dry-run
+    bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" --dry-run || log "WARN: the Grafana backup check failed (dry run only, nothing changed)"
   else
     bash "${REPO_ROOT}/runner/install/monitoring-backup.sh" || die "monitoring: Grafana data backup failed, nothing changed"
   fi
@@ -348,6 +377,7 @@ YAML
     (cd "$dir" && docker compose pull -q)
   fi
   chown_volumes "$dir"
+  GRAFANA_STARTED=1
   (cd "$dir" && docker compose up -d)
   if ! wait_url http://127.0.0.1:9090/-/ready 30; then
     (cd "$dir" && docker compose logs --tail 30 prometheus) || true
@@ -498,6 +528,8 @@ do_rollback() {
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
   [[ -n "$latest" ]] || die "no backups in ${BACKUP_ROOT}"
   BACKUP_DIR="$latest"
+  # The installed compose file is what last ran: its Grafana may have migrated the data, whatever the update that made the backup did.
+  GRAFANA_STARTED=1
   restore_files
   if (( DRYRUN )); then
     return 0
@@ -557,7 +589,7 @@ main() {
   flock -n 9 || die "another update is running"
   WORK=$(mktemp -d)
   trap 'rm -rf "$WORK"' EXIT
-  trap 'log "ERROR at line ${LINENO}: update aborted. Changed files are backed up in ${BACKUP_DIR} (runner/install/update.sh --rollback)"' ERR
+  trap 'log "ERROR at line ${LINENO}: update aborted. Changed files are backed up in ${BACKUP_DIR} (runner/install/update.sh --rollback, files only: Grafana data is restored from /var/backups/monitoring, see runner/README.md)"' ERR
 
   if (( DO_ROLLBACK )); then
     do_rollback
