@@ -17,6 +17,9 @@ docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
 command -v jq >/dev/null || pkg_install jq
 [[ -f "$DIR/docker-compose.yml" ]] && die "$DIR/docker-compose.yml exists, stack already installed"
 
+# A Grafana volume left over from an earlier install is archived before a new major can migrate it (no-op on a clean host).
+bash "$(dirname "$0")/monitoring-backup.sh"
+
 selinux_label_dir "$DIR"
 curl -fsS http://127.0.0.1:9252/metrics >/dev/null 2>&1 || log "WARN: runner metrics on 127.0.0.1:9252 not reachable"
 

@@ -35,11 +35,12 @@ services:
       - /:/host:ro,rslave
 
   grafana:
-    image: grafana/grafana:12.0.0
+    image: grafana/grafana:13.3.0
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
-    mem_limit: 256m
+    # Grafana 13 migrates dashboards and folders into unified storage on the first start; 512 MB is the documented minimum.
+    mem_limit: 512m
     env_file: .env
     depends_on: [prometheus]
     volumes:
