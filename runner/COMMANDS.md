@@ -5184,7 +5184,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 
 GITLAB_URL="${GITLAB_URL:-https://gitlab.com}"
 DESCRIPTION="${DESCRIPTION:-hetzner-$(uname -n)}"
-DEFAULT_IMAGE="${DEFAULT_IMAGE:-alpine:3.20}"
+DEFAULT_IMAGE="${DEFAULT_IMAGE:-$HELPER_IMAGE}"
 REQUEST_CONCURRENCY="${REQUEST_CONCURRENCY:-2}"
 CFG=/etc/gitlab-runner/config.toml
 
@@ -5192,7 +5192,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<USAGE
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
-     DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
+     DEFAULT_IMAGE (default ${HELPER_IMAGE}), REQUEST_CONCURRENCY (default 2)
 Per-job limits (memory 1536m, cpus 1.5, shm 256 MB, services 384m, and a ci-jobs.slice with a process and memory ceiling) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
@@ -7968,7 +7968,7 @@ edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
-docker run --rm --user 1000:1000 -v "${HOST_DIR}:${MOUNT}:rw" alpine:3.20 \
+docker run --rm --user 1000:1000 -v "${HOST_DIR}:${MOUNT}:rw" "$HELPER_IMAGE" \
   sh -c "touch ${MOUNT}/npm/.probe && rm ${MOUNT}/npm/.probe && echo 'non-root write OK'" \
   || die "containers cannot write to ${HOST_DIR}"
 
@@ -10878,7 +10878,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 
 GITLAB_URL="${GITLAB_URL:-https://gitlab.com}"
 DESCRIPTION="${DESCRIPTION:-hetzner-$(uname -n)}"
-DEFAULT_IMAGE="${DEFAULT_IMAGE:-alpine:3.20}"
+DEFAULT_IMAGE="${DEFAULT_IMAGE:-$HELPER_IMAGE}"
 REQUEST_CONCURRENCY="${REQUEST_CONCURRENCY:-2}"
 CFG=/etc/gitlab-runner/config.toml
 
@@ -10886,7 +10886,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<USAGE
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
-     DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
+     DEFAULT_IMAGE (default ${HELPER_IMAGE}), REQUEST_CONCURRENCY (default 2)
 Per-job limits (memory 1536m, cpus 1.5, shm 256 MB, services 384m, and a ci-jobs.slice with a process and memory ceiling) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
@@ -11078,7 +11078,7 @@ edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
-docker run --rm --user 1000:1000 -v "${HOST_DIR}:${MOUNT}:rw" alpine:3.20 \
+docker run --rm --user 1000:1000 -v "${HOST_DIR}:${MOUNT}:rw" "$HELPER_IMAGE" \
   sh -c "touch ${MOUNT}/npm/.probe && rm ${MOUNT}/npm/.probe && echo 'non-root write OK'" \
   || die "containers cannot write to ${HOST_DIR}"
 
@@ -16074,7 +16074,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 
 GITLAB_URL="${GITLAB_URL:-https://gitlab.com}"
 DESCRIPTION="${DESCRIPTION:-hetzner-$(uname -n)}"
-DEFAULT_IMAGE="${DEFAULT_IMAGE:-alpine:3.20}"
+DEFAULT_IMAGE="${DEFAULT_IMAGE:-$HELPER_IMAGE}"
 REQUEST_CONCURRENCY="${REQUEST_CONCURRENCY:-2}"
 CFG=/etc/gitlab-runner/config.toml
 
@@ -16082,7 +16082,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<USAGE
 Usage: $0
 Env: GITLAB_URL (default https://gitlab.com), DESCRIPTION (default hetzner-<hostname>),
-     DEFAULT_IMAGE (default alpine:3.20), REQUEST_CONCURRENCY (default 2)
+     DEFAULT_IMAGE (default ${HELPER_IMAGE}), REQUEST_CONCURRENCY (default 2)
 Per-job limits (memory 1536m, cpus 1.5, shm 256 MB, services 384m, and a ci-jobs.slice with a process and memory ceiling) are added to config.toml; see runner/install/job-limits.sh.
 Tags, untagged jobs, protected and locked are set in the GitLab UI when creating the runner.
 The token is read interactively and never stored in shell history.
@@ -16274,7 +16274,7 @@ edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
-docker run --rm --user 1000:1000 -v "${HOST_DIR}:${MOUNT}:rw" alpine:3.20 \
+docker run --rm --user 1000:1000 -v "${HOST_DIR}:${MOUNT}:rw" "$HELPER_IMAGE" \
   sh -c "touch ${MOUNT}/npm/.probe && rm ${MOUNT}/npm/.probe && echo 'non-root write OK'" \
   || die "containers cannot write to ${HOST_DIR}"
 

@@ -91,7 +91,7 @@ concurrent = 2
   token = "not-a-real-token"
   executor = "docker"
   [runners.docker]
-    image = "alpine:3.20"
+    image = "alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 TOML
 run job-limits env RUNNER_CONFIG=/tmp/config.toml bash runner/install/job-limits.sh
 for k in memory cpus shm_size cgroup_parent service_memory; do grep -Eq "^[[:space:]]+${k} = " /tmp/config.toml && pass "config.toml has ${k}" || fail "config.toml lacks ${k}"; done
