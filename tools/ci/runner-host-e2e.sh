@@ -7,7 +7,9 @@
 #   2. job isolation (runner/scripts/ci-job-isolation.sh): a container cannot reach 169.254.169.254 (a network namespace answers
 #      there, forwarded through the host like the real Hetzner address) or the host's services, but can reach the internet side and
 #      the npm-cache port; custom bridges too; the systemd unit re-applies the rules after a Docker restart
-#   3. npm cache stack (runner/stacks/npm-cache): comes up bound to the docker0 IP only
+#   3. npm cache stack (runner/stacks/npm-cache): comes up bound to the docker0 IP only; a job container installs a package through
+#      it; the server secret is valid, mode 600 and never logged; simulated 6.x storage is moved aside (not deleted) on the 7.x
+#      upgrade and a restart changes nothing
 #   4. monitoring stack (runner/install/monitoring.sh, the product's own installer): Grafana healthy, provisioned Prometheus
 #      datasource present and healthy, Prometheus ready and scraping node_exporter; Grafana data backed up before a new major,
 #      data made by the old version survives the upgrade, and the documented rollback restores it
@@ -144,11 +146,64 @@ install -d /opt/npm-cache
 sed "s/172\.17\.0\.1:4873/${GW}:4873/" runner/stacks/npm-cache/config.yaml > /opt/npm-cache/config.yaml
 sed "s/172\.17\.0\.1:4873/${GW}:4873/" runner/stacks/npm-cache/docker-compose.yml > /opt/npm-cache/docker-compose.yml
 pkill -f 'http.server 4873' || true; sleep 1
-(cd /opt/npm-cache && docker compose config -q && docker compose up -d) 2>&1 | tail -3
-for _ in $(seq 1 30); do curl -fsS "http://${GW}:4873/-/ping" >/dev/null 2>&1 && break; sleep 2; done
+# Storage left behind by a 6.x Verdaccio: a package, a user file and a 64-character server secret (6.x tolerated it, 7.x refuses to start with it)
+npm_c() { (cd /opt/npm-cache && docker compose "$@"); }
+npm_x() { npm_c exec -T verdaccio "$@"; }
+npm_wait() { for _ in $(seq 1 30); do curl -fsS "http://${GW}:4873/-/ping" >/dev/null 2>&1 && return 0; sleep 2; done; return 1; }
+OLD_SECRET=$(printf 'a%.0s' $(seq 1 64))
+npm_c config -q && npm_c up --no-start 2>&1 | tail -3
+npm_c run --rm --no-deps -T --entrypoint sh verdaccio -c "mkdir -p /verdaccio/storage/data/old-pkg && echo 6x-marker > /verdaccio/storage/data/old-pkg/marker && echo 'old:user' > /verdaccio/storage/htpasswd && printf '{\"list\":[],\"secret\":\"%s\"}' '${OLD_SECRET}' > /verdaccio/storage/data/.verdaccio-db.json"
+npm_c up -d 2>&1 | tail -3
+npm_wait
 curl -fsS "http://${GW}:4873/-/ping" >/dev/null && pass "verdaccio answers on the docker0 IP" || { (cd /opt/npm-cache && docker compose logs --tail 30); fail "verdaccio did not start"; }
 if ss -ltn | awk '/:4873 /{print $4}' | grep -qv "^${GW}:4873$"; then fail "port 4873 is bound beyond the docker0 IP: $(ss -ltn | awk '/:4873 /{print $4}' | tr '\n' ' ')"; else pass "port 4873 is bound to ${GW} only"; fi
 reach "http://${GW}:4873/-/ping" && pass "a job container reaches the cache through the isolation rules" || fail "job container cannot reach the npm cache"
+expect_match "verdaccio version" "$(npm_x verdaccio --version | tail -1)" '^v?7\.'
+echo "-- upgrade from 6.x: old storage is moved aside, never deleted"
+npm_c logs verdaccio > "$W/npm-cache-1.log" 2>&1 || true
+grep -q 'treating it as 6.x' "$W/npm-cache-1.log" && pass "start without a state file and with storage logged that it is treated as 6.x" || fail "no 6.x detection in the log"
+expect_eq "backup dirs of the old storage" "$(npm_x sh -c 'ls -d /verdaccio/storage/backup-6.x-* | wc -l')" 1
+expect_eq "old package is intact in the backup" "$(npm_x sh -c 'cat /verdaccio/storage/backup-6.x-*/data/old-pkg/marker')" 6x-marker
+check "old user file is in the backup" npm_x sh -c 'test -s /verdaccio/storage/backup-6.x-*/htpasswd'
+check "old storage is gone from the live path" npm_x sh -c 'test ! -e /verdaccio/storage/data/old-pkg && test ! -e /verdaccio/storage/htpasswd'
+expect_eq "deployed major recorded in the state file" "$(npm_x cat /verdaccio/storage/.deployed-major)" 7
+echo "-- server secret (values are never printed)"
+DB=/verdaccio/storage/data/.verdaccio-db.json
+SECRET=$(npm_x sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$DB")
+ci_mask "$SECRET"
+expect_eq "secret file mode and owner (uid)" "$(npm_x stat -c '%a %u' "$DB")" "600 10001"
+# 7.x accepts exactly 32 characters; 6.x tolerated other lengths, so the installer makes it exactly 32 (128 random bits)
+expect_eq "secret length" "${#SECRET}" 32
+[[ "$SECRET" != "$OLD_SECRET" ]] && pass "the old 64-character secret was not reused" || fail "the old secret is still in use"
+if npm_c logs verdaccio 2>&1 | grep -qF -- "$SECRET"; then fail "the server secret appears in the container log"; else pass "the server secret is not in the container log"; fi
+echo "-- a job container installs a package through the cache"
+dexec -e npm_config_registry="http://${GW}:4873/" node:22-alpine sh -c \
+  'cd /tmp && npm init -y >/dev/null && npm install --no-audit --no-fund is-number >/dev/null && test -s node_modules/is-number/package.json' \
+  && pass "npm install is-number through the cache" || { npm_c logs --tail 30 verdaccio; fail "npm install through the cache failed"; }
+check "the tarball is in the cache storage" npm_x sh -c 'ls /verdaccio/storage/data/is-number/*.tgz'
+expect_eq "no OOM kill under mem_limit" "$(npm_c ps -q verdaccio | xargs docker inspect -f '{{.State.OOMKilled}}')" false
+echo "-- a restart changes nothing"
+SNAP=$(npm_x sh -c 'cd /verdaccio/storage && ls -A; ls data/is-number; cat .deployed-major' | tr '\n' ' ')
+npm_c up -d --force-recreate 2>&1 | tail -3
+npm_wait && pass "verdaccio answers again after the container was recreated" || fail "verdaccio did not come back"
+expect_eq "storage listing and state after the restart" "$(npm_x sh -c 'cd /verdaccio/storage && ls -A; ls data/is-number; cat .deployed-major' | tr '\n' ' ')" "$SNAP"
+[[ "$(npm_x sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$DB")" == "$SECRET" ]] && pass "the secret is unchanged" || fail "the secret changed on restart"
+expect_eq "mode after the restart" "$(npm_x stat -c '%a' "$DB")" 600
+echo "-- a secret of the wrong length (what 6.x allowed) is replaced, the rest is kept"
+npm_x sed -i 's/"secret":"[^"]*"/"secret":"short"/' "$DB"
+npm_c up -d --force-recreate 2>&1 | tail -3
+npm_wait && pass "verdaccio starts after a bad secret was found" || fail "verdaccio did not start with a bad secret"
+SECRET2=$(npm_x sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$DB")
+ci_mask "$SECRET2"
+expect_eq "replaced secret length" "${#SECRET2}" 32
+check "cached tarball survived" npm_x sh -c 'ls /verdaccio/storage/data/is-number/*.tgz'
+echo "-- no state file but storage present: treated as 6.x again, moved aside, nothing deleted"
+npm_x rm /verdaccio/storage/.deployed-major
+npm_c up -d --force-recreate 2>&1 | tail -3
+npm_wait && pass "verdaccio starts on the emptied storage" || fail "verdaccio did not start after the second move"
+expect_eq "backup dirs" "$(npm_x sh -c 'ls -d /verdaccio/storage/backup-6.x-* | wc -l')" 2
+check "first backup still holds the old package" npm_x sh -c 'test -s /verdaccio/storage/backup-6.x-*/data/old-pkg/marker'
+check "second backup holds the cached tarball" npm_x sh -c 'ls /verdaccio/storage/backup-6.x-*/data/is-number/*.tgz'
 endgroup
 group "4. monitoring stack"
 MD=/opt/monitoring

@@ -1,3 +1,5 @@
+# Verdaccio 7. The server secret is not a setting here: 7.x reads it only from data/.verdaccio-db.json in the storage and
+# accepts exactly 32 characters. The start script in docker-compose.yml creates it (mode 600) and moves older storage aside.
 storage: /verdaccio/storage/data
 plugins: /verdaccio/plugins
 
