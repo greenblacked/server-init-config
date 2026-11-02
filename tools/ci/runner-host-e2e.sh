@@ -30,7 +30,7 @@ NS=ci-meta
 cleanup() {
   local rc=$?
   set +e
-  rm -f "${TRUNC:-}"
+  rm -f "${TRUNC:-}" "${CB:-}" "${PB:-}"
   { docker ps -aq --filter label=ci-e2e=1 | xargs -r docker rm -f
     docker network rm ci-e2e-br
     docker compose -f /opt/npm-cache/docker-compose.yml down -v
@@ -375,8 +375,10 @@ echo "-- a helper container that cannot run must stop the upgrade, never skip th
 mkdir -p "$W/shim-fail"
 printf '#!/usr/bin/env bash\n[[ "$1" == run && " $* " == *"$SHIM_FAIL_ON"* ]] && { echo "docker: simulated failure of docker run (exit 125)" >&2; exit 125; }\nexec %s "$@"\n' "$(command -v docker)" > "$W/shim-fail/docker"
 chmod +x "$W/shim-fail/docker"
-cp "$MD/docker-compose.yml" "$W/compose-before.yml"
-cp "$MD/prometheus/prometheus.yml" "$W/prom-before.yml"
+# private copies for the "unchanged" checks below: root-only stack files, kept out of $W (uploaded, and unreadable to the upload step)
+CB=$(mktemp /tmp/ci-compose-before.XXXXXX); PB=$(mktemp /tmp/ci-prom-before.XXXXXX)
+cp "$MD/docker-compose.yml" "$CB"
+cp "$MD/prometheus/prometheus.yml" "$PB"
 rc=0; fb=$(SHIM_FAIL_ON="$ALPINE" PATH="$W/shim-fail:$PATH" bash runner/install/monitoring-backup.sh 2>&1) || rc=$?
 printf '%s\n' "$fb" | ci_redact > "$W/backup-fail-1.log"
 [[ "$rc" != 0 ]] && pass "helper image cannot run: monitoring-backup.sh exits non-zero (${rc})" || fail "monitoring-backup.sh exited 0 although its helper container cannot run: ${fb}"
@@ -397,8 +399,9 @@ SHIM_FAIL_ON=" run " PATH="$W/shim-fail:$PATH" bash runner/install/monitoring-ba
 rc=0; SHIM_FAIL_ON="$ALPINE" PATH="$W/shim-fail:$PATH" upd update_monitoring 2>&1 | ci_redact > "$W/update-fail.log" || rc=$?
 [[ "$rc" != 0 ]] && pass "update_monitoring stops when the Grafana backup cannot run" || fail "update_monitoring went on without a backup"
 grep -q 'Grafana data backup failed, nothing changed' "$W/update-fail.log" && pass "update_monitoring says the backup failed and nothing changed" || fail "update_monitoring did not report the failed backup: $(tail -3 "$W/update-fail.log")"
-cmp -s "$MD/docker-compose.yml" "$W/compose-before.yml" && pass "backup failed: the installed compose file is unchanged (still ${MON_OLD})" || fail "the compose file was changed although the backup failed"
-cmp -s "$MD/prometheus/prometheus.yml" "$W/prom-before.yml" && pass "backup failed: prometheus.yml is unchanged" || fail "prometheus.yml was synced although the backup failed"
+cmp -s "$MD/docker-compose.yml" "$CB" && pass "backup failed: the installed compose file is unchanged (still ${MON_OLD})" || fail "the compose file was changed although the backup failed"
+cmp -s "$MD/prometheus/prometheus.yml" "$PB" && pass "backup failed: prometheus.yml is unchanged" || fail "prometheus.yml was synced although the backup failed"
+rm -f "$CB" "$PB"
 expect_eq "backup failed: the old Grafana still runs" "$(grafana_version)" "$MON_OLD"
 [[ -z "$(ls -A /var/backups/monitoring 2>/dev/null)" ]] && pass "backup failed: no archive" || fail "an archive exists after the failed backup"
 
@@ -554,10 +557,12 @@ ci_mask "$SK2"
 echo "-- install over a leftover Grafana volume keeps the default encryption key"
 mcompose down >/dev/null 2>&1 || fail "docker compose down failed"
 rm -rf "$MD"
-if ci_run "$W/monitoring-3.log" 0 bash runner/install/monitoring.sh; then pass "monitoring.sh installs over a leftover Grafana volume"; else fail "monitoring.sh failed over a leftover volume (see monitoring-3.log)"; tail -15 "$W/monitoring-3.log"; fi
+# The public log hides every line that names a secret variable, so the restore-the-key note is checked in the raw output, then deleted.
+if CI_KEEP_RAW=1 ci_run "$W/monitoring-3.log" 0 bash runner/install/monitoring.sh; then pass "monitoring.sh installs over a leftover Grafana volume"; else fail "monitoring.sh failed over a leftover volume (see monitoring-3.log)"; tail -15 "$W/monitoring-3.log"; fi
 grep -q '^GF_SECURITY_SECRET_KEY=' "$MD/.env" && fail "a new encryption key was generated for an existing volume" || pass "existing volume: no encryption key was added to .env"
 grep -q 'built-in default key' "$W/monitoring-3.log" && pass "the installer says the default key stays" || fail "no note about the default encryption key"
-grep -q "GF_SECURITY_SECRET_KEY line, put that same line back" "$W/monitoring-3.log" && pass "the installer says how to bring the earlier install's key back" || fail "no note about restoring the earlier GF_SECURITY_SECRET_KEY"
+grep -q "GF_SECURITY_SECRET_KEY line, put that same line back" "$CI_RAW" && pass "the installer says how to bring the earlier install's key back" || fail "no note about restoring the earlier GF_SECURITY_SECRET_KEY"
+rm -f "$CI_RAW"
 [[ -n "$(find /var/backups/monitoring -maxdepth 1 -name 'grafana-*.tar.gz' 2>/dev/null)" ]] && pass "the leftover volume was archived before the start" || fail "the leftover volume was not archived"
 mon_retry 60 grafana_ok && pass "Grafana is healthy on the leftover volume" || fail "Grafana is not healthy on the leftover volume"
 # an archive of data under the default key says so (the .env of this install has no key line)
