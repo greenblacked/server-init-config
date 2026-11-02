@@ -94,12 +94,12 @@ write_files:
 
       services:
         registry:
-          image: registry:2.8.3
+          image: registry:3.1.2
           restart: unless-stopped
           network_mode: host
           mem_limit: 128m
           volumes:
-            - ./config.yml:/etc/docker/registry/config.yml:ro
+            - ./config.yml:/etc/distribution/config.yml:ro
             - registry-data:/var/lib/registry
 
       volumes:

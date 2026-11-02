@@ -2,7 +2,7 @@ name: logging
 
 services:
   loki:
-    image: grafana/loki:3.7.7
+    image: grafana/loki:3.7.9
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -17,7 +17,7 @@ services:
   # The journal group is added by docker-compose.override.yml, which stack_ids (common/lib.sh) writes
   # only when its gid differs from the docker gid: compose rejects a group_add list with equal items.
   alloy:
-    image: grafana/alloy:v1.19.2
+    image: grafana/alloy:v1.21.3
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
