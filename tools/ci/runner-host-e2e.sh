@@ -332,7 +332,9 @@ echo "-- Prometheus"
 mon_retry 30 curl -fsS --max-time 5 "${PURL}/-/ready" && pass "Prometheus /-/ready answers 200" || fail "Prometheus is not ready"
 mon_retry 40 prom_is node 1 \
   && pass "Prometheus scrapes node-exporter (up{job=\"node\"} == 1)" || fail "node-exporter is not scraped: up{job=\"node\"} = $(prom_up node)"
-expect_eq "Prometheus scrapes itself" "$(prom_up prometheus)" 1
+# both targets are first scraped up to one scrape_interval (15 s) after start, so wait for each, not only for node
+mon_retry 40 prom_is prometheus 1 \
+  && pass "Prometheus scrapes itself (up{job=\"prometheus\"} == 1)" || fail "Prometheus does not scrape itself: up{job=\"prometheus\"} = $(prom_up prometheus)"
 expect_eq "no node target reports 0" "$(curl -fsS --data-urlencode 'query=up{job="node"} == 0' "${PURL}/api/v1/query" | jq -r '.data.result | length')" 0
 expect_eq "a job that does not exist has no series" "$(prom_up ci-no-such-job)" none
 mon_retry 20 up_via_grafana \
