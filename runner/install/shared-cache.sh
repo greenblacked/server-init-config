@@ -35,7 +35,7 @@ edit_with_backup "$CFG" add_shared_cache
 systemctl restart gitlab-runner
 sleep 3
 
-docker run --rm --user 1000:1000 -v "${HOST_DIR}:${MOUNT}:rw" alpine:3.20 \
+docker run --rm --user 1000:1000 -v "${HOST_DIR}:${MOUNT}:rw" "$HELPER_IMAGE" \
   sh -c "touch ${MOUNT}/npm/.probe && rm ${MOUNT}/npm/.probe && echo 'non-root write OK'" \
   || die "containers cannot write to ${HOST_DIR}"
 
