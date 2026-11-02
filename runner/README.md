@@ -271,6 +271,28 @@ Runner-specific; the general table is in the [main README](../README.md#troubles
 | No logs in Grafana | `health` shows whether Loki and Alloy are ready; `sudo docker compose -f /opt/logging/docker-compose.yml logs --tail 50 alloy`. |
 | `reboot` or `systemctl restart gitlab-runner` takes very long | After the weekly engine update has run once, the runner stops gracefully (`KillSignal=SIGQUIT`, no stop timeout): a reboot or restart waits until running jobs finish, bounded only by the GitLab job timeout. To force it now: `sudo systemctl kill -s SIGTERM gitlab-runner` (running jobs are lost). |
 | Verdaccio restart-loops | The `docker0` IP changed (`bip` in `daemon.json`). Rerun `runner/update.sh` or `setup.sh --npm-cache`. |
+| Verdaccio restart-loops after an upgrade | `sudo docker compose -f /opt/npm-cache/docker-compose.yml logs --tail 30`. The start script prints what it did (lines starting with `npm-cache:`); see [npm cache upgrade](#npm-cache-upgrade-and-rollback). |
+
+### npm cache upgrade and rollback
+
+Verdaccio 7 (`verdaccio/verdaccio:7.0.2`) replaced 6.1.2. The cache only holds copies of what npmjs serves, so the upgrade does not convert anything:
+
+- On every start a script from the compose file (`configs: start`) runs before Verdaccio. It records the deployed major version in `/verdaccio/storage/.deployed-major` inside the `npm-cache_verdaccio-storage` volume. If that file is missing but the storage is not empty, the storage counts as 6.x.
+- Storage of another major version is moved, not deleted, to `/verdaccio/storage/backup-6.x-<date>-<time>/` (same volume, so the move is instant and the data stays). Version 7 starts empty and fills again from npmjs on demand. The log line starts with `npm-cache:`. Rerunning changes nothing: with the state file at `7` it does not touch the storage. The backups use disk space; delete one yourself once you no longer need it.
+- Version 7 refuses to start unless the server secret is exactly 32 characters, and there is no setting or environment variable for it: it lives in `data/.verdaccio-db.json` in the storage. The script keeps a valid one and otherwise writes 32 hex characters (128 random bits) from `/dev/urandom` to that file, mode 600, owner uid 10001. It is generated once, stays across restarts and recreations, and is never printed or logged. Tokens stay valid only while it is unchanged; the cache uses none (no registration, anonymous reads).
+- `runner/update.sh` only syncs `docker-compose.yml` and `config.yaml` and recreates the container, so the script travels inside the compose file and the update upgrades existing servers the same way.
+
+Rollback, server, as `ops` (the old compose file is the pre-update copy in `/var/backups/server-init-config/<timestamp>/opt/npm-cache/`, or the file from the older repo commit with the `docker0` IP substituted; the new one would move the storage aside again):
+
+```bash
+sudo docker compose -f /opt/npm-cache/docker-compose.yml down
+sudo cp -a /var/backups/server-init-config/TIMESTAMP/opt/npm-cache/docker-compose.yml /opt/npm-cache/docker-compose.yml
+sudo docker run --rm -v npm-cache_verdaccio-storage:/s --entrypoint sh verdaccio/verdaccio:6.1.2 -c 'ls -d /s/backup-*'
+sudo docker run --rm -v npm-cache_verdaccio-storage:/s --entrypoint sh verdaccio/verdaccio:6.1.2 -c 'cd /s && mkdir undone-7.x && mv data htpasswd .deployed-major undone-7.x/; mv BACKUP/* . && rmdir BACKUP'
+sudo docker compose -f /opt/npm-cache/docker-compose.yml up -d
+```
+
+Replace `BACKUP` with the directory name from the `ls` (for example `backup-6.x-20261102-150730`). The 7.x storage is kept in `undone-7.x` (a missing `htpasswd` in the `mv` is harmless). Without the second `docker run`, 6.1.2 also starts on the storage that 7.x wrote (same layout, secret of 32 characters); it is only a cache. Do not run 6.x and 7.x on the same storage at the same time. `runner/update.sh` and `setup.sh --npm-cache` move to 7.x again, so keep the repository on the old commit while you stay on 6.x.
 
 <details>
 <summary>Reference</summary>

@@ -2,17 +2,64 @@ name: npm-cache
 
 services:
   verdaccio:
-    image: verdaccio/verdaccio:6.1.2
+    image: verdaccio/verdaccio:7.0.2
     restart: unless-stopped
     network_mode: host
     mem_limit: 256m
     # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
     # and exposes the cache (access: $all) on every interface. runner/install/npm-cache.sh and update.sh
     # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
-    command: ["verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
+    # npm-cache-start.sh (the config below) runs first and then execs verdaccio.
+    command: ["sh", "/usr/local/bin/npm-cache-start.sh", "verdaccio", "--config", "/verdaccio/conf/config.yaml", "--listen", "http://172.17.0.1:4873"]
+    configs:
+      - source: start
+        target: /usr/local/bin/npm-cache-start.sh
     volumes:
       - ./config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio-storage:/verdaccio/storage
+
+# Runs on every start, so it also covers update.sh, which only syncs this file and config.yaml. In "content:" a literal
+# dollar sign is written $$ (compose would interpolate a single one).
+configs:
+  start:
+    content: |
+      set -eu
+      S=/verdaccio/storage
+      DB=$$S/data/.verdaccio-db.json
+      STATE=$$S/.deployed-major
+      WANT=7
+      say() { echo "npm-cache: $$*" >&2; }
+      # live storage = everything except the state file and earlier backups
+      live() { for e in "$$S"/* "$$S"/.[!.]*; do [ -e "$$e" ] || continue; case $${e##*/} in backup-*|.deployed-major) ;; *) echo "$$e" ;; esac; done; }
+      have=$$(cat "$$STATE" 2>/dev/null || true)
+      if [ -z "$$have" ]; then
+        if [ -n "$$(live)" ]; then have=6; say "no $$STATE but storage exists: treating it as 6.x"; else have=none; fi
+      fi
+      if [ "$$have" != "$$WANT" ] && [ -n "$$(live)" ]; then
+        B=$$S/backup-$$have.x-$$(date +%Y%m%d-%H%M%S)
+        say "storage of $$have.x found, moving it to $$B (nothing is deleted; $$WANT.x starts empty and refills from npmjs)"
+        mkdir "$$B"
+        live | while IFS= read -r e; do mv "$$e" "$$B/"; done
+      fi
+      # 7.x refuses a server secret that is not exactly 32 characters (6.x accepted others), and has no config key or env var for it:
+      # it reads it from the storage database. Keep a valid one, otherwise write a new one from the kernel CSPRNG. Never printed.
+      mkdir -p "$$S/data"
+      cur=$$(sed -n 's/.*"secret":"\([^"]*\)".*/\1/p' "$$DB" 2>/dev/null || true)
+      if [ "$${#cur}" -ne 32 ]; then
+        new=$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        [ "$${#new}" -eq 32 ] || { say "cannot generate a secret"; exit 1; }
+        if [ -s "$$DB" ]; then
+          grep -q '"secret":"' "$$DB" || { say "$$DB has no secret field, not touching it"; exit 1; }
+          ( umask 077; sed "s/\"secret\":\"[^\"]*\"/\"secret\":\"$$new\"/" "$$DB" > "$$DB.new" )
+        else
+          ( umask 077; printf '{"list":[],"secret":"%s"}' "$$new" > "$$DB.new" )
+        fi
+        mv "$$DB.new" "$$DB"
+        say "wrote a new server secret to $$DB (32 characters, mode 600)"
+      fi
+      chmod 600 "$$DB"
+      [ "$$have" = "$$WANT" ] || printf '%s' "$$WANT" > "$$STATE"
+      exec "$$@"
 
 volumes:
   verdaccio-storage:

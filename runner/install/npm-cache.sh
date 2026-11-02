@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Verdaccio npm pull-through cache on the docker0 bridge IP, exposed to CI jobs via runner env.
 # If the cache is down, npm ci in jobs fails (npm has no automatic fallback).
+# Storage and the server secret are prepared by the container itself at every start (config "start" in the compose file):
+# storage of an older major is moved aside to backup-*, Verdaccio 7 needs a secret of exactly 32 characters.
 set -Eeuo pipefail
 # shellcheck source=../../common/lib.sh
 source "$(dirname "$0")/../../common/lib.sh"
@@ -31,6 +33,7 @@ docker compose pull -q
 docker compose up -d
 for _ in $(seq 1 20); do curl -fsS "${REG}-/ping" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "${REG}-/ping" >/dev/null || { docker compose logs --tail 30; die "verdaccio did not start"; }
+docker compose logs --no-log-prefix verdaccio 2>&1 | grep '^npm-cache:' || true
 
 exposed=$(ss -ltn | awk -v want="${BRIDGE_IP}:4873" '/:4873 / && $4 != want' | wc -l)
 [[ "$exposed" == "0" ]] || { ss -ltn | awk '/:4873 /'; die "port 4873 is not bound to ${BRIDGE_IP} only"; }
