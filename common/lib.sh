@@ -63,6 +63,20 @@ ensure_secure_path() {
   rm -f "$tmp"
 }
 
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
 ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
 
 require_runner_idle() {
