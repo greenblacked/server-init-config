@@ -46,7 +46,7 @@ if [[ ! -f "$DIR/.env" ]]; then
   else
     # The volume may have been written under a key of the earlier install; this run has no way to know it, so it adds none.
     log "NOTE: a Grafana data volume exists, so no new encryption key is generated and Grafana uses its built-in default key"
-    log "NOTE: if the earlier install's .env had a GF_SECURITY_SECRET_KEY line, put that same line back in ${DIR}/.env before Grafana starts (restore the earlier .env there before running this installer: an existing .env is kept); see runner/README.md, Grafana upgrade and rollback"
+    log "NOTE: if the earlier install's .env had a GF_SECURITY_SECRET_KEY line, put that same line back in ${DIR}/.env; Grafana is started by this run on the default key, so after adding it run: cd ${DIR} && sudo docker compose up -d grafana (recreates Grafana with the key). An existing .env is kept, so restoring the earlier .env before the installer also works; see runner/README.md, Grafana upgrade and rollback"
   fi
   (umask 077
    sed "s/^GF_SECURITY_ADMIN_PASSWORD=.*/GF_SECURITY_ADMIN_PASSWORD=${pw}/" "$REPO_ROOT/runner/stacks/monitoring/env.example" | grep -v '^#' > "$DIR/.env"
