@@ -27,10 +27,12 @@ in_ci || [[ "${ALLOW_LOCAL:-0}" == 1 ]] || die "this changes the Docker daemon c
 W="$CI_OUT/runner-host"; mkdir -p "$W"
 
 NS=ci-meta
+# never rm -f a value inherited through sudo -E
+CB='' PB='' TRUNC='' CI_RAW=''
 cleanup() {
   local rc=$?
   set +e
-  rm -f "${TRUNC:-}" "${CB:-}" "${PB:-}"
+  rm -f "${TRUNC:-}" "${CB:-}" "${PB:-}" "${CI_RAW:-}"
   { docker ps -aq --filter label=ci-e2e=1 | xargs -r docker rm -f
     docker network rm ci-e2e-br
     docker compose -f /opt/npm-cache/docker-compose.yml down -v
@@ -444,6 +446,7 @@ expect_eq "same major: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/new-co
 expect_eq "no backup of the compose file: nothing to keep" "$(gkeep "$W/new-compose.yml" "$W/none.yml")" ""
 expect_eq "new file on disk but the 12 container is what ran: restore allowed" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" 12.0.0)" ""
 expect_eq "new file on disk and no started container found (unknown): keep the installed major, the safe side" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" "")" 13.3.0
+expect_eq "ran tag is not numeric (latest): fall back to the installed file, keep" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" latest)" 13.3.0
 expect_eq "the 13 container ran: keep" "$(gkeep "$W/new-compose.yml" "$W/old-compose.yml" 13.3.0)" 13.3.0
 expect_eq "grafana_ran_tag reads the container that ran" "$(upd grafana_ran_tag)" "$GTAG"
 # grafana_ran_tag with a docker shim: containers that were created but never started give no answer (unknown, not "never ran")

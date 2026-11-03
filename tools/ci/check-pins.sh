@@ -26,4 +26,16 @@ for f in "${files[@]}"; do
   done < <(grep -nE '^[[:space:]]*(-[[:space:]]*)?(\{[[:space:]]*)?uses:' "$f" || true)
   if grep -qE '^permissions:' "$f"; then pass "${name} has a top-level permissions block"; else fail "${name} has no top-level 'permissions:' block"; fi
 done
+# The helper image (common/lib.sh HELPER_IMAGE) is spelled out in other tracked files too: none may carry a different alpine pin.
+# Only meaningful for the real tree (the default WORKFLOW_DIR); tests that point at a fixture directory skip it.
+if [[ "$dir" == "$CI_ROOT/.github/workflows" ]]; then
+  helper=$(sed -n 's/^HELPER_IMAGE="\(.*\)"$/\1/p' "$CI_ROOT/common/lib.sh")
+  [[ "$helper" =~ ^alpine:3\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || fail "common/lib.sh: HELPER_IMAGE is not an alpine:3.N@sha256:<64 hex> string"
+  bad=0
+  while IFS=: read -r file no found; do
+    [[ "$found" == "$helper" ]] && continue
+    fail "${file}:${no} alpine pin '${found}' differs from HELPER_IMAGE in common/lib.sh"; bad=1
+  done < <(cd "$CI_ROOT" && git ls-files -z | xargs -0 grep -noE 'alpine:3\.[0-9]+@sha256:[0-9a-f]+' -- 2>/dev/null || true)
+  (( bad == 0 )) && pass "every alpine pin in tracked files equals HELPER_IMAGE"
+fi
 finish
