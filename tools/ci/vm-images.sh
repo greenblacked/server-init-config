@@ -42,7 +42,10 @@ vm_catalogue() {
     alma10)
       VM_BASE=https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/
       VM_FILE=AlmaLinux-10-GenericCloud-latest.x86_64.qcow2
-      VM_SUMS=CHECKSUM VM_KIND=el10 VM_USERDATA=server/cloud-init/server-el10.yaml ;;
+      # Same cloud-init and EL10 kernel family as CentOS Stream 10, so the SeaBIOS reset loop after the deferred reboot of
+      # server-el10.yaml on Intel runners is a risk here too. The image is unified BIOS+UEFI (AlmaLinux cloud-images README and
+      # GENCLOUD_TEST.md: 1M BIOS-boot + 200M /boot/efi + 1G /boot), so UEFI is supported.
+      VM_SUMS=CHECKSUM VM_BOOT=uefi VM_KIND=el10 VM_USERDATA=server/cloud-init/server-el10.yaml ;;
     centos10)
       VM_BASE=https://cloud.centos.org/centos/10-stream/x86_64/images/
       VM_FILE=CentOS-Stream-GenericCloud-10-latest.x86_64.qcow2

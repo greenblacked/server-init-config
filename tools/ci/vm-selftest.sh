@@ -77,7 +77,7 @@ done
 vm_catalogue ubuntu2604; expect_eq "Ubuntu 26.04 uses the Debian file (README)" "$VM_USERDATA" server/cloud-init/server-debian.yaml
 grep -q 'server/cloud-init/server-debian.yaml' README.md && pass "README names server-debian.yaml for Ubuntu" || fail "README does not name server-debian.yaml"
 vm_catalogue rocky10; expect_eq "Rocky 10 boots with UEFI" "$VM_BOOT" uefi
-vm_catalogue alma10; expect_eq "Alma 10 boots with BIOS" "$VM_BOOT" bios
+vm_catalogue alma10; expect_eq "Alma 10 boots with UEFI (same SeaBIOS reset-loop risk as CentOS Stream 10)" "$VM_BOOT" uefi
 vm_catalogue centos10; expect_eq "CentOS Stream 10 boots with UEFI (reset loop after the deferred reboot under SeaBIOS)" "$VM_BOOT" uefi
 vm_catalogue debian13; expect_eq "Debian 13 boots with UEFI (it loops on GRUB under SeaBIOS)" "$VM_BOOT" uefi
 vm_catalogue runner-debian13; expect_eq "runner Debian 13 boots with UEFI" "$VM_BOOT" uefi
