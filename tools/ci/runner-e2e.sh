@@ -23,14 +23,8 @@ cleanup() {
 trap cleanup EXIT
 
 group "build and start ${IMAGE}"
-if sd_build "$IMAGE" "$TAG" > "$W/build.log" 2>&1; then
-  tail -3 "$W/build.log"
-else
-  brc=$?
-  echo "image build failed (exit $brc), last 40 lines of the build log:"
-  tail -40 "$W/build.log"
-  exit "$brc"
-fi
+sd_build "$IMAGE" "$TAG" > "$W/build.log" 2>&1 && brc=0 || brc=$?
+sd_report_build "$IMAGE" "$brc" "$W/build.log" 3 || exit "$?"
 sd_run "$NAME" "$TAG"
 endgroup
 # the repo as `git archive HEAD` (runner needs runner/ and common/), like the bootstrap streams it
