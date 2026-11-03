@@ -31,11 +31,14 @@ done
 if [[ "$dir" == "$CI_ROOT/.github/workflows" ]]; then
   helper=$(sed -n 's/^HELPER_IMAGE="\(.*\)"$/\1/p' "$CI_ROOT/common/lib.sh")
   [[ "$helper" =~ ^alpine:3\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || fail "common/lib.sh: HELPER_IMAGE is not an alpine:3.N@sha256:<64 hex> string"
-  bad=0
+  bad=0 seen=0
   while IFS=: read -r file no found; do
+    seen=$((seen + 1))
     [[ "$found" == "$helper" ]] && continue
     fail "${file}:${no} alpine pin '${found}' differs from HELPER_IMAGE in common/lib.sh"; bad=1
   done < <(cd "$CI_ROOT" && git ls-files -z | xargs -0 grep -noE 'alpine:3\.[0-9]+@sha256:[0-9a-f]+' -- 2>/dev/null || true)
-  (( bad == 0 )) && pass "every alpine pin in tracked files equals HELPER_IMAGE"
+  # common/lib.sh carries a pin itself: none found means the file listing failed (no .git, git "dubious ownership"), not that all is well.
+  if (( seen == 0 )); then fail "no alpine pin found in tracked files (git ls-files failed or returned nothing); common/lib.sh alone must match"
+  elif (( bad == 0 )); then pass "every alpine pin in tracked files equals HELPER_IMAGE (${seen} checked)"; fi
 fi
 finish

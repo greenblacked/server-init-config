@@ -11272,7 +11272,7 @@ restore_files() {
   local f dst keep="" ran how="has already run" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
   ran=$(grafana_ran_tag)
-  [[ -n "$ran" ]] || how="may have run (no started Grafana container on record)"
+  [[ "${ran%%.*}" =~ ^[0-9]+$ ]] || how="may have run (no started Grafana container with a version tag on record)"
   keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$ran")
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
@@ -16472,7 +16472,7 @@ restore_files() {
   local f dst keep="" ran how="has already run" mon=/opt/monitoring/docker-compose.yml
   [[ -d "$BACKUP_DIR" ]] || return 0
   ran=$(grafana_ran_tag)
-  [[ -n "$ran" ]] || how="may have run (no started Grafana container on record)"
+  [[ "${ran%%.*}" =~ ^[0-9]+$ ]] || how="may have run (no started Grafana container with a version tag on record)"
   keep=$(keep_grafana_major "$mon" "${BACKUP_DIR}${mon}" "$ran")
   log "restoring files from ${BACKUP_DIR}"
   while IFS= read -r -d '' f; do
