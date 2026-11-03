@@ -46,7 +46,10 @@ vm_catalogue() {
     centos10)
       VM_BASE=https://cloud.centos.org/centos/10-stream/x86_64/images/
       VM_FILE=CentOS-Stream-GenericCloud-10-latest.x86_64.qcow2
-      VM_SUMS="<image>.SHA256SUM" VM_SINGLE=1 VM_KIND=el10 VM_USERDATA=server/cloud-init/server-el10.yaml ;;
+      # Under SeaBIOS the guest reset itself in a loop right after the deferred reboot of server-el10.yaml (serial: "reboot:
+      # machine restart", then silence, ~1600 "CPU Reset" lines) on Intel runners, as Debian 13 and Rocky 10 do. The image is
+      # hybrid (biosboot partition and a 200 MiB ESP, see CentOS-Stream-10-kvm-x86_64.ks), so UEFI is supported.
+      VM_SUMS="<image>.SHA256SUM" VM_SINGLE=1 VM_BOOT=uefi VM_KIND=el10 VM_USERDATA=server/cloud-init/server-el10.yaml ;;
     fedora44)
       # No "latest" name: the releases/44 directory holds one build, e.g. Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
       # with Fedora-Cloud-44-1.7-x86_64-CHECKSUM beside it.
