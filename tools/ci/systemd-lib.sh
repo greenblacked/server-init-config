@@ -21,12 +21,14 @@ sd_family() {
 # and a container has no cloud-init run.
 sd_build() {
   local image="$1" tag="$2" fam dir
-  fam=$(sd_family "$image"); dir=$(mktemp -d)
-  # The package install is the only step that talks to mirrors, and a mirror hiccup (seen on almalinux:10 arm64, twice) used
-  # to turn the whole run red. sd-retry runs "refresh metadata && install" up to 3 times (sleeps 5 s, 15 s), keeps the
-  # package manager's output and returns the last attempt's exit status. The package managers' own retries (apt
-  # Acquire::Retries, dnf retries/timeout) cover single file downloads; the loop covers metadata and mirror failures.
-  # zypper has no retry switch on the command line (zypp.conf download.max_silent_tries defaults to 5), so it relies on the loop.
+  fam=$(sd_family "$image")
+  dir=$(mktemp -d) || return 1
+  # The package install talks to mirrors, and a mirror hiccup (seen on almalinux:10 arm64, twice) used to turn the whole
+  # run red. sd-retry runs "refresh metadata && install" up to 3 times (sleeps 5 s, 15 s, so at most 20 s of sleeping),
+  # keeps the package manager's output and returns the last attempt's exit status. Single file downloads are already
+  # retried by the package managers (apt Acquire::Retries defaults to 3, dnf4/dnf5 retries=10 timeout=30); the loop
+  # covers metadata and mirror failures. zypper has no retry switch on the command line (zypp.conf
+  # download.max_silent_tries defaults to 5), so it relies on the loop.
   cat > "$dir/sd-retry" <<'RETRY'
 #!/bin/sh
 # usage: sd-retry REFRESH_CMD INSTALL_CMD
@@ -46,7 +48,7 @@ RETRY
 FROM ${image}
 ENV DEBIAN_FRONTEND=noninteractive
 COPY sd-retry /tmp/sd-retry
-RUN sh /tmp/sd-retry "apt-get -o Acquire::Retries=3 update -q" "apt-get -o Acquire::Retries=3 install -y -q --no-install-recommends systemd systemd-sysv dbus openssh-server sudo iproute2 procps curl ca-certificates tar gzip findutils cron kmod" \\
+RUN sh /tmp/sd-retry "apt-get update -q --error-on=any" "apt-get install -y -q --no-install-recommends systemd systemd-sysv dbus openssh-server sudo iproute2 procps curl ca-certificates tar gzip findutils cron kmod" \\
  && rm -f /tmp/sd-retry && rm -rf /var/lib/apt/lists/* && ssh-keygen -A && systemctl enable ssh
 DOCKER
     zypper) cat > "$dir/Dockerfile" <<DOCKER ;;
@@ -58,7 +60,7 @@ DOCKER
     dnf) cat > "$dir/Dockerfile" <<DOCKER ;;
 FROM ${image}
 COPY sd-retry /tmp/sd-retry
-RUN sh /tmp/sd-retry "dnf clean metadata" "dnf -y --setopt=retries=5 --setopt=timeout=30 install --setopt=install_weak_deps=False systemd openssh-server sudo iproute procps-ng ca-certificates tar gzip findutils diffutils kmod" \\
+RUN sh /tmp/sd-retry "dnf clean metadata" "dnf -y install --setopt=install_weak_deps=False systemd openssh-server sudo iproute procps-ng ca-certificates tar gzip findutils diffutils kmod" \\
  && rm -f /tmp/sd-retry && dnf clean all && ssh-keygen -A && systemctl enable sshd
 DOCKER
   esac
@@ -68,14 +70,38 @@ RUN printf '#!/bin/sh\n[ "$1" = status ] && echo "status: done"\nexit 0\n' > /us
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/lib/systemd/systemd"]
 DOCKER
-  # One more try of the whole build covers a base-image pull hiccup. Layers before the failing step are cached, so a
-  # genuine error costs one extra run of the install step only (3 quick attempts, ~20 s of sleeps) before it still fails.
-  docker build -t "$tag" "$dir" || {
-    log "docker build failed; retrying once in 10 s (cached layers are reused)"
-    sleep 10
-    docker build -t "$tag" "$dir" || { rm -rf "$dir"; return 1; }
-  }
+  # The base-image pull is the other network step. It is retried on its own (sleeps 5 s, 15 s: at most 20 s) so that
+  # the build runs once and a real install error fails once instead of being repeated. The pull retry lines go to
+  # stdout, i.e. into the build log the caller captures (see sd_report_build).
+  local d
+  for d in 5 15 0; do
+    docker pull -q "$image" >/dev/null && break
+    if [[ "$d" = 0 ]]; then rm -rf "$dir"; return 1; fi
+    log "pull of ${image} failed; retrying in ${d}s"
+    sleep "$d"
+  done
+  docker build -t "$tag" "$dir" || { rm -rf "$dir"; return 1; }
   rm -rf "$dir"
+}
+
+# sd_report_build IMAGE RC LOG TAIL_LINES: call after `sd_build ... > LOG 2>&1` with its exit status.
+# Failure: the whole log in a folded group (the root cause is rarely in the last lines), then a one-line summary.
+# Success: the last TAIL_LINES lines, and a warning when the build needed a retry (pull or install) so a flaky mirror
+# shows up in the job summary instead of staying hidden behind a green job. Returns RC.
+sd_report_build() {
+  local image="$1" rc="$2" log_file="$3" lines="$4"
+  if [[ "$rc" -ne 0 ]]; then
+    endgroup
+    group "full image build log (${image})"
+    cat "$log_file"
+    endgroup
+    echo "::error::image build for ${image} failed (exit ${rc}); full log above"
+    return "$rc"
+  fi
+  tail -n "$lines" "$log_file"
+  if grep -qE 'sd-retry: attempt|pull of .* failed; retrying' "$log_file"; then
+    if in_ci; then echo "::warning::image build for ${image} needed retries"; else log "WARN: image build for ${image} needed retries"; fi
+  fi
 }
 
 # sd_relax_host_apparmor: the Ubuntu 24.04 runner host loads an AppArmor profile "unix-chkpwd" that attaches by path to
