@@ -159,7 +159,7 @@ Everything listens on `127.0.0.1`. Tunnel from your laptop (any directory), then
 ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ops@SERVER_IP
 ```
 
-The Grafana password (server, as `ops`, any directory):
+The Grafana password (server, as `ops`, any directory). In tmux the printed password stays in the pane history (plain `clear` keeps it): run it in a throwaway window (`tmux new-window`, then `exit`) or follow with `clear && tmux clear-history`, and clear your laptop terminal's scrollback:
 
 ```bash
 sudo grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env

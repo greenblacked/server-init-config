@@ -14,10 +14,11 @@ Changes on the host:
 | Grafana `mem_limit` | `256m` | `512m` |
 | Grafana data (`monitoring_grafana-data`, SQLite) | Grafana 12 schema | migrated forward on the first start; dashboards and folders move into Grafana 13 unified storage |
 | `/var/backups/monitoring/` | - | one new archive `grafana-12.0.0-<date>.tar.gz` |
+| npm cache (only when `/opt/npm-cache` exists) | `verdaccio/verdaccio:6.1.2` | `verdaccio/verdaccio:7.0.2`; the old storage is moved aside inside its volume, the cache refills from npmjs |
 
 Does not change: Prometheus (`v3.15.1`) and node-exporter (`v1.12.1`) images and data, the provisioned datasource and dashboard files, `/opt/monitoring/.env` (except `MON_UID` and `MON_GID`, which are already there), the Caddy override if present, secrets, `config.toml`, the runner registration, `daemon.json`, SSH.
 
-This holds if the host's current checkout is the commit just before the Grafana bump (`008905a`). A host on an older checkout gets every other difference too (for example the Verdaccio 7 move of the npm cache, see the README section "npm cache upgrade and rollback"). The dry run in step 3.11 lists everything; read that list, do not assume.
+The Grafana rows hold if the host's current checkout is `3635bc2`, the commit just before the Grafana bump (`008905a`). The Verdaccio 7 upgrade (`2b48300`) landed after the bump, so every host coming from before the bump that has `/opt/npm-cache` gets the npm-cache change in the same `update.sh` run: the old Verdaccio 6 storage is moved aside (not deleted) and the cache starts empty. Read the README section ["npm cache upgrade and rollback"](../README.md#npm-cache-upgrade-and-rollback) before the window; expect `npm-cache` in the `would update:` list of step 3.11 on such a host. A host on an older checkout than `3635bc2` gets every other difference too. The dry run in step 3.11 lists everything; read that list, do not assume.
 
 Done means: `/api/health` says `13.3.0` with `database: ok`, the container is not OOM-killed, the Prometheus datasource is healthy, the provisioned dashboard and every hand-made dashboard and folder from before are present, `health -q` has no FAIL.
 
@@ -29,11 +30,12 @@ Done means: `/api/health` says `13.3.0` with `database: ok`, the container is no
 - Between the end of the archive and the recreate, `monitoring-backup.sh` starts the old 12.0.0 container again. Edits made in that short gap are also not in the archive.
 - The archive contains `grafana.db`. With Grafana's built-in default secret key (no `GF_SECURITY_SECRET_KEY` in `.env`) the data source credentials in it are decryptable by anyone who gets the file. It is root-only, mode 0600: keep it on the host, do not copy it off.
 - `update.sh` also syncs host tools, logging and the caches in the same run. Unrelated diffs ride along; the dry run shows them.
+- The weekly cleanup and the disk guard run `docker image prune -af --filter until=...`, which removes every image no container uses (the filter looks at the image's creation date, not at when it was pulled). After the upgrade the Grafana 12.0.0 image and the helper image used by the backup and the restore are unused and can disappear, so a rollback may need a fresh pull from Docker Hub. Rollback step 0 pulls them first; for the timers see 3.12.
 - A Grafana that is unhealthy after the update is only a `WARN` in `update.sh` and does not change its exit code. Always run the checks in step 6.
 
 ## 3. Pre-checks
 
-Run them at least a day before the window, except 3.9 to 3.11, which belong right before it. Work in `tmux` (installed by the init) so a dropped SSH session cannot kill `update.sh` midway:
+Run them at least a day before the window, except 3.9 to 3.12, which belong right before it. Work in `tmux` (installed by the init) so a dropped SSH session cannot kill `update.sh` midway:
 
 ```bash
 tmux new -A -s grafana13
@@ -41,7 +43,7 @@ tmux new -A -s grafana13
 
 ### 3.1 Helper for the Grafana API (re-paste after a reconnect)
 
-Reads the admin credentials from the root-only `.env` inside `sudo bash` and hands them to `curl -K` through a pipe, so the password is never in an argument list, the shell history or the output.
+Reads the admin credentials from the root-only `.env` inside `sudo bash` and hands them to `curl -K` through a pipe, so the password is never in an argument list, the shell history or the output. It assumes the password the installer generated (letters and digits only); a hand-set password containing `"` or `\` would need escaping in the `user = ...` line that `curl -K` reads.
 
 ```bash
 gapi() { sudo bash -c 'u=$(grep "^GF_SECURITY_ADMIN_USER=" /opt/monitoring/.env | cut -d= -f2-); p=$(grep "^GF_SECURITY_ADMIN_PASSWORD=" /opt/monitoring/.env | cut -d= -f2-); curl -fsS --max-time 20 -K <(printf "user = \"%s:%s\"\n" "$u" "$p") "$@"' _ "$@"; }
@@ -120,8 +122,10 @@ gapi 'http://127.0.0.1:3000/api/search?type=dash-db' | jq -r '.[] | [.uid, .titl
 ```
 
 ```bash
-gapi http://127.0.0.1:3000/api/folders | jq -r '.[] | [.uid, .title] | @tsv' | sort > ~/grafana-folders-before.tsv; wc -l < ~/grafana-folders-before.tsv
+gapi 'http://127.0.0.1:3000/api/search?type=dash-folder' | jq -r '.[] | [.uid, .title, (.folderTitle // "-")] | @tsv' | sort > ~/grafana-folders-before.tsv; wc -l < ~/grafana-folders-before.tsv
 ```
+
+The folder list comes from the search API instead of `/api/folders`, so nested folders are included too (the third column is the parent folder, `-` at the top level). This is from Grafana's API behaviour, not verified against its documentation here; if the list looks short compared with what you see in the UI, check the UI.
 
 ```bash
 gapi http://127.0.0.1:3000/api/datasources | jq -r '.[] | [.uid, .type, .name] | @tsv' | sort > ~/grafana-datasources-before.tsv; cat ~/grafana-datasources-before.tsv
@@ -174,12 +178,20 @@ sudo bash -c 'if [ -d /root/server-init-config/.git ]; then git -C /root/server-
 With a git clone expect empty status output and the short hash: write that hash down as `NOTED_COMMIT`. With an archive copy there is no hash on the server: take `NOTED_COMMIT` from the laptop (the `copying <hash>` line of the last bootstrap, or the last commit the host was updated from) and keep an exact copy of the current tree, which makes the repo rollback independent of the laptop:
 
 ```bash
-sudo cp -a /root/server-init-config /root/server-init-config.pre-grafana13
+sudo bash -c 'test ! -e /root/server-init-config.pre-grafana13 && cp -a /root/server-init-config /root/server-init-config.pre-grafana13'
 ```
+
+The guard matters: `cp -a` onto a directory that exists would nest the tree inside it, and an earlier copy may be the only good one. If the command prints nothing and returns at once, the copy already exists (an earlier attempt). Do not overwrite it blindly. Compare it with the current tree:
+
+```bash
+sudo diff -rq /root/server-init-config /root/server-init-config.pre-grafana13 && echo "copy identical to the current tree"
+```
+
+Identical: nothing to do. Different, and the current tree is still the one the host runs on (nothing was copied to the server yet): move the old copy aside with `sudo mv /root/server-init-config.pre-grafana13 /root/server-init-config.pre-grafana13.old`, then run the guarded `cp` again. Different, and the current tree is already a newer one: keep the existing copy, it is the one to go back to.
 
 ### 3.10 Copy the new repo state to the server
 
-Laptop, repo root, on the commit you intend to deploy. `bootstrap.sh` refuses a dirty tree (`--allow-dirty` overrides) and copies `HEAD`:
+Laptop, repo root, on the commit you intend to deploy. The copy takes `HEAD`, not your uncommitted edits, so the tree must be clean:
 
 ```bash
 git status --porcelain --untracked-files=no
@@ -189,13 +201,21 @@ git status --porcelain --untracked-files=no
 git rev-parse --short HEAD
 ```
 
-The first prints nothing; note the second. Then (laptop, repo root; `--user ops` because root SSH is closed on a locked host, add `--port` if SSH is not on 22; rerunning is safe, installed components are skipped):
+The first prints nothing; note the second.
+
+Do not rerun `runner/bootstrap.sh` for this. It is not copy-only: after the copy it runs `runner/setup.sh` for the components (firewall, registry-cache, monitoring, logging, register, and job-limits, npm-cache and shared-cache when a runner is registered; the `--no-*` flags only drop some of them) and installs every one that is missing on the host, `register` included, which asks for a runner token. Only installed components are skipped, and `bootstrap.sh` refreshes none of them. The block below is the copy step of `bootstrap.sh` alone (`copy_repo` in `runner/bootstrap.sh`: the same `git archive` of `HEAD` without `.git`, `tar.umask=0022`, `install -d -m 0700`, extraction next to the target, then an atomic swap). Laptop, repo root (`ops` because root SSH is closed on a locked host; add `-p PORT` to `ssh` if SSH is not on 22):
 
 ```bash
-runner/bootstrap.sh SERVER_IP --user ops
+git -c tar.umask=0022 archive --format=tar HEAD | ssh -o BatchMode=yes ops@SERVER_IP 'sudo -n sh -c "set -e; rm -rf /root/server-init-config.new /root/server-init-config.old; install -d -m 0700 /root/server-init-config.new; tar -x -C /root/server-init-config.new; if [ -e /root/server-init-config ]; then mv /root/server-init-config /root/server-init-config.old; fi; mv /root/server-init-config.new /root/server-init-config; rm -rf /root/server-init-config.old"'
 ```
 
-On a host that runs a git clone instead, bring the clone to the intended commit yourself and skip `bootstrap.sh`; do not use `update.sh --pull` (README: this setup has no server-side credential).
+`runner/bootstrap.sh --dry-run SERVER_IP --user ops` changes nothing and prints the line `bootstrap.sh` would use for the copy, if you want to compare. Check the copy arrived:
+
+```bash
+sudo test -f /root/server-init-config/runner/setup.sh && echo "copy ok"
+```
+
+On a host that runs a git clone instead, bring the clone to the intended commit yourself and skip the copy; do not use `update.sh --pull` (README: this setup has no server-side credential).
 
 Server: confirm the copy has the intended tag, and that the installed compose file differs from it only by what section 1 lists:
 
@@ -209,10 +229,14 @@ sudo diff /opt/monitoring/docker-compose.yml /root/server-init-config/runner/sta
 
 Expect `image: grafana/grafana:13.3.0` from the first. The diff (exit 1) should show only the Grafana image line and the `mem_limit` line with the comment above it. `update.sh` overwrites the installed compose file, so any other local edit on the host shows up here and would be lost: decide about it now.
 
-Pull the new image before the window, so a registry problem cannot hit you after the archive was taken:
+Pull the new image, and the pinned helper image that the backup (and the restore) runs in, shortly before the window. This makes a registry problem less likely after the archive was taken, not impossible: `update.sh` still runs `docker compose pull -q`, which contacts the registry again, and a failure there aborts the run through the ERR trap (section 5). Pull close to the window and away from the timers of 3.12, because the cleanup removes unused images:
 
 ```bash
 sudo docker pull grafana/grafana:13.3.0
+```
+
+```bash
+sudo docker pull alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
 ```
 
 ### 3.11 Dry run
@@ -230,11 +254,27 @@ Not entirely passive: it takes the update lock, runs the Compose version check a
   - monitoring/docker-compose.yml
 ```
 
-The `would update:` list must contain `monitoring/docker-compose.yml` and nothing you cannot explain. If the backup line says `no backup needed`, the installed compose is already on Grafana 13 or the repo copy is not the intended one: stop. `ERROR:` anywhere: stop and fix. Expect `exit=0`.
+The `would update:` list must contain `monitoring/docker-compose.yml` and nothing you cannot explain. On a host that has `/opt/npm-cache` and comes from before the bump, expect `npm-cache` as well: Verdaccio 7 landed after the Grafana bump and moves the old npm storage aside in the same run (section 1; README, "npm cache upgrade and rollback"). If the backup line says `no backup needed`, the installed compose is already on Grafana 13 or the repo copy is not the intended one: stop. Also stop on `WARN: the Grafana backup check failed (dry run only, nothing changed)`: the backup could not even be checked, and the real run is likely to stop at the backup. `ERROR:` anywhere: stop and fix. Expect `exit=0`.
+
+### 3.12 Timers that touch Docker
+
+Choose the window away from these timers, in the server's local time (units in `runner/systemd/`):
+
+- weekly cleanup, Monday 03:30 plus up to 10 minutes random delay; it runs `docker image prune -af --filter until=...` and the other prunes;
+- disk guard, every 30 minutes from 10 minutes after boot; it runs the same cleanup with 1-day retention when `/` is at 85% or more;
+- engine update (Docker CE and GitLab Runner), Sunday 04:30 plus up to 30 minutes random delay; when no job runs it stops the runner and restarts Docker.
+
+The weekly timers are `Persistent=true`, so one that was missed (server off) runs shortly after the next boot. A prune can remove the images you just pulled; a Docker restart in the middle of the backup or the first start is worse. Look at the next run times:
+
+```bash
+systemctl list-timers 'runner-*' --no-pager
+```
+
+Also keep the disk below the guard threshold (3.3), otherwise the cleanup starts by itself in the window.
 
 ## 4. Optional staging stop at 12.4.13
 
-The README states that the Grafana 13.0 upgrade notes recommend the latest 12.x minor as a stop, and that this repo did not stage it (small database, CI upgrades 12.0.0 straight to the repo tag with a folder and a dashboard). That recommendation was not verified when this runbook was written (grafana.com could not be reached; third-party summaries suggested no mandatory stop). Before the change, read https://grafana.com/docs/grafana/latest/upgrade-guide/upgrade-v13.0/ and decide. If it recommends the stop, or the host holds much hand-made content, do this first, on its own day if you like (README, "Grafana upgrade and rollback").
+The README states that the Grafana 13.0 upgrade notes recommend the latest 12.x minor as a stop, and that this repo did not stage it (small database, CI upgrades 12.0.0 straight to the repo tag with a folder and a dashboard). That recommendation was not verified when this runbook was written (grafana.com could not be reached; third-party summaries suggested no mandatory stop), and neither was that `12.4.13` is the latest 12.x release. Before the change, read https://grafana.com/docs/grafana/latest/upgrade-guide/upgrade-v13.0/ and decide. If it recommends the stop, or the host holds much hand-made content, do this first, on its own day if you like (README, "Grafana upgrade and rollback").
 
 A minor move inside 12 triggers no archive (the backup runs only when the major changes), so take one by hand first. `--force` backs up although the major is unchanged; the archive is named after the installed version (`grafana-12.0.0-<date>.tar.gz`):
 
@@ -288,7 +328,7 @@ Stop conditions, and what to do:
 | `monitoring: prometheus not ready, files restored` | `update.sh` restored the files itself, exit 1 | see section 7 |
 | `WARN: grafana did not report healthy yet` | not an error exit; migration may still be running or failed | step 6, and the log check there |
 
-Exit codes of `update.sh`: `0` everything done; `3` a step was skipped because CI jobs were running (the summary line `SKIPPED (rerun when idle): ...` names it; Grafana is done regardless); `1` an error (`ERROR: ...` from a check, or the `ERROR at line N` trap message that points to `--rollback`). The script does not flip to non-zero because Grafana is unhealthy.
+Exit codes of `update.sh`: `0` everything done; `3` a step was skipped because CI jobs were running (the summary line `SKIPPED (rerun when idle): ...` names it; Grafana is done regardless); `1` an error from a check (`ERROR: ...`, printed by `die`, which exits 1); the `ERROR at line N` trap message is different: it comes with the exit status of the command that failed, non-zero but not always 1. The script does not flip to non-zero because Grafana is unhealthy.
 
 Record the archive name and check it right away:
 
@@ -349,7 +389,7 @@ gapi 'http://127.0.0.1:3000/api/search?type=dash-db' | jq -r '.[] | [.uid, .titl
 ```
 
 ```bash
-gapi http://127.0.0.1:3000/api/folders | jq -r '.[] | [.uid, .title] | @tsv' | sort | diff ~/grafana-folders-before.tsv - && echo "folders identical"
+gapi 'http://127.0.0.1:3000/api/search?type=dash-folder' | jq -r '.[] | [.uid, .title, (.folderTitle // "-")] | @tsv' | sort | diff ~/grafana-folders-before.tsv - && echo "folders identical"
 ```
 
 ```bash
@@ -379,14 +419,26 @@ The second is narrower (Grafana's logfmt `level=` field). Anything about a faile
 Login through the SSH tunnel (README, "Grafana and logs"). Laptop, any directory, leave it running, then open `http://localhost:3000`, user `admin`:
 
 ```bash
-ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ops@SERVER_IP
+ssh -N -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:9090:127.0.0.1:9090 ops@SERVER_IP
 ```
 
-The password, if you need it (this prints it to your terminal; clear the scrollback afterwards):
+The `127.0.0.1:` before each local port keeps the tunnel on the laptop's loopback, whatever `GatewayPorts` says in the client config.
+
+The password, if you need it. This prints it, and in tmux it stays in the pane history: plain `clear` does not remove it. Read it in a throwaway tmux window, which takes its history with it when it closes:
+
+```bash
+tmux new-window
+```
 
 ```bash
 sudo grep GF_SECURITY_ADMIN_PASSWORD /opt/monitoring/.env
 ```
+
+```bash
+exit
+```
+
+`exit` closes the throwaway window (you are back in the window you came from). If you ran the `grep` in the main window instead, afterwards run `clear && tmux clear-history`. Also clear the scrollback of the terminal on your laptop, where the output was shown too.
 
 Log in, open Dashboards, check the runner dashboard and a hand-made one, open Connections, Data sources, Prometheus, "Save & test". Without an HTTPS domain Grafana listens on `127.0.0.1` only.
 
@@ -400,21 +452,66 @@ Roll back (restore the archive) when, after the migration had its time:
 
 Fix forward instead when Grafana is healthy on 13.3.0 and the data is complete: UI differences, a single panel to repair, a transient `database is locked` that goes away after one restart, or only the `WARN` because the migration was still running. Set a time limit before the window (for example 30 minutes after the start of the migration), and decide by the criteria, not by the clock alone. Every minute on 13 adds edits that a rollback throws away.
 
-`runner/update.sh --rollback` alone does not downgrade Grafana once 13 has run. It restores the repo-managed files from the newest `/var/backups/server-init-config/<timestamp>/` and recreates the stacks (Grafana restarts, on 13), but it keeps the installed Grafana 13 compose file (image and 512m limit) and says so in a `WARN:` line, because the old Grafana cannot read migrated data. Grafana's data comes back only from the archive. Use `--rollback` only for the other files (and when Grafana 13 never started, in which case it also puts the old compose file back); check first that the newest backup directory is the one of your run:
+`runner/update.sh --rollback` alone does not downgrade Grafana once 13 has run. It restores the repo-managed files from the newest `/var/backups/server-init-config/<timestamp>/` and recreates the stacks (Grafana restarts, on 13), but with the current (13) tree it keeps the installed Grafana 13 compose file (image and 512m limit) and says so in a `WARN:` line, because the old Grafana cannot read migrated data. Grafana's data comes back only from the archive. Use `--rollback` only for the other files (and when Grafana 13 never started, in which case it also puts the old compose file back); check first that the newest backup directory is the one of your run:
 
 ```bash
 sudo ls -1t /var/backups/server-init-config | head -n 3
 ```
 
-The restore follows the README, "Grafana upgrade and rollback", in this order (commands are there, not repeated here, so they cannot drift):
+**Order matters: if you use `--rollback` at all, run it before step 1 below, with the current (13) tree on the server, never after it.** After step 1 the server tree is the `3635bc2` copy, and its `runner/install/update.sh` has no `keep_grafana_major` / `grafana_ran_tag` guard (added after the bump, in `9417213`). Laptop, repo root, to see it for yourself (prints `0`):
 
-1. Put the repo copy back to the commit you upgraded from, otherwise the next `update.sh` upgrades again. With the copy from 3.9: `sudo bash -c 'mv /root/server-init-config /root/server-init-config.grafana13 && mv /root/server-init-config.pre-grafana13 /root/server-init-config'`. With a git clone: `sudo git -C /root/server-init-config checkout --detach NOTED_COMMIT`. Or from the laptop: check out `NOTED_COMMIT` and rerun `runner/bootstrap.sh SERVER_IP --user ops`.
-2. List the archives, newest first (README): `sudo ls -1t /var/backups/monitoring`. Pick the one named after the old version, `FILE` = `grafana-12.0.0-<date>.tar.gz` from step 5.
-3. Verify it independently if you want certainty (the README command also does `tar -tzf` before it deletes anything): `sudo tar -tzf /var/backups/monitoring/FILE | grep -E '^(\./)?grafana\.db$'` prints `./grafana.db`.
-4. Restore: the first `sudo bash -c '...'` block of the README (stops Grafana, replaces the volume content with the archive).
-5. Start the old image and check: the second README block (sets `image: grafana/grafana:12.0.0`, `docker compose up -d grafana`, then `curl -fsS http://127.0.0.1:3000/api/health`). The curl can fail if it runs before Grafana listens; repeat the health loop of step 6. If you staged at 12.4.13 and want that version, use that tag in the `sed`.
+```bash
+git show 3635bc2:runner/install/update.sh | grep -c 'keep_grafana_major\|grafana_ran_tag'
+```
 
-Grafana 12.0.0 then runs with the `512m` limit of the 13 compose file until a normal `update.sh` run with the rolled-back repo copy; that is harmless.
+Its `--rollback` would put the 12.0.0 / 256m compose file back from the backup and force-recreate Grafana 12 on the migrated data. For the same reason its README has no "Grafana upgrade and rollback" section: take the restore commands from this page (inlined below, copied from the current `runner/README.md`) or from the README of the current repo on your laptop, not from the server's copy. `--rollback` also puts the older npm-cache compose file back, which starts Verdaccio 6.1.2 on the storage that 7.x wrote (README, "npm cache upgrade and rollback"); it is only a cache.
+
+**Step 0, before anything is stopped.** Pull the images the restore needs. The cleanup may have removed them after the upgrade (section 2), and a pull problem is better found while Grafana still runs:
+
+```bash
+sudo docker pull grafana/grafana:12.0.0
+```
+
+```bash
+sudo docker pull alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
+```
+
+Then, in this order:
+
+1. Put the repo copy back to the commit you upgraded from, otherwise the next `update.sh` upgrades again. With the copy from 3.9, guarded so that no tree is overwritten or lost:
+
+   ```bash
+   sudo bash -c 'test -d /root/server-init-config.pre-grafana13 && test ! -e /root/server-init-config.grafana13 && mv /root/server-init-config /root/server-init-config.grafana13 && mv /root/server-init-config.pre-grafana13 /root/server-init-config'
+   ```
+
+   If it does nothing (the `test` failed): `/root/server-init-config.pre-grafana13` missing means 3.9 was skipped or the host runs a git clone, so use the clone or the laptop route below; `/root/server-init-config.grafana13` already existing is the leftover of an earlier attempt, look at it with `sudo ls -ld /root/server-init-config.grafana13`, move it away with `sudo mv /root/server-init-config.grafana13 /root/server-init-config.grafana13.earlier` and run the command again. If it stops after the first `mv`, `/root/server-init-config` is missing: run `sudo mv /root/server-init-config.pre-grafana13 /root/server-init-config` by hand. With a git clone: `sudo git -C /root/server-init-config checkout --detach NOTED_COMMIT`. From the laptop: check out `NOTED_COMMIT` and run the copy block of 3.10 (not `runner/bootstrap.sh`, which would also run `setup.sh` components, see 3.10).
+2. List the archives, newest first. Pick the one named after the old version, `FILE` = `grafana-12.0.0-<date>.tar.gz` from step 5 of the upgrade:
+
+   ```bash
+   sudo ls -1t /var/backups/monitoring
+   ```
+
+3. Verify it independently if you want certainty (the restore command in step 4 also does `tar -tzf` before it deletes anything): it prints `./grafana.db`.
+
+   ```bash
+   sudo tar -tzf /var/backups/monitoring/FILE | grep -E '^(\./)?grafana\.db$'
+   ```
+
+4. Restore. Replace `FILE` with the archive from step 2. This replaces everything in the Grafana volume, but only after `tar -tzf` has read the whole archive, so a corrupt or truncated file stops the command before anything is deleted (copied exactly from `runner/README.md`, "Grafana upgrade and rollback", with its pinned helper image):
+
+   ```bash
+   sudo bash -c 'tar -tzf /var/backups/monitoring/FILE >/dev/null && cd /opt/monitoring && docker compose stop grafana && docker run --rm -i --network none -v monitoring_grafana-data:/v alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f sh -c "find /v -mindepth 1 -delete && tar -xzf - -C /v" < /var/backups/monitoring/FILE'
+   ```
+
+5. Start the old image and check (also copied from the README: sets `image: grafana/grafana:12.0.0`, starts Grafana, then asks `/api/health`):
+
+   ```bash
+   sudo bash -c 'cd /opt/monitoring && sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:12.0.0|" docker-compose.yml && docker compose up -d grafana && curl -fsS http://127.0.0.1:3000/api/health'
+   ```
+
+   `version` in the answer should be the old one. The `curl` can fail if it runs before Grafana listens; repeat the health loop of step 6. If you staged at 12.4.13 and want that version, use that tag in the `sed`.
+
+Grafana 12.0.0 then runs with the `512m` limit of the 13 compose file until a normal `update.sh` run with the rolled-back repo copy; that is harmless. That run also takes npm-cache back to Verdaccio 6.1.2 (README, "npm cache upgrade and rollback").
 
 Post-rollback validation:
 
@@ -428,7 +525,7 @@ A rollback makes no new archive. The 12.0.0 archive stays in `/var/backups/monit
 
 ## 8. Known issues and troubleshooting
 
-- **SQLite `database is locked` during the unified-storage migration.** Per the Grafana 13 upgrade guide the migration can be tuned with `[unified_storage]` settings `migration_cache_size_kb` and `migration_parquet_buffer`. Not verified here: confirm the names, meaning and sensible values in the upgrade guide and the Grafana configuration reference before using them. If they are right, they can be set as environment variables in `/opt/monitoring/.env`, using Grafana's `GF_<SECTION>_<KEY>` rule; `update.sh` does not rewrite that file (it only sets `MON_UID` and `MON_GID`). A migration that died half way leaves unknown state: restore the archive (section 7, steps 2 to 4), set the keys, then start the new image with `sudo bash -c 'cd /opt/monitoring && docker compose up -d grafana'` (the compose file still has 13.3.0).
+- **SQLite `database is locked` during the unified-storage migration.** Secondary summaries of the Grafana 13 upgrade mention that the migration can be tuned with `[unified_storage]` settings `migration_cache_size_kb` and `migration_parquet_buffer`. The official upgrade guide could not be read while writing this, so none of that is verified: confirm the names, meaning and sensible values in the upgrade guide and the Grafana configuration reference before using them. If they are right, they can be set as environment variables in `/opt/monitoring/.env`, using Grafana's `GF_<SECTION>_<KEY>` rule; `update.sh` does not rewrite that file (it only sets `MON_UID` and `MON_GID`). A migration that died half way leaves unknown state: restore the archive (section 7, steps 2 to 4), set the keys, then start the new image with `sudo bash -c 'cd /opt/monitoring && docker compose up -d grafana'` (the compose file still has 13.3.0).
 - **OOM-kill at 512m** (`OOMKilled` is `true`, or `RestartCount` grows, or the container restart-loops). Restore the archive (steps 2 to 4 of section 7; the README says the same), raise the limit, start the new image again. Temporary change of the Grafana `mem_limit` only (`1g` is an example, take what the host can spare next to the jobs; the sed range starts at the `grafana:` service, the last one in the file, so no other limit changes):
 
   ```bash
@@ -439,7 +536,7 @@ A rollback makes no new archive. The 12.0.0 archive stays in `/var/backups/monit
   sudo bash -c 'cd /opt/monitoring && docker compose up -d grafana'
   ```
 
-  The next `update.sh` run puts `512m` back and recreates Grafana. A lasting change belongs in the repo's `runner/stacks/monitoring/docker-compose.yml`, deployed through `bootstrap.sh` and `update.sh`. Do not use a `docker-compose.override.yml` for it: `grafana-domain.sh` writes that file for Caddy and overwrites it.
+  The next `update.sh` run puts `512m` back and recreates Grafana. A lasting change belongs in the repo's `runner/stacks/monitoring/docker-compose.yml`, copied to the server with the block of 3.10 and deployed with `update.sh`. Do not use a `docker-compose.override.yml` for it: `grafana-domain.sh` writes that file for Caddy and overwrites it.
 - **Grafana unhealthy after the update.** `update.sh` only prints `WARN: grafana did not report healthy yet` and exits 0 (or 3). `health` then shows `Grafana not healthy` and `update.sh` logs `health exit code 2`. Check `sudo docker logs --tail 100 monitoring-grafana-1` and `sudo docker inspect -f '{{.State.Status}} {{.State.OOMKilled}} {{.RestartCount}}' monitoring-grafana-1`. A migration that is still progressing is fine; give it a few minutes and repeat the health loop.
 - **`NOTE: ... built-in default encryption key`.** The host's `.env` has no `GF_SECURITY_SECRET_KEY`, so the credentials stored in `grafana.db` (and in the archive) are encrypted with Grafana's public default key: whoever gets the archive can decrypt them. Not an error. Keep the archive on the host; do not add a key to an install that has data (README).
 
@@ -461,9 +558,10 @@ Repo files read for this runbook (commands were checked against them):
 - `runner/stacks/monitoring/docker-compose.yml`, `env.example`, `grafana/provisioning/*`, `grafana/dashboards/gitlab-runner.json`, `prometheus/prometheus.yml`
 - `runner/README.md` (sections "Grafana upgrade and rollback", "Grafana and logs", "Update", "Daily use"), `runner/bootstrap.sh`, `runner/setup.sh`
 - `common/lib.sh` (`HELPER_IMAGE`, `require_compose_min`, `ci_jobs_running`, `chown_volumes`), `common/health`
-- `tools/ci/runner-host-e2e.sh`, section 4 (the API checks used here are the ones CI runs)
+- `runner/scripts/runner-weekly-cleanup.sh`, `runner/scripts/runner-disk-guard.sh`, `runner/scripts/runner-engine-update.sh` and the timers in `runner/systemd/` (image prune, thresholds, schedules)
+- `tools/ci/runner-host-e2e.sh`, section 4. CI runs these Grafana API checks: `/api/health` (version, `database: ok`), the Prometheus datasource (`/api/datasources/uid/prometheus` and its `/health`), the `up{job="node"}` query through the datasource proxy, the dashboard list `/api/search?type=dash-db` by title, dashboards by uid (`/api/dashboards/uid/...`), folders by uid (`/api/folders/<uid>`), and the OOM-kill and restart count of the container. Used only in this runbook, so not exercised by CI: `/api/org`, the `/api/datasources` list, `/api/search?type=dash-folder`, the provisioned dashboard `gitlab-runner-host` by uid, and the baseline and diff files.
 
 Grafana documentation:
 
-- https://grafana.com/docs/grafana/latest/upgrade-guide/upgrade-v13.0/ - the 13.0 upgrade notes. Not read in full while writing this (grafana.com was unreachable from the authoring environment): the statement that the notes recommend the latest 12.x minor as a stop comes from the repo README, the 512 MB minimum from a comment in the compose file, and the `[unified_storage]` setting names (`migration_cache_size_kb`, `migration_parquet_buffer`) from secondary summaries. None of the three was confirmed against the official page. Verify them before the window.
-- Grafana's `GF_<SECTION>_<KEY>` environment variable rule and the HTTP API paths used (`/api/health`, `/api/search`, `/api/folders`, `/api/datasources/...`, `/api/dashboards/uid/...`): general Grafana behavior, exercised by the repo's CI against Grafana 13.3.0; not re-read from the official pages here.
+- https://grafana.com/docs/grafana/latest/upgrade-guide/upgrade-v13.0/ - the 13.0 upgrade notes. Not read in full while writing this (grafana.com was unreachable from the authoring environment): the statement that the notes recommend the latest 12.x minor as a stop comes from the repo README, the 512 MB minimum from a comment in the compose file, and the `[unified_storage]` setting names (`migration_cache_size_kb`, `migration_parquet_buffer`) from secondary summaries. None of the three was confirmed against the official page, nor was that `12.4.13` is the latest 12.x release (section 4). Verify them before the window.
+- Grafana's `GF_<SECTION>_<KEY>` environment variable rule and the HTTP API paths used (`/api/health`, `/api/search`, `/api/datasources/...`, `/api/dashboards/uid/...`): general Grafana behavior; the paths listed above are exercised by the repo's CI against Grafana 13.3.0, the others are not. None was re-read from the official pages here. That `/api/search?type=dash-folder` also returns nested folders is likewise from API behaviour, not from the documentation.
