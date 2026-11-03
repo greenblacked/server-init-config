@@ -46,6 +46,10 @@ jobs:
       - name: Runner components without token or Docker (${{ matrix.image }})
         timeout-minutes: 35
         run: tools/ci/runner-e2e.sh "${{ matrix.image }}"
+      - name: List files the artifact upload cannot read
+        if: ${{ !cancelled() && failure() }}
+        run: |
+          find ci-out \( ! -readable -o -type d ! -executable \) -printf '::error::unreadable, the upload will fail: %p\n' 2>/dev/null || true
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -66,6 +70,10 @@ jobs:
       - name: Registry cache, DOCKER-USER isolation, npm cache stack
         timeout-minutes: 26
         run: sudo -E tools/ci/runner-host-e2e.sh
+      - name: List files the artifact upload cannot read
+        if: ${{ !cancelled() && failure() }}
+        run: |
+          find ci-out \( ! -readable -o -type d ! -executable \) -printf '::error::unreadable, the upload will fail: %p\n' 2>/dev/null || true
       - name: Upload logs on failure
         if: ${{ !cancelled() && failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
