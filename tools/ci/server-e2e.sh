@@ -55,7 +55,14 @@ cleanup() {
 trap cleanup EXIT
 
 group "build and start the systemd machine (${IMAGE})"
-sd_build "$IMAGE" "$TAG" 2>&1 | tee "$W/build.log" | tail -5
+if sd_build "$IMAGE" "$TAG" > "$W/build.log" 2>&1; then
+  tail -5 "$W/build.log"
+else
+  brc=$?
+  echo "image build failed (exit $brc), last 40 lines of the build log:"
+  tail -40 "$W/build.log"
+  exit "$brc"
+fi
 sd_run "$NAME" "$TAG"
 sd_exec "$NAME" sh -c '. /etc/os-release; echo "${ID}:${VERSION_ID} ${PRETTY_NAME}"' | tee "$W/os.txt"
 endgroup

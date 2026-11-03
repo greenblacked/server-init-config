@@ -22,22 +22,44 @@ sd_family() {
 sd_build() {
   local image="$1" tag="$2" fam dir
   fam=$(sd_family "$image"); dir=$(mktemp -d)
+  # The package install is the only step that talks to mirrors, and a mirror hiccup (seen on almalinux:10 arm64, twice) used
+  # to turn the whole run red. sd-retry runs "refresh metadata && install" up to 3 times (sleeps 5 s, 15 s), keeps the
+  # package manager's output and returns the last attempt's exit status. The package managers' own retries (apt
+  # Acquire::Retries, dnf retries/timeout) cover single file downloads; the loop covers metadata and mirror failures.
+  # zypper has no retry switch on the command line (zypp.conf download.max_silent_tries defaults to 5), so it relies on the loop.
+  cat > "$dir/sd-retry" <<'RETRY'
+#!/bin/sh
+# usage: sd-retry REFRESH_CMD INSTALL_CMD
+n=3; i=1
+while :; do
+  sh -c "$1 && $2"; rc=$?
+  [ "$rc" -eq 0 ] && exit 0
+  echo "sd-retry: attempt $i/$n failed with exit status $rc" >&2
+  [ "$i" -ge "$n" ] && exit "$rc"
+  if [ "$i" -eq 1 ]; then d=5; else d=15; fi
+  echo "sd-retry: retrying in ${d}s (metadata is refreshed first)" >&2
+  sleep "$d"; i=$((i + 1))
+done
+RETRY
   case "$fam" in
     apt) cat > "$dir/Dockerfile" <<DOCKER ;;
 FROM ${image}
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update -q && apt-get install -y -q --no-install-recommends systemd systemd-sysv dbus openssh-server sudo iproute2 procps curl ca-certificates tar gzip findutils cron kmod \
- && rm -rf /var/lib/apt/lists/* && ssh-keygen -A && systemctl enable ssh
+COPY sd-retry /tmp/sd-retry
+RUN sh /tmp/sd-retry "apt-get -o Acquire::Retries=3 update -q" "apt-get -o Acquire::Retries=3 install -y -q --no-install-recommends systemd systemd-sysv dbus openssh-server sudo iproute2 procps curl ca-certificates tar gzip findutils cron kmod" \\
+ && rm -f /tmp/sd-retry && rm -rf /var/lib/apt/lists/* && ssh-keygen -A && systemctl enable ssh
 DOCKER
     zypper) cat > "$dir/Dockerfile" <<DOCKER ;;
 FROM ${image}
-RUN zypper -n install --no-recommends systemd openssh-server sudo iproute2 procps curl ca-certificates tar gzip findutils diffutils kmod \
- && zypper clean -a && ssh-keygen -A && systemctl enable sshd
+COPY sd-retry /tmp/sd-retry
+RUN sh /tmp/sd-retry "zypper -n refresh" "zypper -n install --no-recommends systemd openssh-server sudo iproute2 procps curl ca-certificates tar gzip findutils diffutils kmod" \\
+ && rm -f /tmp/sd-retry && zypper clean -a && ssh-keygen -A && systemctl enable sshd
 DOCKER
     dnf) cat > "$dir/Dockerfile" <<DOCKER ;;
 FROM ${image}
-RUN dnf -y install --setopt=install_weak_deps=False systemd openssh-server sudo iproute procps-ng ca-certificates tar gzip findutils diffutils kmod \
- && dnf clean all && ssh-keygen -A && systemctl enable sshd
+COPY sd-retry /tmp/sd-retry
+RUN sh /tmp/sd-retry "dnf clean metadata" "dnf -y --setopt=retries=5 --setopt=timeout=30 install --setopt=install_weak_deps=False systemd openssh-server sudo iproute procps-ng ca-certificates tar gzip findutils diffutils kmod" \\
+ && rm -f /tmp/sd-retry && dnf clean all && ssh-keygen -A && systemctl enable sshd
 DOCKER
   esac
   cat >> "$dir/Dockerfile" <<'DOCKER'
@@ -46,7 +68,13 @@ RUN printf '#!/bin/sh\n[ "$1" = status ] && echo "status: done"\nexit 0\n' > /us
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/lib/systemd/systemd"]
 DOCKER
-  docker build -t "$tag" "$dir" || { rm -rf "$dir"; return 1; }
+  # One more try of the whole build covers a base-image pull hiccup. Layers before the failing step are cached, so a
+  # genuine error costs one extra run of the install step only (3 quick attempts, ~20 s of sleeps) before it still fails.
+  docker build -t "$tag" "$dir" || {
+    log "docker build failed; retrying once in 10 s (cached layers are reused)"
+    sleep 10
+    docker build -t "$tag" "$dir" || { rm -rf "$dir"; return 1; }
+  }
   rm -rf "$dir"
 }
 
