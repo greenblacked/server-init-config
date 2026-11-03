@@ -156,7 +156,7 @@ The first previews, the second runs now (it skips the cache wipe while jobs run)
 Everything listens on `127.0.0.1`. Tunnel from your laptop (any directory), then open `http://localhost:3000` (user `admin`) and `http://localhost:9090`:
 
 ```bash
-ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ops@SERVER_IP
+ssh -N -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:9090:127.0.0.1:9090 ops@SERVER_IP
 ```
 
 The Grafana password (server, as `ops`, any directory). In tmux the printed password stays in the pane history (plain `clear` keeps it): run it in a throwaway window (`tmux new-window`, then `exit`) or follow with `clear && tmux clear-history`, and clear your laptop terminal's scrollback:
@@ -247,6 +247,8 @@ Laptop, repo root:
 ```bash
 runner/bootstrap.sh SERVER_IP
 ```
+
+`bootstrap.sh` also installs every component that is missing on the host (the registration among them, which asks for a token). For a copy of the repo state alone, use the copy-only block in section 3.10 of `runner/docs/grafana-13-upgrade.md`.
 
 Then server, as `ops`, any directory:
 

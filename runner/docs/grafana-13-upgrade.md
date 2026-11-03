@@ -43,7 +43,7 @@ tmux new -A -s grafana13
 
 ### 3.1 Helper for the Grafana API (re-paste after a reconnect)
 
-Reads the admin credentials from the root-only `.env` inside `sudo bash` and hands them to `curl -K` through a pipe, so the password is never in an argument list, the shell history or the output. It assumes the password the installer generated (letters and digits only); a hand-set password containing `"` or `\` would need escaping in the `user = ...` line that `curl -K` reads.
+Reads the admin credentials from the root-only `.env` inside `sudo bash` and hands them to `curl -K` through a pipe, so the password is never in an argument list, the shell history or the output. It assumes the password the installer generated (letters and digits only); a hand-set password containing `"` or `\` would need escaping in the `user = ...` line that `curl -K` reads. Never add `-v` or `--trace` to a `gapi` call: they print the `Authorization` header, which holds the password (base64, not encrypted).
 
 ```bash
 gapi() { sudo bash -c 'u=$(grep "^GF_SECURITY_ADMIN_USER=" /opt/monitoring/.env | cut -d= -f2-); p=$(grep "^GF_SECURITY_ADMIN_PASSWORD=" /opt/monitoring/.env | cut -d= -f2-); curl -fsS --max-time 20 -K <(printf "user = \"%s:%s\"\n" "$u" "$p") "$@"' _ "$@"; }
@@ -62,6 +62,14 @@ sudo docker inspect -f '{{.Config.Image}} {{.HostConfig.Memory}} {{.State.Status
 ```
 
 Expect `grafana/grafana:12.0.0 268435456 running` (256m). Anything else: stop and work out why the host is not on the expected state.
+
+Record the digest of the image that is running (the container's `.Image` is the image ID; the digests are on the image):
+
+```bash
+sudo docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$(sudo docker inspect -f '{{.Image}}' monitoring-grafana-1)"
+```
+
+It prints `grafana/grafana@sha256:...`: write that whole line down as `OLD_DIGEST`. Rollback uses it to pull and start exactly this image, not whatever the tag points to by then. Empty output means the image was loaded or pulled without a digest: there is no `OLD_DIGEST`, and the rollback falls back to the tag `grafana/grafana:12.0.0` (say so in your notes).
 
 ```bash
 curl -fsS http://127.0.0.1:3000/api/health | jq -c '{version, database}'
@@ -178,16 +186,22 @@ sudo bash -c 'if [ -d /root/server-init-config/.git ]; then git -C /root/server-
 With a git clone expect empty status output and the short hash: write that hash down as `NOTED_COMMIT`. With an archive copy there is no hash on the server: take `NOTED_COMMIT` from the laptop (the `copying <hash>` line of the last bootstrap, or the last commit the host was updated from) and keep an exact copy of the current tree, which makes the repo rollback independent of the laptop:
 
 ```bash
-sudo bash -c 'test ! -e /root/server-init-config.pre-grafana13 && cp -a /root/server-init-config /root/server-init-config.pre-grafana13'
+sudo bash -c 'if test ! -e /root/server-init-config.pre-grafana13; then if cp -a /root/server-init-config /root/server-init-config.pre-grafana13; then echo "copy made"; else echo "cp FAILED"; fi; else echo "NOT copied: /root/server-init-config.pre-grafana13 exists"; fi'
 ```
 
-The guard matters: `cp -a` onto a directory that exists would nest the tree inside it, and an earlier copy may be the only good one. If the command prints nothing and returns at once, the copy already exists (an earlier attempt). Do not overwrite it blindly. Compare it with the current tree:
+The guard matters: `cp -a` onto a directory that exists would nest the tree inside it, and an earlier copy may be the only good one. The command prints `copy made` when it made the copy. `NOT copied: ... exists` means the copy already exists (an earlier attempt): do not overwrite it blindly. `cp FAILED` (with the `cp` error above it) means the copy is partial: fix the cause, remove the partial directory yourself and run the command again. Compare an existing copy with the current tree:
 
 ```bash
 sudo diff -rq /root/server-init-config /root/server-init-config.pre-grafana13 && echo "copy identical to the current tree"
 ```
 
-Identical: nothing to do. Different, and the current tree is still the one the host runs on (nothing was copied to the server yet): move the old copy aside with `sudo mv /root/server-init-config.pre-grafana13 /root/server-init-config.pre-grafana13.old`, then run the guarded `cp` again. Different, and the current tree is already a newer one: keep the existing copy, it is the one to go back to.
+Identical: nothing to do. Different, and the current tree is still the one the host runs on (nothing was copied to the server yet): move the old copy aside with the command below, then run the guarded `cp` again. Different, and the current tree is already a newer one: keep the existing copy, it is the one to go back to.
+
+```bash
+sudo bash -c 'if test ! -e /root/server-init-config.pre-grafana13.old; then mv /root/server-init-config.pre-grafana13 /root/server-init-config.pre-grafana13.old && echo "moved aside"; else echo "NOT moved: /root/server-init-config.pre-grafana13.old exists"; fi'
+```
+
+`NOT moved` means an older leftover is in the way: look at it, remove or rename it yourself, and run the command again.
 
 ### 3.10 Copy the new repo state to the server
 
@@ -209,10 +223,10 @@ Do not rerun `runner/bootstrap.sh` for this. It is not copy-only: after the copy
 git -c tar.umask=0022 archive --format=tar HEAD | ssh -o BatchMode=yes ops@SERVER_IP 'sudo -n sh -c "set -e; rm -rf /root/server-init-config.new /root/server-init-config.old; install -d -m 0700 /root/server-init-config.new; tar -x -C /root/server-init-config.new; if [ -e /root/server-init-config ]; then mv /root/server-init-config /root/server-init-config.old; fi; mv /root/server-init-config.new /root/server-init-config; rm -rf /root/server-init-config.old"'
 ```
 
-`runner/bootstrap.sh --dry-run SERVER_IP --user ops` changes nothing and prints the line `bootstrap.sh` would use for the copy, if you want to compare. Check the copy arrived:
+`runner/bootstrap.sh --dry-run SERVER_IP --user ops` changes nothing and prints the line `bootstrap.sh` would use for the copy, if you want to compare. Server: check the copy arrived (this file exists only in the new tree):
 
 ```bash
-sudo test -f /root/server-init-config/runner/setup.sh && echo "copy ok"
+sudo test -f /root/server-init-config/runner/docs/grafana-13-upgrade.md && echo "copy ok"
 ```
 
 On a host that runs a git clone instead, bring the clone to the intended commit yourself and skip the copy; do not use `update.sh --pull` (README: this setup has no server-side credential).
@@ -452,21 +466,13 @@ Roll back (restore the archive) when, after the migration had its time:
 
 Fix forward instead when Grafana is healthy on 13.3.0 and the data is complete: UI differences, a single panel to repair, a transient `database is locked` that goes away after one restart, or only the `WARN` because the migration was still running. Set a time limit before the window (for example 30 minutes after the start of the migration), and decide by the criteria, not by the clock alone. Every minute on 13 adds edits that a rollback throws away.
 
-`runner/update.sh --rollback` alone does not downgrade Grafana once 13 has run. It restores the repo-managed files from the newest `/var/backups/server-init-config/<timestamp>/` and recreates the stacks (Grafana restarts, on 13), but with the current (13) tree it keeps the installed Grafana 13 compose file (image and 512m limit) and says so in a `WARN:` line, because the old Grafana cannot read migrated data. Grafana's data comes back only from the archive. Use `--rollback` only for the other files (and when Grafana 13 never started, in which case it also puts the old compose file back); check first that the newest backup directory is the one of your run:
+**Step 0, before anything is stopped.** Pull the images the restore needs. The cleanup may have removed them after the upgrade (section 2), and a pull problem is better found while Grafana still runs. Pull the Grafana image by the `OLD_DIGEST` from 3.2 (paste the whole `grafana/grafana@sha256:...` line):
 
 ```bash
-sudo ls -1t /var/backups/server-init-config | head -n 3
+sudo docker pull OLD_DIGEST
 ```
 
-**Order matters: if you use `--rollback` at all, run it before step 1 below, with the current (13) tree on the server, never after it.** After step 1 the server tree is the `3635bc2` copy, and its `runner/install/update.sh` has no `keep_grafana_major` / `grafana_ran_tag` guard (added after the bump, in `9417213`). Laptop, repo root, to see it for yourself (prints `0`):
-
-```bash
-git show 3635bc2:runner/install/update.sh | grep -c 'keep_grafana_major\|grafana_ran_tag'
-```
-
-Its `--rollback` would put the 12.0.0 / 256m compose file back from the backup and force-recreate Grafana 12 on the migrated data. For the same reason its README has no "Grafana upgrade and rollback" section: take the restore commands from this page (inlined below, copied from the current `runner/README.md`) or from the README of the current repo on your laptop, not from the server's copy. `--rollback` also puts the older npm-cache compose file back, which starts Verdaccio 6.1.2 on the storage that 7.x wrote (README, "npm cache upgrade and rollback"); it is only a cache.
-
-**Step 0, before anything is stopped.** Pull the images the restore needs. The cleanup may have removed them after the upgrade (section 2), and a pull problem is better found while Grafana still runs:
+Without an `OLD_DIGEST`, use the tag instead:
 
 ```bash
 sudo docker pull grafana/grafana:12.0.0
@@ -476,15 +482,35 @@ sudo docker pull grafana/grafana:12.0.0
 sudo docker pull alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
 ```
 
-Then, in this order:
+**Optional, after step 0 and before step 1: `runner/update.sh --rollback`.** It alone does not downgrade Grafana once 13 has run. It restores the repo-managed files from the newest `/var/backups/server-init-config/<timestamp>/` and recreates the stacks (Grafana restarts, on 13), but with the current (13) tree it keeps the installed Grafana 13 compose file (image and 512m limit) and says so in a `WARN:` line, because the old Grafana cannot read migrated data. Grafana's data comes back only from the archive. Use it only for the other files (and when Grafana 13 never started, in which case it also puts the old compose file back); check first that the newest backup directory is the one of your run:
+
+```bash
+sudo ls -1t /var/backups/server-init-config | head -n 3
+```
+
+**Order matters: if you use `--rollback` at all, run it before step 1 below, with the current (13) tree on the server, never after it.** After step 1 the server tree is the `3635bc2` copy, and its `runner/install/update.sh` has no `keep_grafana_major` / `grafana_ran_tag` guard (`keep_grafana_major` came in `9417213`, `grafana_ran_tag` in `7347683`, both after the bump). Laptop, repo root, to see it for yourself (prints `0`):
+
+```bash
+git show 3635bc2:runner/install/update.sh | grep -c 'keep_grafana_major\|grafana_ran_tag'
+```
+
+Its `--rollback` would put the 12.0.0 / 256m compose file back from the backup and force-recreate Grafana 12 on the migrated data. For the same reason its README has no "Grafana upgrade and rollback" section: take the restore commands from this page (inlined below, copied from the current `runner/README.md`) or from the README of the current repo on your laptop, not from the server's copy. `--rollback` also puts the older npm-cache compose file back, which starts Verdaccio 6.1.2 on the storage that 7.x wrote (README, "npm cache upgrade and rollback"); it is only a cache.
+
+Then steps 1 to 5, in this order:
 
 1. Put the repo copy back to the commit you upgraded from, otherwise the next `update.sh` upgrades again. With the copy from 3.9, guarded so that no tree is overwritten or lost:
 
    ```bash
-   sudo bash -c 'test -d /root/server-init-config.pre-grafana13 && test ! -e /root/server-init-config.grafana13 && mv /root/server-init-config /root/server-init-config.grafana13 && mv /root/server-init-config.pre-grafana13 /root/server-init-config'
+   sudo bash -c 'P=/root/server-init-config; if test ! -d $P.pre-grafana13; then echo "NOT swapped: $P.pre-grafana13 missing"; elif test -e $P.grafana13; then echo "NOT swapped: $P.grafana13 already exists"; elif test ! -d $P; then echo "NOT swapped: $P (the current tree) missing"; elif mv $P $P.grafana13 && mv $P.pre-grafana13 $P; then echo swapped; else echo "mv FAILED"; fi'
    ```
 
-   If it does nothing (the `test` failed): `/root/server-init-config.pre-grafana13` missing means 3.9 was skipped or the host runs a git clone, so use the clone or the laptop route below; `/root/server-init-config.grafana13` already existing is the leftover of an earlier attempt, look at it with `sudo ls -ld /root/server-init-config.grafana13`, move it away with `sudo mv /root/server-init-config.grafana13 /root/server-init-config.grafana13.earlier` and run the command again. If it stops after the first `mv`, `/root/server-init-config` is missing: run `sudo mv /root/server-init-config.pre-grafana13 /root/server-init-config` by hand. With a git clone: `sudo git -C /root/server-init-config checkout --detach NOTED_COMMIT`. From the laptop: check out `NOTED_COMMIT` and run the copy block of 3.10 (not `runner/bootstrap.sh`, which would also run `setup.sh` components, see 3.10).
+   It prints `swapped` when done, and nothing is moved on any `NOT swapped`. `/root/server-init-config.pre-grafana13` missing means 3.9 was skipped or the host runs a git clone, so use the clone or the laptop route below. `/root/server-init-config.grafana13` already existing is the leftover of an earlier attempt: look at it with `sudo ls -ld /root/server-init-config.grafana13`, move it away with the command below and run the swap again. `/root/server-init-config` (the current tree) missing means there is nothing to set aside: run `sudo mv /root/server-init-config.pre-grafana13 /root/server-init-config` by hand. `mv FAILED` (with the `mv` error above it) means the swap may be half done: look at `sudo ls -ld /root/server-init-config*` before you do anything else.
+
+   ```bash
+   sudo bash -c 'if test ! -e /root/server-init-config.grafana13.earlier; then mv /root/server-init-config.grafana13 /root/server-init-config.grafana13.earlier && echo "moved aside"; else echo "NOT moved: /root/server-init-config.grafana13.earlier exists"; fi'
+   ```
+
+   With a git clone: `sudo git -C /root/server-init-config checkout --detach NOTED_COMMIT`. From the laptop: check out `NOTED_COMMIT` and run the copy block of 3.10 (not `runner/bootstrap.sh`, which would also run `setup.sh` components, see 3.10).
 2. List the archives, newest first. Pick the one named after the old version, `FILE` = `grafana-12.0.0-<date>.tar.gz` from step 5 of the upgrade:
 
    ```bash
@@ -503,11 +529,13 @@ Then, in this order:
    sudo bash -c 'tar -tzf /var/backups/monitoring/FILE >/dev/null && cd /opt/monitoring && docker compose stop grafana && docker run --rm -i --network none -v monitoring_grafana-data:/v alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f sh -c "find /v -mindepth 1 -delete && tar -xzf - -C /v" < /var/backups/monitoring/FILE'
    ```
 
-5. Start the old image and check (also copied from the README: sets `image: grafana/grafana:12.0.0`, starts Grafana, then asks `/api/health`):
+5. Start the old image and check. This is the README command with the image pinned by digest: replace `OLD_DIGEST` with the whole `grafana/grafana@sha256:...` line from 3.2. It sets the `image:` line, starts Grafana, then asks `/api/health`:
 
    ```bash
-   sudo bash -c 'cd /opt/monitoring && sed -i "s|image: grafana/grafana:.*|image: grafana/grafana:12.0.0|" docker-compose.yml && docker compose up -d grafana && curl -fsS http://127.0.0.1:3000/api/health'
+   sudo bash -c 'cd /opt/monitoring && sed -i "s|image: grafana/grafana:.*|image: OLD_DIGEST|" docker-compose.yml && docker compose up -d grafana && curl -fsS http://127.0.0.1:3000/api/health'
    ```
+
+   Without an `OLD_DIGEST` (3.2 printed nothing), use the README command, which sets the tag `grafana/grafana:12.0.0`, and note that the tag was used. The next `update.sh` from the rolled-back tree writes the repo's tag line again, so the digest pin does not outlast it.
 
    `version` in the answer should be the old one. The `curl` can fail if it runs before Grafana listens; repeat the health loop of step 6. If you staged at 12.4.13 and want that version, use that tag in the `sed`.
 
