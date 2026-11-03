@@ -126,13 +126,15 @@ grafana_ran_tag() {
 # keep_grafana_major CURRENT_COMPOSE BACKUP_COMPOSE [RAN_TAG]: restoring BACKUP_COMPOSE over CURRENT_COMPOSE must not lower the Grafana major.
 # Grafana migrates its database forward and cannot read it back, so an older image on migrated data fails or reads stale tables
 # (runner/README.md, "Grafana upgrade and rollback"). RAN_TAG is the output of grafana_ran_tag: the Grafana that actually ran decides.
-# When it is empty (unknown) the tag in CURRENT_COMPOSE is assumed to have run: the safe side, keeping a newer image on unmigrated
+# When it is empty (unknown) or has no numeric major the tag in CURRENT_COMPOSE is assumed to have run: the safe side, keeping a newer image on unmigrated
 # data only means the planned upgrade happens, while an older image on migrated data breaks Grafana.
 # Prints the tag to keep, or nothing when the restore is safe.
 keep_grafana_major() {
   local cur old
   [[ -f "$1" && -f "$2" ]] || return 0
-  cur="${3:-$(grafana_tag "$1")}"
+  cur="${3:-}"
+  # unknown (empty) or not a version (e.g. latest): the tag on disk is assumed to have run
+  [[ "${cur%%.*}" =~ ^[0-9]+$ ]] || cur=$(grafana_tag "$1")
   old=$(grafana_tag "$2")
   [[ "${cur%%.*}" =~ ^[0-9]+$ && "${old%%.*}" =~ ^[0-9]+$ ]] || return 0
   if (( ${cur%%.*} > ${old%%.*} )); then
