@@ -18,7 +18,7 @@ Changes on the host:
 
 Does not change: Prometheus (`v3.15.1`) and node-exporter (`v1.12.1`) images and data, the provisioned datasource and dashboard files, `/opt/monitoring/.env` (except `MON_UID` and `MON_GID`, which are already there), the Caddy override if present, secrets, `config.toml`, the runner registration, `daemon.json`, SSH.
 
-The Grafana rows hold if the host's current checkout is `3635bc2`, the commit just before the Grafana bump (`008905a`). The Verdaccio 7 upgrade (`2b48300`) landed after the bump, so every host coming from before the bump that has `/opt/npm-cache` gets the npm-cache change in the same `update.sh` run: the old Verdaccio 6 storage is moved aside (not deleted) and the cache starts empty. Read the README section ["npm cache upgrade and rollback"](../README.md#npm-cache-upgrade-and-rollback) before the window; expect `npm-cache` in the `would update:` list of step 3.11 on such a host. A host on an older checkout than `3635bc2` gets every other difference too. The dry run in step 3.11 lists everything; read that list, do not assume.
+The Grafana rows hold if the host's current checkout is `7757ef9`, the commit just before the Grafana bump (`b778aab`). The Verdaccio 7 upgrade (`d74e203`) landed after the bump, so every host coming from before the bump that has `/opt/npm-cache` gets the npm-cache change in the same `update.sh` run: the old Verdaccio 6 storage is moved aside (not deleted) and the cache starts empty. Read the README section ["npm cache upgrade and rollback"](../README.md#npm-cache-upgrade-and-rollback) before the window; expect `npm-cache` in the `would update:` list of step 3.11 on such a host. A host on an older checkout than `7757ef9` gets every other difference too. The dry run in step 3.11 lists everything; read that list, do not assume.
 
 Done means: `/api/health` says `13.3.0` with `database: ok`, the container is not OOM-killed, the Prometheus datasource is healthy, the provisioned dashboard and every hand-made dashboard and folder from before are present, `health -q` has no FAIL.
 
@@ -488,10 +488,10 @@ sudo docker pull alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd5
 sudo ls -1t /var/backups/server-init-config | head -n 3
 ```
 
-**Order matters: if you use `--rollback` at all, run it before step 1 below, with the current (13) tree on the server, never after it.** After step 1 the server tree is the `3635bc2` copy, and its `runner/install/update.sh` has no `keep_grafana_major` / `grafana_ran_tag` guard (`keep_grafana_major` came in `9417213`, `grafana_ran_tag` in `7347683`, both after the bump). Laptop, repo root, to see it for yourself (prints `0`):
+**Order matters: if you use `--rollback` at all, run it before step 1 below, with the current (13) tree on the server, never after it.** After step 1 the server tree is the `7757ef9` copy, and its `runner/install/update.sh` has no `keep_grafana_major` / `grafana_ran_tag` guard (`keep_grafana_major` came in `fdc66db`, `grafana_ran_tag` in `a97d46d`, both after the bump). Laptop, repo root, to see it for yourself (prints `0`):
 
 ```bash
-git show 3635bc2:runner/install/update.sh | grep -c 'keep_grafana_major\|grafana_ran_tag'
+git show 7757ef9:runner/install/update.sh | grep -c 'keep_grafana_major\|grafana_ran_tag'
 ```
 
 Its `--rollback` would put the 12.0.0 / 256m compose file back from the backup and force-recreate Grafana 12 on the migrated data. For the same reason its README has no "Grafana upgrade and rollback" section: take the restore commands from this page (inlined below, copied from the current `runner/README.md`) or from the README of the current repo on your laptop, not from the server's copy. `--rollback` also puts the older npm-cache compose file back, which starts Verdaccio 6.1.2 on the storage that 7.x wrote (README, "npm cache upgrade and rollback"); it is only a cache.
