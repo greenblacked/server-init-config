@@ -70,16 +70,23 @@ RUN printf '#!/bin/sh\n[ "$1" = status ] && echo "status: done"\nexit 0\n' > /us
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/lib/systemd/systemd"]
 DOCKER
-  # The base-image pull is the other network step. It is retried on its own (sleeps 5 s, 15 s: at most 20 s) so that
-  # the build runs once and a real install error fails once instead of being repeated. The pull retry lines go to
-  # stdout, i.e. into the build log the caller captures (see sd_report_build).
+  # The base-image pull is the other network step. It is only needed when the image is not already local: with the
+  # image present a plain `docker build` works offline, so a registry outage or a 429 must not fail it. The pull is
+  # retried on its own (sleeps 5 s, 15 s: at most 20 s) so that the build runs once and a real install error fails
+  # once instead of being repeated. The pull retry lines go to stdout, i.e. into the build log the caller captures
+  # (see sd_report_build).
   local d
-  for d in 5 15 0; do
-    docker pull -q "$image" >/dev/null && break
-    if [[ "$d" = 0 ]]; then rm -rf "$dir"; return 1; fi
-    log "pull of ${image} failed; retrying in ${d}s"
-    sleep "$d"
-  done
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    for d in 5 15 0; do
+      docker pull -q "$image" >/dev/null && break
+      if [[ "$d" = 0 ]]; then
+        log "pull of ${image} failed 3 times, giving up"
+        rm -rf "$dir"; return 1
+      fi
+      log "pull of ${image} failed; retrying in ${d}s"
+      sleep "$d"
+    done
+  fi
   docker build -t "$tag" "$dir" || { rm -rf "$dir"; return 1; }
   rm -rf "$dir"
 }
@@ -88,6 +95,8 @@ DOCKER
 # Failure: the whole log in a folded group (the root cause is rarely in the last lines), then a one-line summary.
 # Success: the last TAIL_LINES lines, and a warning when the build needed a retry (pull or install) so a flaky mirror
 # shows up in the job summary instead of staying hidden behind a green job. Returns RC.
+# Must be called with the caller's build group open: on failure it closes that group (endgroup) before the full log.
+# Like lib.sh's fail()/warn(), the ::error::/::warning:: lines are printed everywhere (plain text outside GitHub).
 sd_report_build() {
   local image="$1" rc="$2" log_file="$3" lines="$4"
   if [[ "$rc" -ne 0 ]]; then
@@ -100,7 +109,7 @@ sd_report_build() {
   fi
   tail -n "$lines" "$log_file"
   if grep -qE 'sd-retry: attempt|pull of .* failed; retrying' "$log_file"; then
-    if in_ci; then echo "::warning::image build for ${image} needed retries"; else log "WARN: image build for ${image} needed retries"; fi
+    warn "image build for ${image} needed retries"
   fi
 }
 
