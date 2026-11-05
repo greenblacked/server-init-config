@@ -30,6 +30,11 @@ export PATH="$T/bin:$PATH"
 # minimal container images have no diffutils: tiny stand-ins (cmp -s A B, diff A B) so put() and the tests work
 command -v cmp >/dev/null 2>&1 || { printf '#!/usr/bin/env bash\n[[ "$1" == -s ]] && shift\n[[ "$(md5sum < "$1")" == "$(md5sum < "$2")" ]]\n' > "$T/bin/cmp"; chmod +x "$T/bin/cmp"; }
 command -v diff >/dev/null 2>&1 || { printf '#!/usr/bin/env bash\n[[ "$(cat "$1")" == "$(cat "$2")" ]]\n' > "$T/bin/diff"; chmod +x "$T/bin/diff"; }
+# the health checks of the GitHub runner read the controller status with jq, which a minimal container image lacks (real hosts get it
+# from common/admin-tools.sh): in a throwaway container install it, anywhere else a missing jq is reported by the first check below
+if ! command -v jq >/dev/null 2>&1 && [[ $DESTRUCTIVE == 1 ]]; then
+  { dnf -y -q install jq || { apt-get update -q && apt-get install -y -q jq; } || zypper -n install jq; } >/dev/null 2>&1
+fi
 
 # ---------------------------------------------------------------- login snippet
 section "login snippet"
@@ -293,6 +298,7 @@ check "failed last cleanup run: WARN with the result" 'grep -E "WARN +server-cle
 rm -f "$T/bin/systemctl"
 
 section "health: GitHub Actions runner"
+check "jq is available (the controller status is read with it; without it health only warns)" 'command -v jq >/dev/null 2>&1'
 stub systemctl 'case "$1" in
   list-unit-files) case "$2" in github-runner-ctl.service) echo "$2 enabled" ;; esac ;;
   is-active|is-enabled) exit 0 ;;
