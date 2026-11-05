@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# Download a package repository signing key and install it only if it has the expected fingerprint.
-# Usage: pin-repo-key URL FINGERPRINT DEST
-# The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
-# keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
-# On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+# Usage: pin-repo-key URL FINGERPRINT DEST. Downloads a repository signing key, checks it with gpg in an empty keyring and writes only
+# the key with that fingerprint (40 hex digits, spaces allowed) to DEST. On a mismatch nothing is written and the exit code is 1.
 set -Eeuo pipefail
-
 if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
   echo "Usage: $0 URL FINGERPRINT DEST" >&2
   exit 2
@@ -15,7 +11,6 @@ want=$(printf '%s' "$2" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
 dest="$3"
 [[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
 command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 chmod 0700 "$work"

@@ -30,6 +30,11 @@ export PATH="$T/bin:$PATH"
 # minimal container images have no diffutils: tiny stand-ins (cmp -s A B, diff A B) so put() and the tests work
 command -v cmp >/dev/null 2>&1 || { printf '#!/usr/bin/env bash\n[[ "$1" == -s ]] && shift\n[[ "$(md5sum < "$1")" == "$(md5sum < "$2")" ]]\n' > "$T/bin/cmp"; chmod +x "$T/bin/cmp"; }
 command -v diff >/dev/null 2>&1 || { printf '#!/usr/bin/env bash\n[[ "$(cat "$1")" == "$(cat "$2")" ]]\n' > "$T/bin/diff"; chmod +x "$T/bin/diff"; }
+# the health checks of the GitHub runner read the controller status with jq, which a minimal container image lacks (real hosts get it
+# from common/admin-tools.sh): in a throwaway container install it, anywhere else a missing jq is reported by the first check below
+if ! command -v jq >/dev/null 2>&1 && [[ $DESTRUCTIVE == 1 ]]; then
+  { dnf -y -q install jq || { apt-get update -q && apt-get install -y -q jq; } || zypper -n install jq; } >/dev/null 2>&1
+fi
 
 # ---------------------------------------------------------------- login snippet
 section "login snippet"
@@ -292,6 +297,60 @@ out=$(STUB_RESULT=exit-code bash "$T/health-t" -q --no-color 2>&1)
 check "failed last cleanup run: WARN with the result" 'grep -E "WARN +server-cleanup.timer active.*exit-code" <<<"$out" >/dev/null'
 rm -f "$T/bin/systemctl"
 
+section "health: GitHub Actions runner"
+check "jq is available (the controller status is read with it; without it health only warns)" 'command -v jq >/dev/null 2>&1'
+stub systemctl 'case "$1" in
+  list-unit-files) case "$2" in github-runner-ctl.service) echo "$2 enabled" ;; esac ;;
+  is-active|is-enabled) exit 0 ;;
+  show) echo "" ;;
+esac; exit 0'
+stub docker 'exit 1'
+printf 'GH_OWNER=octo\nGH_RUNNER_IMAGE=example.org/runner:1@sha256:%064d\n' 0 > "$T/ghr.env"
+ghr_status() { # POLL_AGE TOKEN_AGE REMAINING IMAGE_AGE_DAYS UPDATE_REQUIRED
+  local n; n=$(date +%s)
+  printf '{"updated":%s,"last_poll_ok":%s,"last_token_ok":%s,"last_error":"token_failed: http 401","rate_remaining":%s,"rate_limit":5000,"served":3,"skipped":2,"active_pods":1,"idle_pods":0,"max_jobs":1,"update_required":%s,"backoff_until":0,"runner_image_created":%s}\n' \
+    "$n" "$((n - $1))" "$((n - $2))" "$3" "$5" "$((n - $4 * 86400))" > "$T/ghr-status.json"
+}
+ghr_health() { HEALTH_GHR_STATUS="$T/ghr-status.json" HEALTH_GHR_CONFIG="$T/ghr.env" bash "$H" -q --no-color --profile runner 2>&1 | sed -n '/GitHub Actions runner/,/^$/p'; }
+ghr_status 30 600 4900 3 false
+out=$(ghr_health)
+check "healthy controller: service, poll age, token age, quota, image age are OK lines" 'grep -q "OK .*github-runner-ctl.service active" <<<"$out" && grep -q "OK .*last successful poll 0m ago" <<<"$out" && grep -q "OK .*installation token minted 10m ago" <<<"$out" && grep -q "OK .*GitHub API quota: 4900 of 5000 left" <<<"$out" && grep -q "OK .*runner image is 3 days old" <<<"$out"'
+check "served and skipped repositories and the pod count are shown" 'grep -q "private repositories of octo: 3 served, 2 skipped" <<<"$out" && grep -q "pods: 1 active (0 waiting for a job), limit 1" <<<"$out"'
+ghr_status 1200 600 4900 3 false; out=$(ghr_health)
+check "no successful poll for 20 minutes: FAIL with the last error" 'grep -qE "FAIL .*last successful poll 20m ago \(token_failed: http 401\)" <<<"$out"'
+ghr_status 30 7200 4900 3 false; out=$(ghr_health)
+check "token not minted for 2 hours: WARN" 'grep -qE "WARN .*installation token last minted 2h" <<<"$out"'
+ghr_status 30 600 300 3 false; out=$(ghr_health)
+check "API quota under 500: WARN" 'grep -qE "WARN .*quota low: 300" <<<"$out"'
+ghr_status 30 600 40 3 false; out=$(ghr_health)
+check "API quota under 100: FAIL" 'grep -qE "FAIL .*quota nearly used up: 40" <<<"$out"'
+ghr_status 30 600 4900 26 false; out=$(ghr_health)
+check "runner image 26 days old: WARN to bump the pin" 'grep -qE "WARN .*runner image is 26 days old" <<<"$out"'
+ghr_status 30 600 4900 31 false; out=$(ghr_health)
+check "runner image 31 days old: still only a WARN (an update_required evidence makes it a FAIL, not the age)" 'grep -qE "WARN .*runner image is 31 days old" <<<"$out" && ! grep -qE "FAIL .*runner image" <<<"$out"'
+ghr_status 30 600 4900 3 true; out=$(ghr_health)
+check "a runner that exited with code 3 or 4: FAIL" 'grep -qE "FAIL .*exited with code 3 or 4" <<<"$out"'
+stub docker 'case "$1" in
+  info) exit 0 ;;
+  image) exit 1 ;;
+  ps) [[ "$*" == *--filter\ status=exited* ]] && echo abc; exit 0 ;;
+  network) echo n1; exit 0 ;;
+esac; exit 0'
+ghr_status 30 600 4900 3 false; out=$(ghr_health)
+check "stopped pod container and a network without a running pod: WARN leftovers" 'grep -qE "WARN .*leftover pod parts: 1 stopped container\(s\), 1 network\(s\) for 0 running" <<<"$out"'
+stub systemctl 'case "$1" in
+  list-unit-files) case "$2" in github-runner-ctl.service) echo "$2 enabled" ;; esac ;;
+  is-active) exit 3 ;;
+  is-enabled) exit 0 ;;
+  show) echo "" ;;
+esac; exit 0'
+out=$(ghr_health)
+check "enabled but not running: FAIL" 'grep -qE "FAIL .*github-runner-ctl.service" <<<"$out"'
+stub systemctl 'exit 0'
+out=$(HEALTH_GHR_CONFIG="$T/none.env" HEALTH_GHR_STATUS="$T/ghr-status.json" bash "$H" -q --no-color --profile runner 2>&1 | grep -c "GitHub Actions runner" || true)
+check "not installed (no unit, no config): no section at all" '[[ "$out" == 0 ]]'
+rm -f "$T/bin/docker" "$T/bin/systemctl"; reset_calls
+
 # ---------------------------------------------------------------- calendars
 section "timer calendars"
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -392,6 +451,108 @@ else
   echo "  SKIP  no iptables or network namespaces here"
 fi
 
+section "ci-job-isolation: GitHub runner pool may reach the npm cache, nothing else of the br- networks does"
+if command -v iptables >/dev/null 2>&1 && unshare -n true 2>/dev/null && command -v nsenter >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  stub logger 'exit 0'
+  printf 'GH_OWNER=octo\nGH_JOB_SUBNET_POOL=10.213.0.0/20\n' > "$T/ghr-pool.env"
+  printf 'GH_OWNER=octo\n' > "$T/ghr-nopool.env"
+  out=$(BRIDGE_IP=172.17.0.1 GHR_CONFIG="$T/ghr-pool.env" PATH="$T/bin:$PATH" unshare -n bash -c '
+    iptables -N DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -A FORWARD -j DOCKER-USER
+    bash "$1"; bash "$1" >/dev/null; iptables -S CI-JOBS-IN' _ "$ROOT/runner/scripts/ci-job-isolation.sh" 2>&1)
+  rule='-A CI-JOBS-IN -s 10.213.0.0/20 -d 172.17.0.1/32 -i br-+ -p tcp -m tcp --dport 4873 -j ACCEPT'
+  check "pool rule present once after two runs, before the final DROP" '[[ $(grep -c -- "$rule" <<<"$out") -eq 1 ]] && [[ $(grep -n -- "$rule" <<<"$out" | cut -d: -f1) -lt $(grep -n -- "-A CI-JOBS-IN -j DROP" <<<"$out" | cut -d: -f1) ]]'
+  check "the docker0 npm rule is still there and nothing else is opened (3 ACCEPT rules + replies/ping)" '[[ $(grep -c -- "-j ACCEPT" <<<"$out") -eq 4 ]]'
+  out=$(BRIDGE_IP=172.17.0.1 GHR_CONFIG="$T/ghr-nopool.env" PATH="$T/bin:$PATH" unshare -n bash -c '
+    iptables -N DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -A FORWARD -j DOCKER-USER
+    bash "$1" >/dev/null; iptables -S CI-JOBS-IN' _ "$ROOT/runner/scripts/ci-job-isolation.sh" 2>&1)
+  # a pool that is not a private, aligned /16-/27 block is ignored (and says so), the chain still ends with its DROP
+  for bad in 8.8.8.0/24 10.213.0.1/20 10.0.0.0/8 10.213.0.0/28 172.32.0.0/16 192.169.0.0/16 not-a-cidr; do
+    printf 'GH_JOB_SUBNET_POOL=%s\n' "$bad" > "$T/ghr-badpool.env"
+    out=$(BRIDGE_IP=172.17.0.1 GHR_CONFIG="$T/ghr-badpool.env" PATH="$T/bin:$PATH" unshare -n bash -c '
+      iptables -N DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -A FORWARD -j DOCKER-USER
+      bash "$1" 2>&1; iptables -S CI-JOBS-IN' _ "$ROOT/runner/scripts/ci-job-isolation.sh" 2>&1)
+    check "pool ${bad}: ignored with a warning, no rule, DROP in place" '! grep -q -- "-i br-+" <<<"$out" && grep -q "WARN: GH_JOB_SUBNET_POOL" <<<"$out" && grep -q -- "-A CI-JOBS-IN -j DROP" <<<"$out"'
+  done
+  for good in 10.213.0.0/20 172.20.0.0/16 192.168.64.0/18 10.1.2.0/27; do
+    printf 'GH_JOB_SUBNET_POOL=%s\n' "$good" > "$T/ghr-badpool.env"
+    out=$(BRIDGE_IP=172.17.0.1 GHR_CONFIG="$T/ghr-badpool.env" PATH="$T/bin:$PATH" unshare -n bash -c '
+      iptables -N DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -A FORWARD -j DOCKER-USER
+      bash "$1" >/dev/null 2>&1; iptables -S CI-JOBS-IN' _ "$ROOT/runner/scripts/ci-job-isolation.sh" 2>&1)
+    check "pool ${good}: accepted" 'grep -q -- "-s ${good} -d 172.17.0.1/32 -i br-+ .*--dport 4873 -j ACCEPT" <<<"$out"'
+  done
+  # the rule itself failing must not leave the chain without its final DROP and must not stop the script
+  printf '#!/bin/sh\ncase "$*" in *"-i br-+ -s"*) exit 1 ;; esac\nexec %s "$@"\n' "$(command -v iptables)" > "$T/bin/iptables"; chmod +x "$T/bin/iptables"
+  out=$(BRIDGE_IP=172.17.0.1 GHR_CONFIG="$T/ghr-pool.env" PATH="$T/bin:$PATH" unshare -n bash -c '
+    iptables -N DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -A FORWARD -j DOCKER-USER
+    bash "$1" 2>&1; echo "rc=$?"; iptables -S CI-JOBS-IN' _ "$ROOT/runner/scripts/ci-job-isolation.sh" 2>&1)
+  rm -f "$T/bin/iptables"
+  check "pool rule fails: warning, exit 0, chain still ends with DROP" 'grep -q "WARN: pool rule failed" <<<"$out" && grep -qx "rc=0" <<<"$out" && grep -q -- "-A CI-JOBS-IN -j DROP" <<<"$out"'
+  check "a config without GH_JOB_SUBNET_POOL: no pool rule" '! grep -q -- "-i br-+" <<<"$out"'
+  out=$(BRIDGE_IP=172.17.0.1 GHR_CONFIG="$T/missing.env" PATH="$T/bin:$PATH" unshare -n bash -c '
+    iptables -N DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -A FORWARD -j DOCKER-USER
+    bash "$1" >/dev/null; iptables -S CI-JOBS-IN' _ "$ROOT/runner/scripts/ci-job-isolation.sh" 2>&1)
+  check "no GitHub runner config at all: no pool rule" '! grep -q -- "-i br-+" <<<"$out"'
+  # Packets: a client on a bridge-like interface with an address in the pool, one on another br- interface, and a stand-in metadata service.
+  cat > "$T/ns-pool.sh" <<'NSEOF'
+set -e
+ip link set lo up
+ip addr add 172.17.0.1/32 dev lo
+sysctl -qw net.ipv4.ip_forward=1
+mkns() { unshare -n sleep 120 & echo $! > "$T/ns-$1.pid"; sleep 0.3; }
+pid() { cat "$T/ns-$1.pid"; }
+mkns pool; mkns other; mkns meta
+mkclient() { # name hostif hostaddr clientaddr
+  ip link add "$2" type veth peer name "c-$1" netns "$(pid "$1")"
+  ip addr add "$3" dev "$2"; ip link set "$2" up
+  nsenter -t "$(pid "$1")" -n sh -c "ip link set lo up; ip addr add $4 dev c-$1; ip link set c-$1 up; ip route add default via ${3%/*}"
+}
+mkclient pool br-pool 10.213.0.1/28 10.213.0.2/28
+mkclient other br-other 10.250.0.1/28 10.250.0.2/28
+ip link add vmeta0 type veth peer name vmeta1 netns "$(pid meta)"
+ip addr add 10.99.0.1/30 dev vmeta0; ip link set vmeta0 up
+nsenter -t "$(pid meta)" -n sh -c "ip link set lo up; ip addr add 10.99.0.2/30 dev vmeta1; ip link set vmeta1 up; ip addr add 169.254.169.254/32 dev lo; ip route add default via 10.99.0.1"
+ip route add 169.254.169.254/32 via 10.99.0.2
+python3 -m http.server 4873 --bind 0.0.0.0 >/dev/null 2>&1 & srv1=$!
+nsenter -t "$(pid meta)" -n python3 -m http.server 80 --bind 0.0.0.0 >/dev/null 2>&1 & srv2=$!
+sleep 1
+get() { nsenter -t "$(pid "$1")" -n python3 -c 'import sys,urllib.request;urllib.request.urlopen(sys.argv[1], timeout=2)' "$2" >/dev/null 2>&1 && echo yes || echo no; }
+echo "control pool npm $(get pool http://172.17.0.1:4873/)"
+echo "control other npm $(get other http://172.17.0.1:4873/)"
+echo "control pool meta $(get pool http://169.254.169.254/)"
+bash "$ISOLATION" >/dev/null
+echo "pool npm $(get pool http://172.17.0.1:4873/)"
+echo "other npm $(get other http://172.17.0.1:4873/)"
+echo "pool meta $(get pool http://169.254.169.254/)"
+echo "other meta $(get other http://169.254.169.254/)"
+kill "$srv1" "$srv2" 2>/dev/null || true
+kill "$(pid pool)" "$(pid other)" "$(pid meta)" 2>/dev/null || true
+NSEOF
+  out=$(env T="$T" ISOLATION="$ROOT/runner/scripts/ci-job-isolation.sh" BRIDGE_IP=172.17.0.1 GHR_CONFIG="$T/ghr-pool.env" PATH="$T/bin:$PATH" unshare -n bash -c '
+    iptables -N DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -A FORWARD -j DOCKER-USER
+    bash "$1"' _ "$T/ns-pool.sh" 2>&1)
+  echo "$out" | sed 's/^/      | /'
+  check "controls: before the rules all three paths work, so the negatives below mean blocked" 'grep -qx "control pool npm yes" <<<"$out" && grep -qx "control other npm yes" <<<"$out" && grep -qx "control pool meta yes" <<<"$out"'
+  check "a client in the pool reaches the npm cache on the docker0 IP" 'grep -qx "pool npm yes" <<<"$out"'
+  check "a client on another br- interface does not" 'grep -qx "other npm no" <<<"$out"'
+  check "the metadata address stays dropped for both" 'grep -qx "pool meta no" <<<"$out" && grep -qx "other meta no" <<<"$out"'
+  rm -f "$T/bin/logger" "$T"/ns-*.pid; reset_calls
+else
+  echo "  SKIP  no iptables, nsenter, python3 or network namespaces here"
+fi
+
+section "weekly cleanup re-pulls the pinned GitHub runner images after the image prune"
+printf 'GH_OWNER=octo\nGH_RUNNER_IMAGE=example.org/runner:1@sha256:%064d\nGH_BUILDKIT_IMAGE=example.org/bk:1@sha256:%064d\n' 1 2 > "$T/ghr-clean.env"
+stub logger 'exit 0'
+stub docker '[[ "$1 $2" == "image inspect" ]] && exit 1; exit 0'   # the images are gone; ps shows no job
+out=$(GHR_CONFIG="$T/ghr-clean.env" DRY_RUN=1 bash "$ROOT/runner/scripts/runner-weekly-cleanup.sh" 2>&1)
+check "both pinned images are pulled again (dry run shows the commands)" 'grep -q -- "-> docker pull -q example.org/runner:1@sha256:0*1$" <<<"$out" && grep -q -- "-> docker pull -q example.org/bk:1@sha256:0*2$" <<<"$out"'
+stub docker '[[ "$1 $2" == "image inspect" ]] && exit 0; exit 0'   # still on disk: nothing to pull
+out=$(GHR_CONFIG="$T/ghr-clean.env" DRY_RUN=1 bash "$ROOT/runner/scripts/runner-weekly-cleanup.sh" 2>&1)
+check "images that are still there are not pulled" '! grep -q "docker pull" <<<"$out"'
+out=$(GHR_CONFIG="$T/none.env" DRY_RUN=1 bash "$ROOT/runner/scripts/runner-weekly-cleanup.sh" 2>&1)
+check "no GitHub runner config: nothing to pull" '! grep -q "docker pull" <<<"$out"'
+rm -f "$T/bin/docker" "$T/bin/logger"; reset_calls
+
 section "runner job limits (ci-jobs.slice)"
 mkdir -p "$T/jl"
 printf '[[runners]]\n  [runners.docker]\n    image = "x"\n' > "$T/jl/config.toml"
@@ -438,10 +599,10 @@ check "caddy ports are published on IPv4 only" 'grep -qF "\"0.0.0.0:\${TS_HTTP_P
 section "runner-engine-update"
 stub logger 'exit 0'
 export ENGINE_UPDATE_LOG="$T/engine.log"
-stub docker 'echo abc123'
+stub docker '[[ "$*" == *github-runner* ]] && exit 0; echo abc123'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "a running CI job: skipped, exit 0" '[[ $rc -eq 0 ]] && grep -q "SKIP 1 CI job" <<<"$out"'
-stub docker 'exit 1'
+stub docker '[[ "$*" == *github-runner* ]] && exit 0; exit 1'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "docker not answering is not 'no jobs'" '[[ $rc -eq 0 ]] && grep -q "SKIP docker does not answer" <<<"$out"'
 # idle at the first look: the runner is stopped, the job list is read again, then the upgrade runs
@@ -453,24 +614,25 @@ stub systemctl 'case "$1" in
   stop) touch "'"$T"'/runner-stopped" ;;
   start) rm -f "'"$T"'/runner-stopped" ;;
   show) if [[ -e "'"$T"'/runner-stopped" || -e "'"$T"'/runner-masked" ]]; then echo inactive; else echo active; fi ;;
-  is-active) [[ "$3" == gitlab-runner && -e "'"$T"'/runner-stopped" ]] && exit 3 ;;
+  is-active) [[ "$3" == github-runner-ctl ]] && exit 3; [[ "$3" == gitlab-runner && -e "'"$T"'/runner-stopped" ]] && exit 3 ;;
   cat) exit 1 ;;
 esac
 exit 0'
 rm -f "$T/runner-stopped" "$T/docker-calls"
-stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 1 ]] && echo jobabc; exit 0'
+stub docker '[[ "$*" == *github-runner* ]] && exit 0; n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 1 ]] && echo jobabc; exit 0'
 reset_calls
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "a job picked up before the runner stopped: runner started again, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP a CI job appeared" <<<"$out" && grep -q "^start --no-block gitlab-runner" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)" && [[ ! -e "$T/runner-stopped" ]]'
 check "runner is stopped gracefully (SIGQUIT drop-in, systemd never SIGKILLs it)" 'grep -q "^KillSignal=SIGQUIT" "$ENGINE_UPDATE_DROPIN" && grep -q "^TimeoutStopSec=infinity" "$ENGINE_UPDATE_DROPIN" && grep -q "^stop --no-block gitlab-runner" <<<"$(calls systemctl)"'
 rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
-stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; exit 0'
+stub docker '[[ "$*" == *github-runner* ]] && exit 0; n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; exit 0'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 seq=$(calls systemctl | grep -E '^(stop|mask|restart docker|start)' | tr '\n' ';')
 check "idle: stop, upgrade, restart docker, start runner, OK" '[[ $rc -eq 0 ]] && grep -q "OK upgraded" <<<"$out" && grep -q "upgrade" <<<"$(calls dnf)" && [[ "$seq" == "stop --no-block gitlab-runner;restart docker;start gitlab-runner;" ]]' || echo "    seq: $seq"
 # a job runs longer than STOP_WAIT: nothing is killed, the runner is queued to start again, Docker is untouched
 rm -f "$T/runner-stopped"; reset_calls
 stub systemctl 'case "$1" in
+  is-active) [[ "$3" == github-runner-ctl ]] && exit 3 ;;
   show) echo deactivating ;;
   cat) exit 1 ;;
 esac
@@ -479,12 +641,13 @@ out=$(STOP_WAIT=10 bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc
 check "stop times out: SKIP, runner start queued, no SIGKILL timeout, docker not restarted, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP gitlab-runner did not stop" <<<"$out" && grep -q "^start --no-block gitlab-runner" <<<"$(calls systemctl)" && ! grep -q "^restart docker" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)" && grep -q "^TimeoutStopSec=infinity" "$ENGINE_UPDATE_DROPIN"'
 # a package scriptlet starts the runner and it takes a job: Docker is not restarted under it
 rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
-stub docker 'n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 2 ]] && echo jobabc; exit 0'
+stub docker '[[ "$*" == *github-runner* ]] && exit 0; n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 2 ]] && echo jobabc; exit 0'
 stub dnf 'if [[ "$1 $2" == "-q check-update" ]]; then exit 100; fi; [[ "$1" == "-y" && "$*" != *gitlab-runner* ]] && touch "'"$T"'/scriptlet-started"; exit 0'
 stub systemctl 'case "$1" in
   stop) touch "'"$T"'/runner-stopped" ;;
   start) rm -f "'"$T"'/runner-stopped" ;;
   show) if [[ -e "'"$T"'/runner-stopped" && ! -e "'"$T"'/scriptlet-started" ]]; then echo inactive; elif [[ -e "'"$T"'/scriptlet-started" && "$(cat "'"$T"'/scriptlet-n" 2>/dev/null || echo 0)" -ge 1 ]]; then echo inactive; else [[ -e "'"$T"'/scriptlet-started" ]] && echo 1 > "'"$T"'/scriptlet-n"; echo active; fi ;;
+  is-active) [[ "$3" == github-runner-ctl ]] && exit 3 ;;
   cat) exit 1 ;;
 esac
 exit 0'
@@ -494,11 +657,12 @@ check "runner back up after the upgrade with a job: docker is not restarted" '[[
 rm -f "$T/scriptlet-started" "$T/scriptlet-n"
 # order: the Docker packages are upgraded (and Docker restarted) before gitlab-runner, in separate dnf transactions
 rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
-stub docker 'exit 0'
+stub docker '[[ "$*" == *github-runner* ]] && exit 0; exit 0'
 stub dnf 'if [[ "$1 $2" == "-q check-update" ]]; then exit 100; fi; [[ "$1" == "-y" ]] && echo "$*" >> "'"$T"'/order"; exit 0'
 stub systemctl 'case "$1" in
   stop) touch "'"$T"'/runner-stopped" ;;
   start) rm -f "'"$T"'/runner-stopped" ;;
+  is-active) [[ "$3" == github-runner-ctl ]] && exit 3 ;;
   restart) [[ "$2" == docker ]] && echo "restart-docker" >> "'"$T"'/order" ;;
   show) if [[ -e "'"$T"'/runner-stopped" ]]; then echo inactive; else echo active; fi ;;
   cat) exit 1 ;;
@@ -509,6 +673,30 @@ out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 ord=$(sed -E 's/-y -q upgrade /upgrade: /' "$T/order" | tr '\n' ';')
 check "docker packages upgrade, then docker restart, then gitlab-runner alone" '[[ $rc -eq 0 && "$ord" == "upgrade: docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin;restart-docker;upgrade: gitlab-runner;" ]]' || echo "    order: $ord"
 rm -f "$T/order"
+# a GitHub runner pod counts as a CI job, like a GitLab job container
+stub docker 'if [[ "$*" == *github-runner* ]]; then echo ghpod1; fi; exit 0'
+reset_calls
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+check "a running GitHub runner pod: skipped, exit 0, nothing stopped" '[[ $rc -eq 0 ]] && grep -q "SKIP 1 CI job" <<<"$out" && ! grep -q "^stop" <<<"$(calls systemctl)"'
+# idle: the controller is stopped with the runner (no new pod during the upgrade) and started again afterwards
+rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
+stub docker 'exit 0'
+stub systemctl 'case "$1" in
+  stop) [[ "$2" == gitlab-runner || "$3" == gitlab-runner ]] && touch "'"$T"'/runner-stopped" ;;
+  start) [[ "$2" == gitlab-runner ]] && rm -f "'"$T"'/runner-stopped" ;;
+  show) if [[ -e "'"$T"'/runner-stopped" ]]; then echo inactive; else echo active; fi ;;
+  is-active) exit 0 ;;
+  cat) exit 1 ;;
+esac
+exit 0'
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+seq=$(calls systemctl | grep -E '^(stop|restart docker|start)' | tr '\n' ';')
+check "idle with github-runner-ctl: controller stopped before the upgrade, started after" '[[ $rc -eq 0 && "$seq" == "stop github-runner-ctl;stop --no-block gitlab-runner;restart docker;start gitlab-runner;start --no-block github-runner-ctl;" ]]' || echo "    seq: $seq"
+# a pod appears after both were stopped: both are started again, nothing is upgraded
+rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
+stub docker 'if [[ "$*" == *github-runner* ]]; then n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 1 ]] && echo ghpod1; fi; exit 0'
+out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
+check "a GitHub pod appears after the stop: runner and controller started again, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP a CI job appeared" <<<"$out" && grep -q "^start --no-block gitlab-runner" <<<"$(calls systemctl)" && grep -q "^start --no-block github-runner-ctl" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)"'
 rm -f "$T/bin/docker" "$T/bin/logger" "$T/bin/sleep" "$T/bin/dnf" "$T/bin/rpm" "$T/bin/systemctl" "$T/runner-stopped" "$T/docker-calls"; unset ENGINE_UPDATE_LOG ENGINE_UPDATE_DROPIN; reset_calls
 
 section "server lock-root"

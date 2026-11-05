@@ -31,6 +31,7 @@ Updates what is installed on this server to the state of this repo checkout:
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
   npm-cache      /opt/npm-cache
+  github-runner  controller, unit and the two pinned images (common/lib.sh) in /etc/github-runner/config.env; pulls the images
 Components that are not installed are skipped.
 
   -n, --dry-run  show what would change, change nothing
@@ -542,6 +543,52 @@ update_npm_cache() {
   stack_sync npm-cache "$dir" "$cfg" config.yaml "$compose" "http://${bridge}:4873/-/ping"
 }
 
+# The opt-in GitHub Actions runner: controller script, unit and the image pins of this repo checkout. Never touches the key or the
+# rest of config.env. A new runner image must reach the host within 30 days of its release (GitHub stops queuing jobs to an older
+# runner), so a bump of GHR_RUNNER_IMAGE in common/lib.sh lands here. The controller is restarted at once: it keeps no job in
+# memory and a running pod is adopted again from its Docker labels (a restart deferred until idle would be lost, the next run sees no change).
+update_github_runner() {
+  local cfg=/etc/github-runner/config.env ctl=/usr/local/bin/github-runner-ctl unit=github-runner-ctl.service changed=0 cfg_changed=0 k want have
+  if [[ ! -f "$cfg" ]]; then
+    log "github-runner: not installed, skipping"
+    return 0
+  fi
+  bash -n "${REPO_ROOT}/runner/scripts/github-runner-ctl" || die "syntax error in runner/scripts/github-runner-ctl, nothing changed"
+  if sync_file "${REPO_ROOT}/runner/scripts/github-runner-ctl" "$ctl" 0755; then changed=1; CHANGED+=("scripts/github-runner-ctl"); fi
+  if sync_file "${REPO_ROOT}/runner/systemd/${unit}" "/etc/systemd/system/${unit}" 0644; then changed=1; CHANGED+=("systemd/${unit}"); run systemctl daemon-reload; fi
+  for k in GHR_RUNNER_IMAGE:GH_RUNNER_IMAGE GHR_BUILDKIT_IMAGE:GH_BUILDKIT_IMAGE; do
+    want=$(sed -n "s/^${k%%:*}=\"\(.*\)\"\$/\1/p" "${REPO_ROOT}/common/lib.sh")
+    [[ "$want" =~ @sha256:[0-9a-f]{64}$ ]] || die "no pinned ${k%%:*} in common/lib.sh"
+    have=$({ grep -m1 "^${k#*:}=" "$cfg" || true; } | cut -d= -f2-)
+    if [[ "$have" != "$want" ]]; then
+      cfg_changed=1; changed=1; CHANGED+=("github-runner/${k#*:}")
+      if (( DRYRUN )); then
+        log "[dry-run] would set ${k#*:}=${want}"
+      else
+        backup_to_run "$cfg"
+        env_set "$cfg" "${k#*:}" "$want"
+        chown root:github-runner "$cfg"; chmod 0640 "$cfg"
+        log "updated ${k#*:} in ${cfg}"
+      fi
+    fi
+  done
+  if (( DRYRUN )); then return 0; fi
+  if ! GHR_CONFIG="$cfg" "$ctl" check-config >/dev/null; then
+    restore_files
+    die "github-runner: config.env invalid after the update, files restored"
+  fi
+  if (( cfg_changed )) && command -v docker >/dev/null 2>&1; then
+    log "github-runner: pulling the pinned images"
+    docker pull -q "$(sed -n 's/^GH_RUNNER_IMAGE=//p' "$cfg")" >/dev/null || die "github-runner: cannot pull the runner image"
+    if [[ "$(sed -n 's/^GH_BUILDKIT=//p' "$cfg")" == 1 ]]; then docker pull -q "$(sed -n 's/^GH_BUILDKIT_IMAGE=//p' "$cfg")" >/dev/null || die "github-runner: cannot pull the BuildKit image"; fi
+  fi
+  if (( changed )) && systemctl is-active --quiet "$unit" 2>/dev/null; then
+    systemctl restart "$unit"
+    log "github-runner: controller restarted (running pods keep running and are adopted)"
+  fi
+  log "github-runner: done"
+}
+
 do_rollback() {
   local latest
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
@@ -637,6 +684,7 @@ main() {
     update_logging
     update_registry_cache
     update_npm_cache
+    update_github_runner
   else
     log "docker not installed, skipping container stacks"
   fi

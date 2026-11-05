@@ -13,7 +13,9 @@
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
 # JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
-# out-of-memory kill (exit 137) instead of freezing the host.
+# out-of-memory kill (exit 137) instead of freezing the host. The opt-in GitHub Actions runner (runner/install/github-runner.sh) shares
+# this slice: its pod is a runner container with the same JOB_CPUS/JOB_MEMORY plus a BuildKit sidecar (768m), one pod at a time, so with it
+# installed keep concurrent = 1 (or raise JOBS_MEMORY_MAX on a bigger host) or a busy host hits the ceiling and kills a job.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
@@ -27,7 +29,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root

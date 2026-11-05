@@ -212,7 +212,6 @@ EOF
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
-
 __shell_history_vars() {
   HISTSIZE=100000
   HISTFILESIZE=200000
@@ -221,9 +220,7 @@ __shell_history_vars() {
 }
 __shell_history_vars
 shopt -s histappend cmdhist
-
-# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
-# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
+# Before each prompt: append the last command to the history; the first prompt re-applies the limits (Debian lowers them).
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -231,9 +228,8 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
-# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
-# element 0 for /etc/bashrc's title command; the hook stays in element 1.
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. Still empty (Fedora/EL): an array whose element 0 is left
+# empty for /etc/bashrc's title command.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -252,7 +248,6 @@ case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
     fi
     ;;
 esac
-
 # Debian and Ubuntu install fd as fdfind.
 if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
   alias fd=fdfind
@@ -266,7 +261,6 @@ if [[ -n "${__fd-}" ]]; then
   export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
 fi
 unset __fd
-
 if command -v fzf >/dev/null 2>&1; then
   for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
     if [[ -r "$__f" ]]; then
