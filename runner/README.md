@@ -254,16 +254,44 @@ GitHub removes the runner after its one job; the controller then removes the pod
 
 ### Create the GitHub App
 
-GitHub, Settings, Developer settings, GitHub Apps, New GitHub App:
+Once, in the browser, signed in as the account that owns the private repositories. The labels below are GitHub's at the time of writing; if the page looks different, the [GitHub docs on registering an App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app) have the current ones.
 
-| Field | Value |
-|---|---|
-| Name, Homepage URL | anything (for example `hetzner-runner`, your profile URL) |
-| Webhook | **Active off** (the controller polls; no public URL is needed) |
-| Repository permissions | **Administration: Read and write** (creates and deletes runners), **Actions: Read-only** (queued runs and jobs), **Metadata: Read-only** (always on) |
-| Where can this App be installed | Only on this account |
+1. Open <https://github.com/settings/apps/new> (or: avatar, **Settings**, **Developer settings**, **GitHub Apps**, **New GitHub App**).
+2. Fill in the form. Everything not in this table stays as it is or empty:
 
-Create it, then **Generate a private key** (a `.pem` file downloads) and note the **Client ID**. Then **Install App**, your account, **All repositories** (new private repositories are picked up by themselves; the controller itself filters out public ones). The App has no access to your code (no *Contents* permission).
+   | Field | Value | Why |
+   |---|---|---|
+   | GitHub App name | unique on GitHub, e.g. `hetzner-runner-<your user>` | only a name |
+   | Homepage URL | any URL, e.g. your profile `https://github.com/<your user>` | required by the form, not used |
+   | Callback URL, Setup URL | empty | no user sign-in |
+   | Request user authorization (OAuth) during installation, Enable Device Flow | off | not needed |
+   | Webhook, **Active** | **off** (untick) | the controller polls; the server needs no public URL |
+   | Repository permissions, **Administration** | **Read and write** | create and delete the per-job runners |
+   | Repository permissions, **Actions** | **Read-only** | see queued runs and jobs |
+   | Repository permissions, **Metadata** | Read-only (set by GitHub, cannot be changed) | list the repositories |
+   | All other repository, organization and account permissions | No access | least privilege: no *Contents*, so the App cannot read your code |
+   | Subscribe to events | none (greyed out without a webhook) | |
+   | Where can this GitHub App be installed? | **Only on this account** | nobody else can install it |
+
+3. **Create GitHub App**. On the App's page (**General**) note the **Client ID** (starts with `Iv`), the installer asks for it.
+4. Same page, **Private keys**, **Generate a private key**: the browser downloads `<app-name>.<date>.private-key.pem`. This file is the App's password: keep it off shared folders and chats, and delete the copies once the installer has taken it (see below).
+5. Left menu **Install App**, **Install** next to your account, choose **All repositories**, **Install**. New private repositories are then picked up by themselves; the controller itself never serves public, archived or excluded ones (`GH_EXCLUDE_REPOS` keeps a private one out). **Only select repositories** works too if you prefer to list them.
+6. In each private repository that will use the runner, keep fork pull requests from running workflows: repository **Settings**, **Actions**, **General**, *Fork pull request workflows in private repositories*: **Run workflows from fork pull requests** unticked (GitHub's default). This setting, not the controller, is what stops code from a fork reaching the server.
+
+Check it before the server part (browser): **Settings**, **Applications**, **Installed GitHub Apps** lists the App with *Repository access: All repositories*; **Configure** shows the permissions above. If you change a permission later, GitHub asks you to accept it on the installation (an email and a banner on the App's installation page) and the old permissions stay until you do.
+
+When the self-test below fails:
+
+| Line in the self-test output | Cause | Fix |
+|---|---|---|
+| `FAIL  key /etc/github-runner/app.pem is missing, unreadable or not a private key` | wrong file given to the installer (for example the public key or a truncated copy) | rerun the installer with the downloaded `.pem` (`GH_KEY_SRC=...`) |
+| `FAIL  GET /app: ... (wrong GH_APP_CLIENT_ID or key?)` | wrong Client ID, a key of another App, or the server clock off by minutes | compare the Client ID with the App page; `timedatectl` must show *System clock synchronized: yes*; generate a new key if unsure |
+| `FAIL  permission administration: none (needs write)` (or `actions`) | the permission is not set on the App | step 2 (App page, **Permissions & events**) |
+| `FAIL  no installation token: ...` | the App is not installed on your account, or a changed permission is not yet accepted on the installation | step 5; accept the pending request on the installation page |
+| `WARN  no private repository would be served` | the installation sees no private repository, or all are excluded | step 5 (repository access), `GH_EXCLUDE_REPOS` |
+| `FAIL  no Administration token for owner/repo` / `FAIL  listing runners of owner/repo` | Administration is read-only, or the change is not accepted on the installation | Administration: **Read and write**, then accept on the installation page |
+
+Key rotation: see [Rotate the App key](#rotate-the-app-key). To cut the server off at once: uninstall the App (Installed GitHub Apps, **Configure**, **Uninstall**) or delete its keys on the App page; no new runner can be created after that.
 
 ### Install
 
