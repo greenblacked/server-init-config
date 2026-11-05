@@ -1007,7 +1007,10 @@ test_jobs_directory_must_be_private_and_owned_by_the_controller_user() {
   fx GET '/repos/octo/ok/actions/runs?status=in_progress&per_page=50&page=1' 200 '{"workflow_runs":[]}'
   ctl_once; assert_eq "$RC" 0
   assert_eq "$(stat -c %a "$T/state/jobs")" 700 "a too open directory is tightened"
-  chown 65534 "$T/state/jobs"
+  # A wrong owner without root: make the controller believe it runs as another uid (chown needs root, CI runs as a normal user).
+  local real_id other_uid; real_id=$(command -v id); other_uid=$(( $(id -u) + 1 ))
+  printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then echo %d; else exec %q "$@"; fi\n' "$other_uid" "$real_id" > "$T/bin/id"
+  chmod +x "$T/bin/id"
   ctl_once; assert_eq "$RC" 1
   grep -q 'event=jobs_dir_unsafe' "$T/out" || { cat "$T/out" >&2; return 1; }
 }
