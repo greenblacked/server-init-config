@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (GitLab job containers and GitHub runner pods). The
-# runner (and github-runner-ctl) is stopped gracefully, jobs are checked again, Docker packages are upgraded and Docker restarted,
-# then gitlab-runner last. If a job is there, both are started again and nothing (more) is changed.
-# One result line goes to /var/log/runner-engine-update.log, which health reads.
-# Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
+# Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
+# stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
+# One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
 set -Eeuo pipefail
-
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-
 note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
   exit 0
@@ -22,8 +17,7 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>/run/runner-engine-update.lock
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-
-# A docker error is not "no jobs": updating then could kill running jobs.
+# A docker error is not "no jobs".
 job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
 if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
@@ -33,7 +27,6 @@ if [[ -n "$jobs" ]]; then
   note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
   exit 0
 fi
-
 installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
@@ -48,30 +41,24 @@ else
   exit 1
 fi
 (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
-
 if ! pending; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
-# Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
 docker_pkgs=(); runner_pkgs=()
 for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
 if [[ "$DRY_RUN" == 1 ]]; then
   note "DRY-RUN would upgrade ${installed[*]}"
   exit 0
 fi
-
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
-
-# From here the runner may be stopped; whatever happens, start it again (--no-block: queued behind a stop that is still finishing a job).
+# From here whatever happens: start the runner again.
 runner_stopped=0 ctl_stopped=0
 ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
 runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
-
-# `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
-# SIGQUIT is the runner's graceful stop (running jobs finish). Returns 1 when it is still running after STOP_WAIT.
+# SIGQUIT = graceful stop (jobs finish). Returns 1 when still running after STOP_WAIT.
 stop_runner_wait() {
   local waited=0 st
   systemctl stop --no-block gitlab-runner
@@ -84,48 +71,43 @@ stop_runner_wait() {
   done
 }
 no_jobs() { local j; j=$(job_ids 2>/dev/null) && [[ -z "$j" ]]; }
-
-# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still waiting for a job
-# (this script gives up on its own after STOP_WAIT).
+# SIGTERM would end jobs; TimeoutStopSec=infinity: systemd never SIGKILLs the runner.
 if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
   printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
-# No new GitHub pod while Docker is upgraded (running pods are caught by no_jobs).
+# no new GitHub pod during the upgrade
 if systemctl is-active --quiet github-runner-ctl 2>/dev/null; then systemctl stop github-runner-ctl && ctl_stopped=1; fi
 if ! stop_runner_wait; then
-  # A start queued behind the stop brings the runner back when the job ends.
-  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
+  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
   exit 0
 fi
 if ! no_jobs; then
-  note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
+  note "SKIP a CI job appeared or docker does not answer after the runner stopped; will retry next week"
   exit 0
 fi
-
-# Docker packages first, runner stopped: their own Docker restart finds no job.
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
-# A package scriptlet may have started the runner and it may have taken a job: stop it again and look once more.
+# a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
+    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
     exit 0
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
+  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
   exit 0
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
   systemctl restart docker
   sleep 5
-  # The isolation rules live in iptables; reapply them after the Docker restart.
+  # reapply the isolation rules
   if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
 fi
 if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then

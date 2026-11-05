@@ -896,8 +896,8 @@ check_github_runner() {
   if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); else created=$(jq -r '.runner_image_created // empty' "$st" 2>/dev/null || true); fi
   if [[ -n "$created" ]] && isnum "$created"; then
     img_age=$(( (now - created) / 86400 ))
-    if (( img_age >= 30 )); then fail "runner image is ${img_age} days old: GitHub no longer queues jobs to a runner older than 30 days; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
-    elif (( img_age >= 25 )); then warn "runner image is ${img_age} days old (GitHub stops queuing at 30): bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    # age alone is only a warning (a newer pin may already be waiting for update.sh); a runner that really cannot take jobs shows up as update_required
+    if (( img_age >= 25 )); then warn "runner image is ${img_age} days old (GitHub stops queuing jobs to a runner older than 30 days): bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
     else ok "runner image is ${img_age} days old"; fi
   else
     info "runner image age unknown (image not on disk and not yet recorded)"

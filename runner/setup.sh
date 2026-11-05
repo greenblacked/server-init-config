@@ -8,7 +8,7 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 CFG=/etc/gitlab-runner/config.toml
 CURRENT=""
 
-COMPONENTS=(users packages tools firewall security register job-limits registry-cache monitoring logging npm-cache shared-cache prewarm grafana-domain selinux lock-root)
+COMPONENTS=(users packages tools firewall security register job-limits registry-cache monitoring logging npm-cache shared-cache github-runner prewarm grafana-domain selinux lock-root)
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -27,6 +27,7 @@ describe() {
     logging)        echo "Loki + Grafana Alloy: container logs and the journal in Grafana" ;;
     npm-cache)      echo "Verdaccio npm cache for CI jobs" ;;
     shared-cache)   echo "shared /srv/ci-cache for npm and Sonar, mounted into jobs" ;;
+    github-runner)  echo "ephemeral GitHub Actions runner for private repositories via a GitHub App (asks for the App client ID and key; not in --base/--all)" ;;
     prewarm)        echo "daily pre-pull of CI images (asks for a deploy token)" ;;
     grafana-domain) echo "Grafana on an HTTPS domain via Caddy (needs DOMAIN and ACME_EMAIL)" ;;
     selinux)        echo "switch SELinux to enforcing and verify Docker and the runner" ;;
@@ -48,6 +49,7 @@ script_for() {
     logging)        echo "${HERE}/install/logging.sh" ;;
     npm-cache)      echo "${HERE}/install/npm-cache.sh" ;;
     shared-cache)   echo "${HERE}/install/shared-cache.sh" ;;
+    github-runner)  echo "${HERE}/install/github-runner.sh" ;;
     prewarm)        echo "${HERE}/install/image-prewarm.sh" ;;
     grafana-domain) echo "${HERE}/install/grafana-domain.sh" ;;
     selinux)        echo "${HERE}/install/selinux-enforcing.sh" ;;
@@ -79,6 +81,7 @@ is_installed() {
     logging)        [[ -f /opt/logging/docker-compose.yml ]] ;;
     npm-cache)      [[ -f /opt/npm-cache/docker-compose.yml ]] ;;
     shared-cache)   [[ -f "$CFG" ]] && grep -q '/srv/ci-cache:/ci-cache' "$CFG" ;;
+    github-runner)  [[ -f /etc/github-runner/config.env && -x /usr/local/bin/github-runner-ctl ]] ;;
     prewarm)        [[ -f /etc/ci-prewarm.conf ]] ;;
     grafana-domain) [[ -f /opt/monitoring/docker-compose.override.yml ]] ;;
     lock-root)      grep -qsx "PermitRootLogin no" /etc/ssh/sshd_config.d/00-ci-hardening.conf ;;
@@ -95,6 +98,7 @@ Usage: $0 [--base] [--all] [--list] [--COMPONENT ...]
   --base   users + packages + tools + firewall + registry-cache + monitoring (no questions asked)
   --all    --base + register + job-limits + logging + npm-cache + shared-cache (asks for the runner token)
            lock-root is never implied: run --lock-root after the admin login works
+           github-runner is never implied either: it needs a GitHub App first (see runner/README.md)
   --list   show what is installed and exit
 
 Components, installed in this order whatever the order of the flags:
@@ -146,6 +150,9 @@ preflight() {
       die "--${c} runs as the monitoring service user: add --users"
     fi
   done
+  if [[ -n "${WANT[github-runner]:-}" ]] && ! is_installed job-limits && [[ -z "${WANT[job-limits]:-}" ]]; then
+    die "--github-runner runs its pods inside ci-jobs.slice from the per-job limits: add --job-limits (needs a registered runner)"
+  fi
   for c in npm-cache shared-cache; do
     if [[ -n "${WANT[$c]:-}" ]] && ! is_installed register && [[ -z "${WANT[register]:-}" ]]; then
       die "--${c} needs a registered runner: add --register"

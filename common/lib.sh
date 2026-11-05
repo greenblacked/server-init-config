@@ -218,6 +218,16 @@ own_stack_dir() {
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v

@@ -111,25 +111,20 @@ write_files:
       #!/usr/bin/env bash
       # Weekly cleanup of the GitLab Runner host: Docker, runner caches, packages, logs, temp files.
       set -Eeuo pipefail
-
       RETENTION_DAYS="${RETENTION_DAYS:-7}"
       JOURNAL_MAX="${JOURNAL_MAX:-500M}"
       SHARED_CACHE_DIR="${SHARED_CACHE_DIR:-/srv/ci-cache}"
       SHARED_CACHE_MAX_AGE_DAYS="${SHARED_CACHE_MAX_AGE_DAYS:-14}"
       DRY_RUN="${DRY_RUN:-0}"
-
       CACHE_DIRS=(/home/gitlab-runner/cache /home/gitlab-runner/.cache /var/lib/gitlab-runner/cache /root/.cache)
       BUILD_DIRS=(/home/gitlab-runner/builds /var/lib/gitlab-runner/builds)
-
       log()  { logger -t runner-weekly-cleanup -- "$*"; echo "$(date -u +%FT%TZ) $*"; }
       disk() { df --output=used,avail,pcent -h / | tail -1 | xargs; }
-
       run() {
         log "-> $*"
         [[ "$DRY_RUN" == "1" ]] && return 0
         "$@" || log "WARN: failed: $*"
       }
-
       wipe_dir() {
         local dir="$1" age="${2:-}"
         [[ -d "$dir" ]] || return 0
@@ -143,7 +138,6 @@ write_files:
           find "$dir" -mindepth 1 -delete 2>/dev/null || log "WARN: partial wipe of $dir"
         fi
       }
-
       usage() {
         cat <<USAGE
       Usage: $0 [--dry-run] [--help]
@@ -156,7 +150,6 @@ write_files:
         DRY_RUN=1                   show what would be cleaned without deleting anything
       USAGE
       }
-
       while (( $# )); do
         case "$1" in
           -h|--help) usage; exit 0 ;;
@@ -166,16 +159,12 @@ write_files:
         shift
       done
       [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-
       exec 9>/run/runner-weekly-cleanup.lock
       flock -n 9 || { log "another cleanup is running, exit"; exit 0; }
-
       hours=$(( RETENTION_DAYS * 24 ))
       log "start (dry_run=${DRY_RUN}), disk before: $(disk)"
-
       if command -v docker >/dev/null 2>&1; then
-        # Never guess the job count: if docker does not answer, a default of 0 would wipe the caches under running jobs.
-        # stderr goes to a temp file so a docker WARNING is never counted as a running job.
+        # docker not answering is not "no jobs"; stderr is kept apart so a warning is not counted as a job
         ps_err=$(mktemp)
         trap 'rm -f "$ps_err"' EXIT
         if ! job_ids=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; } 2>"$ps_err"); then
@@ -194,12 +183,14 @@ write_files:
         fi
         run docker container prune -f --filter "until=${hours}h"
         run docker image prune -af --filter "until=${hours}h"
+        # the prune takes the pinned GitHub runner images too: fetch them again
+        for img in $(sed -n 's/^GH_\(RUNNER\|BUILDKIT\)_IMAGE=//p' "${GHR_CONFIG:-/etc/github-runner/config.env}" 2>/dev/null); do
+          docker image inspect "$img" >/dev/null 2>&1 || run docker pull -q "$img"
+        done
         run docker builder prune -af --filter "until=${hours}h"
         run docker network prune -f --filter "until=${hours}h"
       fi
-
       for dir in "${BUILD_DIRS[@]}"; do wipe_dir "$dir" "$RETENTION_DAYS"; done
-
       if command -v apt-get >/dev/null 2>&1; then
         run apt-get -o DPkg::Lock::Timeout=600 autoremove --purge -y -q
         run apt-get -o DPkg::Lock::Timeout=600 autoclean -q
@@ -208,22 +199,18 @@ write_files:
         run dnf -y -q autoremove
         run dnf -q clean all
       fi
-
       run journalctl --vacuum-time="$(( RETENTION_DAYS * 2 ))d" --vacuum-size="$JOURNAL_MAX"
-
       if [[ "$DRY_RUN" != "1" ]]; then
         log "-> removing rotated logs older than 30d"
         find /var/log -type f \( -name '*.gz' -o -name '*-[0-9]*' -o -name '*.[0-9]' -o -name '*.old' \) -mtime +30 -delete 2>/dev/null || true
         find /tmp /var/tmp -xdev -mindepth 1 -type f -atime +"$RETENTION_DAYS" -delete 2>/dev/null || true
       fi
       run systemd-tmpfiles --clean
-
       if [[ -d "$SHARED_CACHE_DIR" && "$DRY_RUN" != "1" ]]; then
         log "-> pruning ${SHARED_CACHE_DIR} files not used for ${SHARED_CACHE_MAX_AGE_DAYS}d"
         find "$SHARED_CACHE_DIR" -xdev -type f -atime +"$SHARED_CACHE_MAX_AGE_DAYS" -delete 2>/dev/null || true
         find "$SHARED_CACHE_DIR" -xdev -mindepth 2 -type d -empty -delete 2>/dev/null || true
       fi
-
       log "done, disk after: $(disk)"
 
   - path: /usr/local/bin/runner-disk-guard.sh
@@ -232,14 +219,11 @@ write_files:
       #!/usr/bin/env bash
       # Emergency cleanup when the root filesystem crosses HARD_LIMIT percent.
       set -Eeuo pipefail
-
       HARD_LIMIT="${HARD_LIMIT:-85}"
-
       if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
         echo "Usage: $0  (env: HARD_LIMIT=85) runs runner-weekly-cleanup.sh with RETENTION_DAYS=1 when disk usage >= HARD_LIMIT%"
         exit 0
       fi
-
       used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
       if (( used >= HARD_LIMIT )); then
         logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
@@ -304,7 +288,6 @@ write_files:
       # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
       [ -n "${BASH_VERSION-}" ] || return 0
       [[ $- == *i* ]] || return 0
-
       __shell_history_vars() {
         HISTSIZE=100000
         HISTFILESIZE=200000
@@ -313,9 +296,7 @@ write_files:
       }
       __shell_history_vars
       shopt -s histappend cmdhist
-
-      # Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
-      # ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
+      # Before each prompt: append the last command to the history; the first prompt re-applies the limits (Debian lowers them).
       __shell_history_prompt() {
         history -a
         if [[ -z "${__shell_history_done-}" ]]; then
@@ -323,9 +304,8 @@ write_files:
           __shell_history_vars
         fi
       }
-      # Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
-      # profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
-      # element 0 for /etc/bashrc's title command; the hook stays in element 1.
+      # Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. Still empty (Fedora/EL): an array whose element 0 is left
+      # empty for /etc/bashrc's title command.
       if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
         unset PROMPT_COMMAND
         PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -344,7 +324,6 @@ write_files:
           fi
           ;;
       esac
-
       # Debian and Ubuntu install fd as fdfind.
       if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
         alias fd=fdfind
@@ -358,7 +337,6 @@ write_files:
         export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
       fi
       unset __fd
-
       if command -v fzf >/dev/null 2>&1; then
         for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
           if [[ -r "$__f" ]]; then
@@ -379,21 +357,16 @@ write_files:
     permissions: '0755'
     content: |
       #!/usr/bin/env bash
-      # Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (GitLab job containers and GitHub runner pods). The
-      # runner (and github-runner-ctl) is stopped gracefully, jobs are checked again, Docker packages are upgraded and Docker restarted,
-      # then gitlab-runner last. If a job is there, both are started again and nothing (more) is changed.
-      # One result line goes to /var/log/runner-engine-update.log, which health reads.
-      # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
+      # Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
+      # stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
+      # One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
       set -Eeuo pipefail
-
       LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
       DRY_RUN="${DRY_RUN:-0}"
       STOP_WAIT="${STOP_WAIT:-1800}"
       DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
       PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-
       note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
-
       if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
         echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
         exit 0
@@ -402,8 +375,7 @@ write_files:
       [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
       exec 9>/run/runner-engine-update.lock
       flock -n 9 || { note "SKIP another update is running"; exit 0; }
-
-      # A docker error is not "no jobs": updating then could kill running jobs.
+      # A docker error is not "no jobs".
       job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
       if ! jobs=$(job_ids 2>/dev/null); then
         note "SKIP docker does not answer, cannot tell whether jobs run"
@@ -413,7 +385,6 @@ write_files:
         note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
         exit 0
       fi
-
       installed=()
       if command -v dnf >/dev/null 2>&1; then
         for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
@@ -428,30 +399,24 @@ write_files:
         exit 1
       fi
       (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
-
       if ! pending; then
         note "OK nothing to upgrade (${installed[*]})"
         exit 0
       fi
-      # Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
       docker_pkgs=(); runner_pkgs=()
       for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
       if [[ "$DRY_RUN" == 1 ]]; then
         note "DRY-RUN would upgrade ${installed[*]}"
         exit 0
       fi
-
       before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
-
-      # From here the runner may be stopped; whatever happens, start it again (--no-block: queued behind a stop that is still finishing a job).
+      # From here whatever happens: start the runner again.
       runner_stopped=0 ctl_stopped=0
       ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
       runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
       trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
-
-      # `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
       runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
-      # SIGQUIT is the runner's graceful stop (running jobs finish). Returns 1 when it is still running after STOP_WAIT.
+      # SIGQUIT = graceful stop (jobs finish). Returns 1 when still running after STOP_WAIT.
       stop_runner_wait() {
         local waited=0 st
         systemctl stop --no-block gitlab-runner
@@ -464,48 +429,43 @@ write_files:
         done
       }
       no_jobs() { local j; j=$(job_ids 2>/dev/null) && [[ -z "$j" ]]; }
-
-      # The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still waiting for a job
-      # (this script gives up on its own after STOP_WAIT).
+      # SIGTERM would end jobs; TimeoutStopSec=infinity: systemd never SIGKILLs the runner.
       if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
         mkdir -p "$(dirname "$DROPIN")"
         printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
         systemctl daemon-reload
       fi
       runner_stopped=1
-      # No new GitHub pod while Docker is upgraded (running pods are caught by no_jobs).
+      # no new GitHub pod during the upgrade
       if systemctl is-active --quiet github-runner-ctl 2>/dev/null; then systemctl stop github-runner-ctl && ctl_stopped=1; fi
       if ! stop_runner_wait; then
-        # A start queued behind the stop brings the runner back when the job ends.
-        note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
+        note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
         exit 0
       fi
       if ! no_jobs; then
-        note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
+        note "SKIP a CI job appeared or docker does not answer after the runner stopped; will retry next week"
         exit 0
       fi
-
-      # Docker packages first, runner stopped: their own Docker restart finds no job.
       if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
         note "FAIL Docker package upgrade failed, see ${LOG}"
         exit 1
       fi
-      # A package scriptlet may have started the runner and it may have taken a job: stop it again and look once more.
+      # a package scriptlet may have started the runner and it may have taken a job
       if [[ "$(runner_state)" != inactive ]]; then
         if ! stop_runner_wait; then
-          note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
+          note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
           exit 0
         fi
       fi
       if ! no_jobs; then
-        note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
+        note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
         exit 0
       fi
       bad=""
       if (( ${#docker_pkgs[@]} )); then
         systemctl restart docker
         sleep 5
-        # The isolation rules live in iptables; reapply them after the Docker restart.
+        # reapply the isolation rules
         if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
       fi
       if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
@@ -527,53 +487,38 @@ write_files:
     permissions: '0755'
     content: |
       #!/usr/bin/env bash
-      # Keep CI job containers away from the cloud metadata service and from services on the host.
-      # Run at boot and after every Docker start by ci-job-isolation.service; safe to rerun any time.
-      #
-      #   DOCKER-USER   drops traffic to 169.254.169.254 (Hetzner metadata: server data, user-data, tokens).
-      #   INPUT         traffic from docker0 and the br-* bridges to the host itself goes through the chain CI-JOBS-IN:
-      #                 only replies, ping and the npm cache (docker0 IP, port 4873) are let in, the rest is dropped.
-      #
-      # Not affected: internet access of jobs, the Docker Hub cache (Docker pulls through the mirror on 127.0.0.1:5000,
-      # jobs do not), traffic between containers of one job, and the host-network stacks (monitoring, logging, caches).
-      # Only IPv4 is handled. Remove the rules: systemctl disable --now ci-job-isolation; then iptables -F CI-JOBS-IN
-      # and delete the two "ci-job-isolation" rules shown by iptables -S.
+      # Keeps CI jobs away from the cloud metadata service (DOCKER-USER drops 169.254.169.254) and from host services (INPUT from docker0
+      # and br-* goes through CI-JOBS-IN: replies, ping and the npm cache, docker0 IP port 4873, pass; br-* only from GH_JOB_SUBNET_POOL).
+      # Run by ci-job-isolation.service at boot and after every Docker start; IPv4 only. Remove: disable the unit, iptables -F CI-JOBS-IN,
+      # delete the two "ci-job-isolation" rules shown by iptables -S.
       set -Eeuo pipefail
-
       META_IP="${META_IP:-169.254.169.254}"
       NPM_PORT="${NPM_PORT:-4873}"
       TAG=ci-job-isolation
-
       log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$*"; }
-
       if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
         echo "Usage: $0   blocks CI jobs from ${META_IP} and from host services (except the npm cache on the docker0 IP, port ${NPM_PORT})"
         exit 0
       fi
       [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
       command -v iptables >/dev/null 2>&1 || { log "iptables not found, nothing applied"; exit 1; }
-
       # Docker creates DOCKER-USER when it starts; wait for it after a boot.
       for _ in $(seq 1 30); do
         if iptables -n -L DOCKER-USER >/dev/null 2>&1; then break; fi
         sleep 1
       done
       iptables -n -L DOCKER-USER >/dev/null 2>&1 || { log "chain DOCKER-USER does not exist (is Docker running?), nothing applied"; exit 1; }
-
       # Insert a rule at the top of a chain unless it is there already.
       ensure() {
         local chain="$1"
         shift
         iptables -C "$chain" "$@" 2>/dev/null || iptables -I "$chain" 1 "$@"
       }
-
       ensure DOCKER-USER -d "$META_IP" -m comment --comment "$TAG" -j DROP
-
       BRIDGE_IP="${BRIDGE_IP:-}"
       if [[ -z "$BRIDGE_IP" ]] && command -v ip >/dev/null 2>&1; then
         BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
       fi
-
       iptables -N CI-JOBS-IN 2>/dev/null || true
       iptables -F CI-JOBS-IN
       iptables -A CI-JOBS-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
@@ -581,11 +526,21 @@ write_files:
       if [[ -n "$BRIDGE_IP" ]]; then
         iptables -A CI-JOBS-IN -i docker0 -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT
       fi
+      POOL=$(sed -n 's/^GH_JOB_SUBNET_POOL=//p' "${GHR_CONFIG:-/etc/github-runner/config.env}" 2>/dev/null | tr -d '"' | head -1 || true)
+      if [[ -n "$POOL" && -n "$BRIDGE_IP" ]]; then
+        # only a private /16 to /27 block with zero host bits (as the controller checks it); a failing rule must not skip the DROP
+        IFS=. read -r o1 o2 o3 o4 <<<"${POOL%/*}"
+        if [[ "$POOL" =~ ^(10(\.[0-9]{1,3}){3}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2}|192\.168(\.[0-9]{1,3}){2})/(1[6-9]|2[0-7])$ ]] \
+           && (( ((10#$o1 << 24 | 10#$o2 << 16 | 10#$o3 << 8 | 10#$o4) & ((1 << (32 - ${POOL#*/})) - 1)) == 0 )); then
+          iptables -A CI-JOBS-IN -i 'br-+' -s "$POOL" -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT || { log "WARN: pool rule failed"; POOL=""; }
+        else
+          log "WARN: GH_JOB_SUBNET_POOL '${POOL}' is not an aligned private /16-/27 block, ignored"; POOL=""
+        fi
+      fi
       iptables -A CI-JOBS-IN -j DROP
       ensure INPUT -i docker0 -m comment --comment "$TAG" -j CI-JOBS-IN
       ensure INPUT -i 'br-+' -m comment --comment "$TAG" -j CI-JOBS-IN
-
-      log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT})"
+      log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT}${POOL:+, also for ${POOL}})"
 
   - path: /etc/systemd/system/runner-engine-update.service
     permissions: '0644'
@@ -635,13 +590,9 @@ write_files:
     permissions: '0755'
     content: |
       #!/usr/bin/env bash
-      # Download a package repository signing key and install it only if it has the expected fingerprint.
-      # Usage: pin-repo-key URL FINGERPRINT DEST
-      # The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
-      # keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
-      # On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+      # Usage: pin-repo-key URL FINGERPRINT DEST. Downloads a repository signing key, checks it with gpg in an empty keyring and writes only
+      # the key with that fingerprint (40 hex digits, spaces allowed) to DEST. On a mismatch nothing is written and the exit code is 1.
       set -Eeuo pipefail
-
       if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
         echo "Usage: $0 URL FINGERPRINT DEST" >&2
         exit 2
@@ -651,7 +602,6 @@ write_files:
       dest="$3"
       [[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
       command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
-
       work=$(mktemp -d)
       trap 'rm -rf "$work"' EXIT
       chmod 0700 "$work"
