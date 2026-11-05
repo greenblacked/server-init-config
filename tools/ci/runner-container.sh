@@ -103,7 +103,8 @@ grep -q 'already set' /tmp/runner-job-limits-rerun.log && pass "job-limits rerun
 
 echo "== GitHub Actions runner component (stubbed docker, throwaway key, no GitHub)"
 # No Docker daemon here: a stub answers the few docker commands the installer uses, and a stand-in docker.service lets the preflight see "running".
-GHR_STUB=/tmp/ghr-stub; install -d "$GHR_STUB"
+# Not under /tmp: the container mounts it noexec (--tmpfs), so a stub there cannot be run and `docker info` would fail.
+GHR_STUB=/var/tmp/ghr-stub; install -d "$GHR_STUB"
 cat > "$GHR_STUB/docker" <<'STUB'
 #!/bin/sh
 case "$1" in info) echo "systemd 2" ;; esac
@@ -163,7 +164,7 @@ echo "$out" > /tmp/health-ghr.txt
 grep -q "GitHub Actions runner" <<<"$out" && grep -q "last successful poll" <<<"$out" && grep -q "GitHub API quota: 4900 of 5000 left" <<<"$out" && pass "health shows the controller status (poll age, quota)" || fail "health lacks the GitHub runner section: $(grep -A8 'GitHub Actions' <<<"$out" | tr '\n' '|')"
 grep -Eq "$BAD_RE|command not found" <<<"$out" && fail "health shell error with the GitHub runner installed" || pass "health: no bash errors with the GitHub runner installed"
 systemctl stop docker.service; rm -f /etc/systemd/system/docker.service; systemctl daemon-reload
-rm -f /tmp/ghr-test.pem /tmp/ghr-nokey.pem
+rm -rf /tmp/ghr-test.pem /tmp/ghr-nokey.pem "$GHR_STUB"
 
 echo "== idempotency: run every component again"
 snapshot > /tmp/state-1.txt
