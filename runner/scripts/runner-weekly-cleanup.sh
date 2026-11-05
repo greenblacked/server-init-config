@@ -68,7 +68,7 @@ if command -v docker >/dev/null 2>&1; then
   # stderr goes to a temp file so a docker WARNING is never counted as a running job.
   ps_err=$(mktemp)
   trap 'rm -f "$ps_err"' EXIT
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+  if ! job_ids=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; } 2>"$ps_err"); then
     log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi

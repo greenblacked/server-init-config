@@ -376,7 +376,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -953,7 +958,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -1385,7 +1395,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -1901,13 +1916,15 @@ check_security() {
   fi
 
   local members u shell pid ru
-  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vx 'gitlab-runner' | grep . | tr '\n' ' ' || true)
+  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vxE 'gitlab-runner|github-runner' | grep . | tr '\n' ' ' || true)
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
+    if is_runner; then
+      if getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -qx 'github-runner'; then ok "docker group: only gitlab-runner and github-runner"; else ok "docker group: only gitlab-runner"; fi
+    else ok "docker group: no members"; fi
   fi
-  for u in gitlab-runner monitoring; do
+  for u in gitlab-runner github-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
     shell=$(getent passwd "$u" | cut -d: -f7)
     case "$shell" in
@@ -2400,8 +2417,8 @@ check_runner() {
   fi
 
   local jobs
-  jobs=$(docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true 2>/dev/null | wc -l || true)
-  info "running job containers: ${jobs:-0}"
+  jobs=$({ docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true; docker ps -q --filter label=io.server-init.github-runner=job; } 2>/dev/null | wc -l || true)
+  info "running job containers (GitLab jobs and GitHub runner pods): ${jobs:-0}"
 
   if grep -q '^listen_address' "$CFG"; then
     if [[ "$(http_code http://127.0.0.1:9252/metrics 3)" == "200" ]]; then
@@ -2417,6 +2434,94 @@ check_runner() {
     warn "${errs} error lines in runner log in the last hour (journalctl -u gitlab-runner --since -1h | grep ERROR)"
   else
     ok "no runner errors in the last hour"
+  fi
+  return 0
+}
+
+# Opt-in GitHub Actions runner (runner/install/github-runner.sh): the controller writes /run/github-runner/status.json every poll,
+# so this check makes no GitHub API call. HEALTH_GHR_STATUS and HEALTH_GHR_CONFIG are for tests.
+check_github_runner() {
+  local unit=github-runner-ctl.service st="${HEALTH_GHR_STATUS:-/run/github-runner/status.json}" gcfg="${HEALTH_GHR_CONFIG:-/etc/github-runner/config.env}"
+  if ! unit_exists "$unit" && [[ ! -f "$gcfg" ]]; then return 0; fi
+  if (( LIMITED )); then
+    skip "github runner: needs root (skipped)"
+    return 0
+  fi
+  section "GitHub Actions runner"
+  if ! have jq; then
+    warn "jq missing: the GitHub runner status cannot be read"
+    return 0
+  fi
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    ok "${unit} active"
+  elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+    fail "${unit} $(systemctl is-active "$unit" 2>/dev/null || true) (journalctl -u github-runner-ctl -n 30)"
+  else
+    warn "${unit} installed but not enabled (systemctl enable --now github-runner-ctl)"
+    return 0
+  fi
+  if [[ ! -s "$st" ]]; then
+    warn "no controller status yet (${st}); the first poll writes it"
+    return 0
+  fi
+  local now age v owner image created img_age
+  now=$(date +%s)
+  owner=$(sed -nE 's/^GH_OWNER="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  info "private repositories of ${owner:-?}: $(jq -r '"\(.served // 0) served, \(.skipped // 0) skipped (public, archived or excluded)"' "$st" 2>/dev/null || echo unknown)"
+  v=$(jq -r '.last_poll_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 300 )); then ok "last successful poll $(human_age "$age") ago"
+    elif (( age <= 900 )); then warn "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"
+    else fail "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"; fi
+  else
+    warn "no successful poll yet ($(jq -r '.last_error // "no error recorded"' "$st" 2>/dev/null))"
+  fi
+  v=$(jq -r '.last_token_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 4200 )); then ok "installation token minted $(human_age "$age") ago"
+    else warn "installation token last minted $(human_age "$age") ago (the GitHub App key or installation may be gone: github-runner-ctl self-test)"; fi
+  else
+    warn "no installation token minted yet"
+  fi
+  v=$(jq -r '.rate_remaining // empty' "$st" 2>/dev/null || true)
+  if [[ -n "$v" ]] && isnum "$v"; then
+    if (( v < 100 )); then fail "GitHub API quota nearly used up: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    elif (( v < 500 )); then warn "GitHub API quota low: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    else ok "GitHub API quota: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"; fi
+  fi
+  info "pods: $(jq -r '"\(.active_pods // 0) active (\(.idle_pods // 0) waiting for a job), limit \(.max_jobs // "?")"' "$st" 2>/dev/null)"
+  if [[ "$(jq -r '.update_required // false' "$st" 2>/dev/null)" == true ]]; then
+    fail "a runner exited with code 3 or 4 (it wanted to update itself): the pinned runner image is too old; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+  fi
+  v=$(jq -r '.backoff_until // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > now )); then
+    warn "pod start paused after repeated runner failures (until $(date -d "@${v}" +%H:%M:%S)); journalctl -u github-runner-ctl"
+  fi
+  # age of the pinned runner image: GitHub stops queuing jobs to a runner that was not updated for 30 days
+  image=$(sed -nE 's/^GH_RUNNER_IMAGE="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  created=""
+  if [[ -n "$image" ]] && have docker; then created=$(docker image inspect -f '{{.Created}}' "$image" 2>/dev/null || true); fi
+  if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); else created=$(jq -r '.runner_image_created // empty' "$st" 2>/dev/null || true); fi
+  if [[ -n "$created" ]] && isnum "$created"; then
+    img_age=$(( (now - created) / 86400 ))
+    if (( img_age >= 30 )); then fail "runner image is ${img_age} days old: GitHub no longer queues jobs to a runner older than 30 days; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    elif (( img_age >= 25 )); then warn "runner image is ${img_age} days old (GitHub stops queuing at 30): bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    else ok "runner image is ${img_age} days old"; fi
+  else
+    info "runner image age unknown (image not on disk and not yet recorded)"
+  fi
+  if have docker && docker info >/dev/null 2>&1; then
+    local stopped nets running
+    stopped=$(docker ps -aq --filter label=io.server-init.github-runner=job --filter status=exited --filter status=dead --filter status=created 2>/dev/null | wc -l || true)
+    nets=$(docker network ls -q --filter label=io.server-init.github-runner=job 2>/dev/null | wc -l || true)
+    running=$(docker ps -q --filter label=io.server-init.github-runner.role=runner 2>/dev/null | wc -l || true)
+    if (( ${stopped:-0} > 0 || ${nets:-0} > ${running:-0} )); then
+      warn "leftover pod parts: ${stopped:-0} stopped container(s), ${nets:-0} network(s) for ${running:-0} running pod(s); the controller removes them on its next poll"
+    else
+      ok "no leftover pod containers or networks"
+    fi
   fi
   return 0
 }
@@ -2486,12 +2591,13 @@ check_containers() {
     s_pids[$name]="$pids"
   done < <(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}' "${ids[@]}" 2>/dev/null || true)
 
-  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}'
-  local state health restarts oom started memlimit job started_s age short details level reasons
+  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}|{{index .Config.Labels "io.server-init.github-runner"}}'
+  local state health restarts oom started memlimit job ghjob started_s age short details level reasons
   local n_total=0 n_jobs=0
 
-  while IFS='|' read -r name state health restarts oom started memlimit job; do
+  while IFS='|' read -r name state health restarts oom started memlimit job ghjob; do
     [[ -z "$name" ]] && continue
+    if [[ "$ghjob" == "job" ]]; then job=true; fi
     name="${name#/}"
     n_total=$((n_total + 1))
     short="$name"
@@ -2922,6 +3028,7 @@ check_serverinit
 check_securitytools
 check_services
 check_runner
+check_github_runner
 check_docker
 check_containers
 check_caches
@@ -3003,7 +3110,7 @@ if command -v docker >/dev/null 2>&1; then
   # stderr goes to a temp file so a docker WARNING is never counted as a running job.
   ps_err=$(mktemp)
   trap 'rm -f "$ps_err"' EXIT
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+  if ! job_ids=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; } 2>"$ps_err"); then
     log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
@@ -3132,12 +3239,10 @@ chmod 644 "$R/runner/systemd/runner-disk-guard.timer"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
-# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
-# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
-# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
-# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
-# The result is one line in /var/log/runner-engine-update.log, which health reads.
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (GitLab job containers and GitHub runner pods). The
+# runner (and github-runner-ctl) is stopped gracefully, jobs are checked again, Docker packages are upgraded and Docker restarted,
+# then gitlab-runner last. If a job is there, both are started again and nothing (more) is changed.
+# One result line goes to /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
 
@@ -3159,7 +3264,8 @@ exec 9>/run/runner-engine-update.lock
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
 
 # A docker error is not "no jobs": updating then could kill running jobs.
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
 fi
@@ -3197,15 +3303,15 @@ fi
 
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
 
-# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
-# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
-runner_stopped=0
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
+# From here the runner may be stopped; whatever happens, start it again (--no-block: queued behind a stop that is still finishing a job).
+runner_stopped=0 ctl_stopped=0
+ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
 
 # `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+# SIGQUIT is the runner's graceful stop (running jobs finish). Returns 1 when it is still running after STOP_WAIT.
 stop_runner_wait() {
   local waited=0 st
   systemctl stop --no-block gitlab-runner
@@ -3217,18 +3323,20 @@ stop_runner_wait() {
     waited=$((waited + 5))
   done
 }
-no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
+no_jobs() { local j; j=$(job_ids 2>/dev/null) && [[ -z "$j" ]]; }
 
-# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
-# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still waiting for a job
+# (this script gives up on its own after STOP_WAIT).
 if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
   printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
+# No new GitHub pod while Docker is upgraded (running pods are caught by no_jobs).
+if systemctl is-active --quiet github-runner-ctl 2>/dev/null; then systemctl stop github-runner-ctl && ctl_stopped=1; fi
 if ! stop_runner_wait; then
-  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
+  # A start queued behind the stop brings the runner back when the job ends.
   note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
   exit 0
 fi
@@ -3242,8 +3350,7 @@ if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
-# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
-# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+# A package scriptlet may have started the runner and it may have taken a job: stop it again and look once more.
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
     note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
@@ -3267,6 +3374,7 @@ if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
 fi
 systemctl start gitlab-runner || true
 runner_stopped=0
+ctl_back
 sleep 5
 for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
 if [[ -n "$bad" ]]; then
@@ -3497,7 +3605,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -3936,7 +4049,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -5034,7 +5152,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -5480,7 +5603,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -5860,7 +5988,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -6232,7 +6365,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -6811,7 +6949,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -7076,7 +7219,7 @@ chmod 755 "$R/runner/install/logging.sh"
 install -d "$R/runner/stacks/logging"
 cat > "$R/runner/stacks/logging/config.alloy" <<'__SIC_EOF__'
 // Container logs and the systemd journal to the local Loki.
-// CI job containers are skipped: their output is already the job log in GitLab.
+// CI job containers are skipped: their output is already the job log in GitLab (or in GitHub, for the pods of the GitHub Actions runner).
 
 logging {
   level = "warn"
@@ -7099,6 +7242,12 @@ discovery.relabel "containers" {
   rule {
     source_labels = ["__meta_docker_container_label_com_gitlab_gitlab_runner_managed"]
     regex         = "true"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_io_server_init_github_runner"]
+    regex         = "job"
     action        = "drop"
   }
 
@@ -7375,7 +7524,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -7801,7 +7955,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -8098,7 +8257,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -8514,7 +8678,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -8897,7 +9066,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -9178,7 +9352,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -9771,7 +9950,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -12258,12 +12442,10 @@ chmod 755 "$R/runner/scripts/runner-disk-guard.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
-# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
-# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
-# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
-# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
-# The result is one line in /var/log/runner-engine-update.log, which health reads.
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (GitLab job containers and GitHub runner pods). The
+# runner (and github-runner-ctl) is stopped gracefully, jobs are checked again, Docker packages are upgraded and Docker restarted,
+# then gitlab-runner last. If a job is there, both are started again and nothing (more) is changed.
+# One result line goes to /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
 
@@ -12285,7 +12467,8 @@ exec 9>/run/runner-engine-update.lock
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
 
 # A docker error is not "no jobs": updating then could kill running jobs.
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
 fi
@@ -12323,15 +12506,15 @@ fi
 
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
 
-# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
-# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
-runner_stopped=0
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
+# From here the runner may be stopped; whatever happens, start it again (--no-block: queued behind a stop that is still finishing a job).
+runner_stopped=0 ctl_stopped=0
+ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
 
 # `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+# SIGQUIT is the runner's graceful stop (running jobs finish). Returns 1 when it is still running after STOP_WAIT.
 stop_runner_wait() {
   local waited=0 st
   systemctl stop --no-block gitlab-runner
@@ -12343,18 +12526,20 @@ stop_runner_wait() {
     waited=$((waited + 5))
   done
 }
-no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
+no_jobs() { local j; j=$(job_ids 2>/dev/null) && [[ -z "$j" ]]; }
 
-# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
-# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still waiting for a job
+# (this script gives up on its own after STOP_WAIT).
 if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
   printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
+# No new GitHub pod while Docker is upgraded (running pods are caught by no_jobs).
+if systemctl is-active --quiet github-runner-ctl 2>/dev/null; then systemctl stop github-runner-ctl && ctl_stopped=1; fi
 if ! stop_runner_wait; then
-  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
+  # A start queued behind the stop brings the runner back when the job ends.
   note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
   exit 0
 fi
@@ -12368,8 +12553,7 @@ if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
-# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
-# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+# A package scriptlet may have started the runner and it may have taken a job: stop it again and look once more.
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
     note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
@@ -12393,6 +12577,7 @@ if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
 fi
 systemctl start gitlab-runner || true
 runner_stopped=0
+ctl_back
 sleep 5
 for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
 if [[ -n "$bad" ]]; then
@@ -12475,7 +12660,7 @@ if command -v docker >/dev/null 2>&1; then
   # stderr goes to a temp file so a docker WARNING is never counted as a running job.
   ps_err=$(mktemp)
   trap 'rm -f "$ps_err"' EXIT
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+  if ! job_ids=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; } 2>"$ps_err"); then
     log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
@@ -12660,7 +12845,7 @@ chmod 644 "$R/runner/systemd/runner-weekly-cleanup.timer"
 install -d "$R/runner/stacks/logging"
 cat > "$R/runner/stacks/logging/config.alloy" <<'__SIC_EOF__'
 // Container logs and the systemd journal to the local Loki.
-// CI job containers are skipped: their output is already the job log in GitLab.
+// CI job containers are skipped: their output is already the job log in GitLab (or in GitHub, for the pods of the GitHub Actions runner).
 
 logging {
   level = "warn"
@@ -12683,6 +12868,12 @@ discovery.relabel "containers" {
   rule {
     source_labels = ["__meta_docker_container_label_com_gitlab_gitlab_runner_managed"]
     regex         = "true"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_io_server_init_github_runner"]
+    regex         = "job"
     action        = "drop"
   }
 
@@ -13715,13 +13906,15 @@ check_security() {
   fi
 
   local members u shell pid ru
-  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vx 'gitlab-runner' | grep . | tr '\n' ' ' || true)
+  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vxE 'gitlab-runner|github-runner' | grep . | tr '\n' ' ' || true)
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
+    if is_runner; then
+      if getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -qx 'github-runner'; then ok "docker group: only gitlab-runner and github-runner"; else ok "docker group: only gitlab-runner"; fi
+    else ok "docker group: no members"; fi
   fi
-  for u in gitlab-runner monitoring; do
+  for u in gitlab-runner github-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
     shell=$(getent passwd "$u" | cut -d: -f7)
     case "$shell" in
@@ -14214,8 +14407,8 @@ check_runner() {
   fi
 
   local jobs
-  jobs=$(docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true 2>/dev/null | wc -l || true)
-  info "running job containers: ${jobs:-0}"
+  jobs=$({ docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true; docker ps -q --filter label=io.server-init.github-runner=job; } 2>/dev/null | wc -l || true)
+  info "running job containers (GitLab jobs and GitHub runner pods): ${jobs:-0}"
 
   if grep -q '^listen_address' "$CFG"; then
     if [[ "$(http_code http://127.0.0.1:9252/metrics 3)" == "200" ]]; then
@@ -14231,6 +14424,94 @@ check_runner() {
     warn "${errs} error lines in runner log in the last hour (journalctl -u gitlab-runner --since -1h | grep ERROR)"
   else
     ok "no runner errors in the last hour"
+  fi
+  return 0
+}
+
+# Opt-in GitHub Actions runner (runner/install/github-runner.sh): the controller writes /run/github-runner/status.json every poll,
+# so this check makes no GitHub API call. HEALTH_GHR_STATUS and HEALTH_GHR_CONFIG are for tests.
+check_github_runner() {
+  local unit=github-runner-ctl.service st="${HEALTH_GHR_STATUS:-/run/github-runner/status.json}" gcfg="${HEALTH_GHR_CONFIG:-/etc/github-runner/config.env}"
+  if ! unit_exists "$unit" && [[ ! -f "$gcfg" ]]; then return 0; fi
+  if (( LIMITED )); then
+    skip "github runner: needs root (skipped)"
+    return 0
+  fi
+  section "GitHub Actions runner"
+  if ! have jq; then
+    warn "jq missing: the GitHub runner status cannot be read"
+    return 0
+  fi
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    ok "${unit} active"
+  elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+    fail "${unit} $(systemctl is-active "$unit" 2>/dev/null || true) (journalctl -u github-runner-ctl -n 30)"
+  else
+    warn "${unit} installed but not enabled (systemctl enable --now github-runner-ctl)"
+    return 0
+  fi
+  if [[ ! -s "$st" ]]; then
+    warn "no controller status yet (${st}); the first poll writes it"
+    return 0
+  fi
+  local now age v owner image created img_age
+  now=$(date +%s)
+  owner=$(sed -nE 's/^GH_OWNER="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  info "private repositories of ${owner:-?}: $(jq -r '"\(.served // 0) served, \(.skipped // 0) skipped (public, archived or excluded)"' "$st" 2>/dev/null || echo unknown)"
+  v=$(jq -r '.last_poll_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 300 )); then ok "last successful poll $(human_age "$age") ago"
+    elif (( age <= 900 )); then warn "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"
+    else fail "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"; fi
+  else
+    warn "no successful poll yet ($(jq -r '.last_error // "no error recorded"' "$st" 2>/dev/null))"
+  fi
+  v=$(jq -r '.last_token_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 4200 )); then ok "installation token minted $(human_age "$age") ago"
+    else warn "installation token last minted $(human_age "$age") ago (the GitHub App key or installation may be gone: github-runner-ctl self-test)"; fi
+  else
+    warn "no installation token minted yet"
+  fi
+  v=$(jq -r '.rate_remaining // empty' "$st" 2>/dev/null || true)
+  if [[ -n "$v" ]] && isnum "$v"; then
+    if (( v < 100 )); then fail "GitHub API quota nearly used up: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    elif (( v < 500 )); then warn "GitHub API quota low: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    else ok "GitHub API quota: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"; fi
+  fi
+  info "pods: $(jq -r '"\(.active_pods // 0) active (\(.idle_pods // 0) waiting for a job), limit \(.max_jobs // "?")"' "$st" 2>/dev/null)"
+  if [[ "$(jq -r '.update_required // false' "$st" 2>/dev/null)" == true ]]; then
+    fail "a runner exited with code 3 or 4 (it wanted to update itself): the pinned runner image is too old; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+  fi
+  v=$(jq -r '.backoff_until // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > now )); then
+    warn "pod start paused after repeated runner failures (until $(date -d "@${v}" +%H:%M:%S)); journalctl -u github-runner-ctl"
+  fi
+  # age of the pinned runner image: GitHub stops queuing jobs to a runner that was not updated for 30 days
+  image=$(sed -nE 's/^GH_RUNNER_IMAGE="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  created=""
+  if [[ -n "$image" ]] && have docker; then created=$(docker image inspect -f '{{.Created}}' "$image" 2>/dev/null || true); fi
+  if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); else created=$(jq -r '.runner_image_created // empty' "$st" 2>/dev/null || true); fi
+  if [[ -n "$created" ]] && isnum "$created"; then
+    img_age=$(( (now - created) / 86400 ))
+    if (( img_age >= 30 )); then fail "runner image is ${img_age} days old: GitHub no longer queues jobs to a runner older than 30 days; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    elif (( img_age >= 25 )); then warn "runner image is ${img_age} days old (GitHub stops queuing at 30): bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    else ok "runner image is ${img_age} days old"; fi
+  else
+    info "runner image age unknown (image not on disk and not yet recorded)"
+  fi
+  if have docker && docker info >/dev/null 2>&1; then
+    local stopped nets running
+    stopped=$(docker ps -aq --filter label=io.server-init.github-runner=job --filter status=exited --filter status=dead --filter status=created 2>/dev/null | wc -l || true)
+    nets=$(docker network ls -q --filter label=io.server-init.github-runner=job 2>/dev/null | wc -l || true)
+    running=$(docker ps -q --filter label=io.server-init.github-runner.role=runner 2>/dev/null | wc -l || true)
+    if (( ${stopped:-0} > 0 || ${nets:-0} > ${running:-0} )); then
+      warn "leftover pod parts: ${stopped:-0} stopped container(s), ${nets:-0} network(s) for ${running:-0} running pod(s); the controller removes them on its next poll"
+    else
+      ok "no leftover pod containers or networks"
+    fi
   fi
   return 0
 }
@@ -14300,12 +14581,13 @@ check_containers() {
     s_pids[$name]="$pids"
   done < <(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}' "${ids[@]}" 2>/dev/null || true)
 
-  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}'
-  local state health restarts oom started memlimit job started_s age short details level reasons
+  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}|{{index .Config.Labels "io.server-init.github-runner"}}'
+  local state health restarts oom started memlimit job ghjob started_s age short details level reasons
   local n_total=0 n_jobs=0
 
-  while IFS='|' read -r name state health restarts oom started memlimit job; do
+  while IFS='|' read -r name state health restarts oom started memlimit job ghjob; do
     [[ -z "$name" ]] && continue
+    if [[ "$ghjob" == "job" ]]; then job=true; fi
     name="${name#/}"
     n_total=$((n_total + 1))
     short="$name"
@@ -14736,6 +15018,7 @@ check_serverinit
 check_securitytools
 check_services
 check_runner
+check_github_runner
 check_docker
 check_containers
 check_caches
@@ -14971,7 +15254,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -17458,12 +17746,10 @@ chmod 755 "$R/runner/scripts/runner-disk-guard.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
-# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
-# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
-# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
-# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
-# The result is one line in /var/log/runner-engine-update.log, which health reads.
+# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (GitLab job containers and GitHub runner pods). The
+# runner (and github-runner-ctl) is stopped gracefully, jobs are checked again, Docker packages are upgraded and Docker restarted,
+# then gitlab-runner last. If a job is there, both are started again and nothing (more) is changed.
+# One result line goes to /var/log/runner-engine-update.log, which health reads.
 # Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
 set -Eeuo pipefail
 
@@ -17485,7 +17771,8 @@ exec 9>/run/runner-engine-update.lock
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
 
 # A docker error is not "no jobs": updating then could kill running jobs.
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
 fi
@@ -17523,15 +17810,15 @@ fi
 
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
 
-# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
-# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
-runner_stopped=0
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
+# From here the runner may be stopped; whatever happens, start it again (--no-block: queued behind a stop that is still finishing a job).
+runner_stopped=0 ctl_stopped=0
+ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
 
 # `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+# SIGQUIT is the runner's graceful stop (running jobs finish). Returns 1 when it is still running after STOP_WAIT.
 stop_runner_wait() {
   local waited=0 st
   systemctl stop --no-block gitlab-runner
@@ -17543,18 +17830,20 @@ stop_runner_wait() {
     waited=$((waited + 5))
   done
 }
-no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
+no_jobs() { local j; j=$(job_ids 2>/dev/null) && [[ -z "$j" ]]; }
 
-# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
-# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still waiting for a job
+# (this script gives up on its own after STOP_WAIT).
 if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
   printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
+# No new GitHub pod while Docker is upgraded (running pods are caught by no_jobs).
+if systemctl is-active --quiet github-runner-ctl 2>/dev/null; then systemctl stop github-runner-ctl && ctl_stopped=1; fi
 if ! stop_runner_wait; then
-  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
+  # A start queued behind the stop brings the runner back when the job ends.
   note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
   exit 0
 fi
@@ -17568,8 +17857,7 @@ if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
-# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
-# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+# A package scriptlet may have started the runner and it may have taken a job: stop it again and look once more.
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
     note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
@@ -17593,6 +17881,7 @@ if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
 fi
 systemctl start gitlab-runner || true
 runner_stopped=0
+ctl_back
 sleep 5
 for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
 if [[ -n "$bad" ]]; then
@@ -17675,7 +17964,7 @@ if command -v docker >/dev/null 2>&1; then
   # stderr goes to a temp file so a docker WARNING is never counted as a running job.
   ps_err=$(mktemp)
   trap 'rm -f "$ps_err"' EXIT
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+  if ! job_ids=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; } 2>"$ps_err"); then
     log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
@@ -17860,7 +18149,7 @@ chmod 644 "$R/runner/systemd/runner-weekly-cleanup.timer"
 install -d "$R/runner/stacks/logging"
 cat > "$R/runner/stacks/logging/config.alloy" <<'__SIC_EOF__'
 // Container logs and the systemd journal to the local Loki.
-// CI job containers are skipped: their output is already the job log in GitLab.
+// CI job containers are skipped: their output is already the job log in GitLab (or in GitHub, for the pods of the GitHub Actions runner).
 
 logging {
   level = "warn"
@@ -17883,6 +18172,12 @@ discovery.relabel "containers" {
   rule {
     source_labels = ["__meta_docker_container_label_com_gitlab_gitlab_runner_managed"]
     regex         = "true"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_io_server_init_github_runner"]
+    regex         = "job"
     action        = "drop"
   }
 
@@ -18915,13 +19210,15 @@ check_security() {
   fi
 
   local members u shell pid ru
-  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vx 'gitlab-runner' | grep . | tr '\n' ' ' || true)
+  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vxE 'gitlab-runner|github-runner' | grep . | tr '\n' ' ' || true)
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
+    if is_runner; then
+      if getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -qx 'github-runner'; then ok "docker group: only gitlab-runner and github-runner"; else ok "docker group: only gitlab-runner"; fi
+    else ok "docker group: no members"; fi
   fi
-  for u in gitlab-runner monitoring; do
+  for u in gitlab-runner github-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
     shell=$(getent passwd "$u" | cut -d: -f7)
     case "$shell" in
@@ -19414,8 +19711,8 @@ check_runner() {
   fi
 
   local jobs
-  jobs=$(docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true 2>/dev/null | wc -l || true)
-  info "running job containers: ${jobs:-0}"
+  jobs=$({ docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true; docker ps -q --filter label=io.server-init.github-runner=job; } 2>/dev/null | wc -l || true)
+  info "running job containers (GitLab jobs and GitHub runner pods): ${jobs:-0}"
 
   if grep -q '^listen_address' "$CFG"; then
     if [[ "$(http_code http://127.0.0.1:9252/metrics 3)" == "200" ]]; then
@@ -19431,6 +19728,94 @@ check_runner() {
     warn "${errs} error lines in runner log in the last hour (journalctl -u gitlab-runner --since -1h | grep ERROR)"
   else
     ok "no runner errors in the last hour"
+  fi
+  return 0
+}
+
+# Opt-in GitHub Actions runner (runner/install/github-runner.sh): the controller writes /run/github-runner/status.json every poll,
+# so this check makes no GitHub API call. HEALTH_GHR_STATUS and HEALTH_GHR_CONFIG are for tests.
+check_github_runner() {
+  local unit=github-runner-ctl.service st="${HEALTH_GHR_STATUS:-/run/github-runner/status.json}" gcfg="${HEALTH_GHR_CONFIG:-/etc/github-runner/config.env}"
+  if ! unit_exists "$unit" && [[ ! -f "$gcfg" ]]; then return 0; fi
+  if (( LIMITED )); then
+    skip "github runner: needs root (skipped)"
+    return 0
+  fi
+  section "GitHub Actions runner"
+  if ! have jq; then
+    warn "jq missing: the GitHub runner status cannot be read"
+    return 0
+  fi
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    ok "${unit} active"
+  elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+    fail "${unit} $(systemctl is-active "$unit" 2>/dev/null || true) (journalctl -u github-runner-ctl -n 30)"
+  else
+    warn "${unit} installed but not enabled (systemctl enable --now github-runner-ctl)"
+    return 0
+  fi
+  if [[ ! -s "$st" ]]; then
+    warn "no controller status yet (${st}); the first poll writes it"
+    return 0
+  fi
+  local now age v owner image created img_age
+  now=$(date +%s)
+  owner=$(sed -nE 's/^GH_OWNER="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  info "private repositories of ${owner:-?}: $(jq -r '"\(.served // 0) served, \(.skipped // 0) skipped (public, archived or excluded)"' "$st" 2>/dev/null || echo unknown)"
+  v=$(jq -r '.last_poll_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 300 )); then ok "last successful poll $(human_age "$age") ago"
+    elif (( age <= 900 )); then warn "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"
+    else fail "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"; fi
+  else
+    warn "no successful poll yet ($(jq -r '.last_error // "no error recorded"' "$st" 2>/dev/null))"
+  fi
+  v=$(jq -r '.last_token_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 4200 )); then ok "installation token minted $(human_age "$age") ago"
+    else warn "installation token last minted $(human_age "$age") ago (the GitHub App key or installation may be gone: github-runner-ctl self-test)"; fi
+  else
+    warn "no installation token minted yet"
+  fi
+  v=$(jq -r '.rate_remaining // empty' "$st" 2>/dev/null || true)
+  if [[ -n "$v" ]] && isnum "$v"; then
+    if (( v < 100 )); then fail "GitHub API quota nearly used up: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    elif (( v < 500 )); then warn "GitHub API quota low: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    else ok "GitHub API quota: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"; fi
+  fi
+  info "pods: $(jq -r '"\(.active_pods // 0) active (\(.idle_pods // 0) waiting for a job), limit \(.max_jobs // "?")"' "$st" 2>/dev/null)"
+  if [[ "$(jq -r '.update_required // false' "$st" 2>/dev/null)" == true ]]; then
+    fail "a runner exited with code 3 or 4 (it wanted to update itself): the pinned runner image is too old; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+  fi
+  v=$(jq -r '.backoff_until // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > now )); then
+    warn "pod start paused after repeated runner failures (until $(date -d "@${v}" +%H:%M:%S)); journalctl -u github-runner-ctl"
+  fi
+  # age of the pinned runner image: GitHub stops queuing jobs to a runner that was not updated for 30 days
+  image=$(sed -nE 's/^GH_RUNNER_IMAGE="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  created=""
+  if [[ -n "$image" ]] && have docker; then created=$(docker image inspect -f '{{.Created}}' "$image" 2>/dev/null || true); fi
+  if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); else created=$(jq -r '.runner_image_created // empty' "$st" 2>/dev/null || true); fi
+  if [[ -n "$created" ]] && isnum "$created"; then
+    img_age=$(( (now - created) / 86400 ))
+    if (( img_age >= 30 )); then fail "runner image is ${img_age} days old: GitHub no longer queues jobs to a runner older than 30 days; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    elif (( img_age >= 25 )); then warn "runner image is ${img_age} days old (GitHub stops queuing at 30): bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    else ok "runner image is ${img_age} days old"; fi
+  else
+    info "runner image age unknown (image not on disk and not yet recorded)"
+  fi
+  if have docker && docker info >/dev/null 2>&1; then
+    local stopped nets running
+    stopped=$(docker ps -aq --filter label=io.server-init.github-runner=job --filter status=exited --filter status=dead --filter status=created 2>/dev/null | wc -l || true)
+    nets=$(docker network ls -q --filter label=io.server-init.github-runner=job 2>/dev/null | wc -l || true)
+    running=$(docker ps -q --filter label=io.server-init.github-runner.role=runner 2>/dev/null | wc -l || true)
+    if (( ${stopped:-0} > 0 || ${nets:-0} > ${running:-0} )); then
+      warn "leftover pod parts: ${stopped:-0} stopped container(s), ${nets:-0} network(s) for ${running:-0} running pod(s); the controller removes them on its next poll"
+    else
+      ok "no leftover pod containers or networks"
+    fi
   fi
   return 0
 }
@@ -19500,12 +19885,13 @@ check_containers() {
     s_pids[$name]="$pids"
   done < <(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}' "${ids[@]}" 2>/dev/null || true)
 
-  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}'
-  local state health restarts oom started memlimit job started_s age short details level reasons
+  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}|{{index .Config.Labels "io.server-init.github-runner"}}'
+  local state health restarts oom started memlimit job ghjob started_s age short details level reasons
   local n_total=0 n_jobs=0
 
-  while IFS='|' read -r name state health restarts oom started memlimit job; do
+  while IFS='|' read -r name state health restarts oom started memlimit job ghjob; do
     [[ -z "$name" ]] && continue
+    if [[ "$ghjob" == "job" ]]; then job=true; fi
     name="${name#/}"
     n_total=$((n_total + 1))
     short="$name"
@@ -19936,6 +20322,7 @@ check_serverinit
 check_securitytools
 check_services
 check_runner
+check_github_runner
 check_docker
 check_containers
 check_caches

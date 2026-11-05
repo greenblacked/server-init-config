@@ -77,7 +77,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
