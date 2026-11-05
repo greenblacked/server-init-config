@@ -114,7 +114,9 @@ chmod +x "$GHR_STUB/docker"
 getent group docker >/dev/null || groupadd -r docker
 printf '[Service]\nExecStart=/bin/sleep infinity\n' > /etc/systemd/system/docker.service
 systemctl daemon-reload; systemctl start docker.service
-openssl genrsa -out /tmp/ghr-test.pem 2048 2>/dev/null
+# a minimal image has no openssl command (the installer fetches it itself, but only after it needs a key to start with)
+command -v openssl >/dev/null 2>&1 || { dnf -y -q install openssl || { apt-get update -q && apt-get install -y -q openssl; }; } >/tmp/runner-openssl.log 2>&1
+openssl genrsa -out /tmp/ghr-test.pem 2048 2>/dev/null || fail "cannot create the throwaway RSA key (openssl genrsa)"
 KEYLINE=$(sed -n 2p /tmp/ghr-test.pem)
 ghr_install() { PATH="$GHR_STUB:$PATH" GH_OWNER=octo GH_APP_CLIENT_ID=Iv1.citest GH_KEY_SRC=/tmp/ghr-test.pem bash runner/install/github-runner.sh --no-self-test --no-start --no-pull; }
 run github-runner ghr_install
