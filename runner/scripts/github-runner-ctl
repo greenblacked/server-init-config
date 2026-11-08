@@ -500,13 +500,17 @@ is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 
 # check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
 # it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
 # ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
-# check is what ends a pod that got the wrong job. Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
+# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
 check_assigned_job() {
   local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
   tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
   if (( tries >= 20 )); then
+    # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
     say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
-    : > "$(pod_dir "$pod")/verified"; return 0
+    : > "$(pod_dir "$pod")/verified"
+    kill_pod "$pod" "$repo" "$rid" job_unverified
+    return 0
   fi
   printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
   get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1

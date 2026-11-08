@@ -912,6 +912,17 @@ test_a_job_that_is_not_visible_yet_is_looked_up_again() {
   assert_fail "not marked verified" test -e "$T/state/jobs/$POD/verified"
 }
 
+test_a_job_never_found_is_rejected_after_twenty_polls() {
+  setup_ctl; busy_pod_fixture
+  assigned_fx ok 7 '{"jobs":[]}'
+  mkdir -p "$T/state/jobs/$POD"; printf '20' > "$T/state/jobs/$POD/verify-tries"
+  ctl_once
+  grep -q 'event=job_unverified pod='"$POD" "$T/out" || { cat "$T/out" >&2; return 1; }
+  grep -q 'event=pod_killed pod='"$POD"' repo=octo/ok reason=job_unverified' "$T/out" || { cat "$T/out" >&2; return 1; }
+  grep -q "^kill ghr-${POD}-runner" "$T/log/docker.log" || return 1
+  assert_eq "$(calls_to 'DELETE /repos/octo/ok/actions/runners/600 204')" 1
+}
+
 test_docker_not_answering_is_not_no_pods() {
   setup_ctl
   local now; now=$(date +%s)
