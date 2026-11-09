@@ -692,7 +692,12 @@ check_services() {
   local t next
   for t in runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer ci-image-prewarm.timer; do
     is_runner || break
-    unit_exists "$t" || continue
+    if ! unit_exists "$t"; then
+      if [[ "$t" != ci-image-prewarm.timer || -f /etc/ci-prewarm.conf ]]; then
+        warn "${t} missing (expected runner maintenance timer)"
+      fi
+      continue
+    fi
     if systemctl is-active --quiet "$t" 2>/dev/null; then
       next=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2>/dev/null || true)
       if [[ -n "$next" && "$next" != "n/a" ]]; then
@@ -747,6 +752,47 @@ check_services() {
         ok "image prewarm: ${summary#*summary: }"
       fi
     fi
+  fi
+  return 0
+}
+
+check_freshness() {
+  # Cached report only: quick health must never refresh packages or contact registries.
+  [[ -f /etc/server-freshness/repo ]] || return 0
+  section "Freshness and configuration drift (cached)"
+  local report rc=0
+  if ! have freshness; then
+    warn "freshness tool missing"
+  else
+    report=$(timeout 5 freshness --check --summary 2>&1) || rc=$?
+    case "$rc" in
+      0) ok "$report" ;;
+      1) warn "$report (freshness --check for details)" ;;
+      *) warn "freshness report unavailable/incomplete: ${report} (sudo freshness --refresh)" ;;
+    esac
+  fi
+  if ! unit_exists server-freshness.timer; then
+    warn "server-freshness.timer missing"
+  elif ! systemctl is-active --quiet server-freshness.timer 2>/dev/null; then
+    warn "server-freshness.timer not active"
+  else
+    ok "server-freshness.timer active (check-only; no automatic upgrades)"
+  fi
+  return 0
+}
+
+check_recent_container_oom() {
+  (( LIMITED == 0 )) || return 0
+  have docker || return 0
+  local events n
+  # Docker retains a bounded event history. This can find OOM kills even after a restart reset .State.OOMKilled.
+  if events=$(timeout 10 docker events --since 1h --until "$(date -Iseconds)" \
+      --filter type=container --filter event=oom --format '{{.Actor.ID}}' 2>/dev/null); then
+    n=$(grep -c . <<<"$events" || true)
+    if (( n > 0 )); then warn "${n} Docker OOM event(s) in retained history for the last hour"
+    else info "no Docker OOM events in retained history for the last hour"; fi
+  else
+    skip "recent Docker OOM events unavailable"
   fi
   return 0
 }
@@ -1417,10 +1463,12 @@ check_updates
 check_serverinit
 check_securitytools
 check_services
+check_freshness
 check_runner
 check_github_runner
 check_docker
 check_containers
+check_recent_container_oom
 check_caches
 check_network
 check_trends

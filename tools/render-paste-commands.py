@@ -58,7 +58,9 @@ def expand(paths: list[str]) -> list[str]:
     return [f for f in out if not (f in seen or seen.add(f))]
 
 
-TOOLS = ["runner/install/host-tools.sh", "common/health", "runner/scripts/runner-weekly-cleanup.sh", "runner/scripts/runner-disk-guard.sh",
+TOOLS = ["runner/install/host-tools.sh", "common/health", "common/freshness", "common/config-drift",
+         "runner/systemd/server-freshness.service", "runner/systemd/server-freshness.timer",
+         "runner/scripts/runner-weekly-cleanup.sh", "runner/scripts/runner-disk-guard.sh",
          "runner/systemd/runner-weekly-cleanup.service", "runner/systemd/runner-weekly-cleanup.timer",
          "runner/systemd/runner-disk-guard.service", "runner/systemd/runner-disk-guard.timer",
          "runner/scripts/runner-engine-update.sh", "runner/scripts/ci-job-isolation.sh", "runner/systemd/runner-engine-update.service",
@@ -133,7 +135,7 @@ BLOCKS = [
     Block("github-runner", "GitHub Actions runner (private repositories)",
           "Optional, needs the per-job limits. Ephemeral just-in-time runners for the private repositories of a GitHub App installation, one job at a time, "
           "image builds through a rootless BuildKit sidecar, no Docker socket in jobs. Create the GitHub App first (permissions, no webhook, install on All repositories: "
-          "see the GitHub Actions runner section of runner/README.md), download its private key and copy it to the server, laptop, any directory: "
+          "see runner/docs/github-runner.md, including its trust requirements and unverified live-host checks), download its private key and copy it to the server, laptop, any directory: "
           "`scp app-key.pem ops@SERVER_IP:/home/ops/app-key.pem`. The last line asks for your GitHub user, the App's client ID and the path of the key "
           "(`/home/ops/app-key.pem`), runs a self-test that lists which repositories would be served, and only then enables the service. Delete the key copy afterwards.",
           GITHUB_RUNNER, interactive=["sudo bash {d}/runner/install/github-runner.sh"]),
@@ -174,7 +176,7 @@ def file_heredoc(rel: str) -> list[str]:
     text = (ROOT / rel).read_text(encoding="utf-8")
     if any(line in (DELIM, "INSTALL") for line in text.splitlines()):
         raise ValueError(f"{rel} contains a heredoc delimiter line ({DELIM} or INSTALL)")
-    mode = "755" if rel.endswith(".sh") or rel == "common/health" else "644"
+    mode = "755" if rel.endswith(".sh") or rel in {"common/health", "common/freshness", "common/config-drift"} else "644"
     return [f'install -d "$R/{Path(rel).parent.as_posix()}"',
             f"cat > \"$R/{rel}\" <<'{DELIM}'", text.rstrip("\n"), DELIM, f'chmod {mode} "$R/{rel}"']
 

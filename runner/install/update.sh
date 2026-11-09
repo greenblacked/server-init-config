@@ -237,13 +237,18 @@ update_os() {
   fi
 }
 
-script_path() { if [[ "$1" == health ]]; then echo common/health; else echo "runner/scripts/$1"; fi; }
+script_path() {
+  case "$1" in
+    health|freshness|config-drift) echo "common/$1" ;;
+    *) echo "runner/scripts/$1" ;;
+  esac
+}
 
 update_host_tools() {
   local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
-  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
   local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
-                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service)
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -252,9 +257,20 @@ update_host_tools() {
   fi
 
   # health is shared with plain servers (common/); the other scripts belong to the runner host.
+  command -v python3 >/dev/null || die "python3 is required for freshness checks"
   for f in "${scripts[@]}"; do
-    bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
+    if [[ "$f" == freshness ]]; then
+      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/common/freshness" \
+        || die "syntax error in freshness, nothing changed"
+    else
+      bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
+    fi
   done
+
+  printf '%s\n' "$REPO_ROOT" > "${WORK}/freshness-repo"
+  if sync_file "${WORK}/freshness-repo" /etc/server-freshness/repo 0644; then
+    CHANGED+=("freshness/repo")
+  fi
 
   for f in "${scripts[@]}"; do
     if sync_file "${REPO_ROOT}/$(script_path "$f")" "/usr/local/bin/${f}" 0755; then

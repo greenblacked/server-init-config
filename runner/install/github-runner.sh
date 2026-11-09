@@ -21,6 +21,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
 ETC=/etc/github-runner
 CFG="${ETC}/config.env"
 KEY="${ETC}/app.pem"
+KEY_RESTART="${ETC}/key-restart-required"
 SVC_USER=github-runner
 UNIT=github-runner-ctl.service
 CTL=/usr/local/bin/github-runner-ctl
@@ -39,8 +40,8 @@ Usage: $0 [--self-test] [--no-self-test] [--no-start] [--no-pull]
   --no-self-test  install and enable without the live check against GitHub (offline)
   --no-start      enable the service but do not start it
   --no-pull       do not pull the images now (the controller pulls a missing image before its first job)
-Rollback: systemctl disable --now github-runner-ctl; docker rm -f \$(docker ps -aq --filter label=io.server-init.github-runner=job);
-  rm -f ${CTL} /etc/systemd/system/${UNIT} ${USERNS_DROPIN}; rm -rf ${ETC}; userdel ${SVC_USER}; uninstall the App on GitHub
+Removal: see runner/docs/github-runner.md (Remove it). Stop the controller, review and remove only containers and networks labelled
+  io.server-init.github-runner=job; never prune unrelated networks. Running pods survive a controller stop.
 USAGE
 }
 
@@ -118,6 +119,7 @@ usermod -aG docker "$SVC_USER"   # root-equivalent: it is what the controller ne
 install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
 
 # ---- the key ---------------------------------------------------------------------------------------------------------------------
+changed=0
 src=${GH_KEY_SRC:-}
 if [[ -z "$src" && ! -f "$KEY" ]]; then
   [[ -t 0 ]] || die "no private key yet: pass its path in GH_KEY_SRC (the .pem downloaded from the GitHub App page)"
@@ -129,6 +131,8 @@ if [[ -n "$src" ]]; then
   if ! cmp -s "$src" "$KEY" 2>/dev/null; then
     [[ ! -f "$KEY" ]] || backup "$KEY"
     install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$src" "$KEY"
+    ( umask 077; : > "$KEY_RESTART" )
+    changed=1   # clear cached credentials after a successful self-test, even when config and code are unchanged
     log "private key installed: ${KEY} (mode 0600, owner ${SVC_USER})"
   fi
   if [[ "$(realpath "$src")" != "$(realpath "$KEY")" ]]; then
@@ -138,9 +142,9 @@ fi
 [[ -f "$KEY" ]] || die "no ${KEY}"
 openssl rsa -in "$KEY" -passin pass: -noout >/dev/null 2>&1 || die "${KEY} is not an RSA private key"
 chown "${SVC_USER}:${SVC_USER}" "$KEY"; chmod 0600 "$KEY"
+[[ ! -f "$KEY_RESTART" ]] || changed=1   # retry a rotation whose self-test or activation previously failed
 
 # ---- config ----------------------------------------------------------------------------------------------------------------------
-changed=0
 GH_OWNER=$(pick GH_OWNER "")
 if [[ -z "$GH_OWNER" ]]; then
   [[ -t 0 ]] || die "GH_OWNER is not set: pass the GitHub user name in the environment"
@@ -159,7 +163,7 @@ job_mem_default=$(gl memory); job_cpu_default=$(gl cpus)
 # only plain characters: the value goes through sed (env_set) and into a file the controller parses
 set_cfg() {
   [[ "$2" =~ ^[A-Za-z0-9_.,@:/+-]*$ ]] || die "$1: unexpected characters in '$2'"
-  [[ -n "${CFG_DRY:-}" ]] || env_set "$CFG" "$1" "$2"
+  [[ -n "${CFG_DRY:-}" ]] || env_set "${CFG_TARGET:-$CFG}" "$1" "$2"
 }
 write_config() {
   set_cfg GH_OWNER "$GH_OWNER"
@@ -184,12 +188,19 @@ write_config() {
   set_cfg GH_BUILDKIT_IMAGE "$GHR_BUILDKIT_IMAGE"
 }
 CFG_DRY=1 write_config   # checks every value first: a bad one must not leave a half-written file
+cfg_candidate=$(mktemp)
+trap 'rm -f -- "$cfg_candidate"' EXIT
+if [[ -f "$CFG" ]]; then cp "$CFG" "$cfg_candidate"; fi
+CFG_TARGET="$cfg_candidate" write_config
+GHR_CONFIG="$cfg_candidate" bash "${REPO_ROOT}/runner/scripts/github-runner-ctl" check-config \
+  || die "candidate config is invalid; installed config was not changed"
+apply_config() { cat "$cfg_candidate" > "$CFG"; }
 if [[ ! -f "$CFG" ]]; then
   printf '# Written by runner/install/github-runner.sh. No secrets here: the private key is %s.\n# Documentation: runner/README.md (GitHub Actions runner).\n' "$KEY" > "$CFG"
   write_config   # a new file: nothing to back up
 else
   cfg_before=$(sha256sum < "$CFG")
-  edit_with_backup "$CFG" write_config
+  edit_with_backup "$CFG" apply_config
   [[ "$cfg_before" == "$(sha256sum < "$CFG")" ]] || changed=1   # restart below so the controller reads the new values
 fi
 chown "root:${SVC_USER}" "$CFG"; chmod 0640 "$CFG"
@@ -219,7 +230,7 @@ fi
 if (( DO_SELFTEST )); then
   log "self-test against GitHub (starts nothing)"
   if ! run_selftest; then
-    log "self-test FAILED: the service is installed but NOT enabled. Fix the App (permissions, installation on All repositories), then: ${0} --self-test"
+    log "self-test FAILED: service activation is unchanged (an existing service may still be running). Fix the App, then rerun ${0} to self-test and apply activation/restart."
     exit 1
   fi
 fi
@@ -232,6 +243,7 @@ if (( DO_START )); then
   fi
   sleep 3
   systemctl is-active --quiet "$UNIT" || { journalctl -u github-runner-ctl -n 20 --no-pager || true; die "${UNIT} is not running"; }
+  rm -f -- "$KEY_RESTART"
   log "OK: ${UNIT} running. Use it with runs-on: [self-hosted, hetzner] in a private repository; logs: journalctl -u github-runner-ctl -f; health shows the status"
 else
   log "OK: ${UNIT} enabled, not started (--no-start): systemctl start github-runner-ctl"

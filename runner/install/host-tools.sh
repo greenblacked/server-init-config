@@ -12,16 +12,24 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+command -v python3 >/dev/null || die "python3 is required for freshness checks"
 
 install -m 0755 "$REPO_ROOT/common/health" /usr/local/bin/health
 restorecon_if /usr/local/bin/health
+for f in freshness config-drift; do
+  install -m 0755 "$REPO_ROOT/common/$f" "/usr/local/bin/$f"
+  restorecon_if "/usr/local/bin/$f"
+done
+install -d -m 0755 /etc/server-freshness
+printf '%s\n' "$REPO_ROOT" | install -m 0644 /dev/stdin /etc/server-freshness/repo
+restorecon_if -R /etc/server-freshness
 for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
@@ -40,7 +48,7 @@ restorecon_if /etc/sysctl.d/90-ci-hardening.conf
 sysctl --system >/dev/null || log "WARN: sysctl --system reported an error"
 
 systemctl daemon-reload
-systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
+systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer server-freshness.timer
 # Needs Docker (the DOCKER-USER chain). On a host without it the unit is enabled and applies at the next Docker start.
 if systemctl is-active --quiet docker; then systemctl enable --now ci-job-isolation.service; else systemctl enable ci-job-isolation.service; fi
 
