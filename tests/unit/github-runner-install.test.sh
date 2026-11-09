@@ -23,7 +23,10 @@ require_root() { :; }
 pkg_install() { die "unexpected package installation in test"; }
 systemctl() {
   printf '%s\n' "$*" >> "$T/systemctl.log"
-  case "$1" in cat) return 1 ;; esac
+  case "$1" in
+    cat) return "${INSTALL_ISOLATION_MISSING_RC:-0}" ;;
+    reload-or-restart) return "${INSTALL_ISOLATION_RELOAD_RC:-0}" ;;
+  esac
 }
 docker() { [[ "$1" != info ]] || printf 'systemd 2\n'; }
 curl() { die "unexpected network call in installer test"; }
@@ -110,4 +113,20 @@ test_installer_rotation_no_start_defers_restart_until_retry() {
   assert_fail "no-start never restarts controller" grep -q '^restart github-runner-ctl.service$' "$T/systemctl.log"
   installer_run
   assert_eq "$(grep -c '^restart github-runner-ctl.service$' "$T/systemctl.log")" 1
+}
+
+test_installer_failed_isolation_prevents_activation() {
+  setup_installer
+  assert_fail "failed isolation prevents activation" env INSTALL_ISOLATION_RELOAD_RC=1 \
+    bash "$T/repo/runner/install/github-runner.sh" --no-pull > "$T/isolation-failed.out" 2>&1
+  assert_ok "isolation failure reported" grep -q 'ci-job-isolation failed' "$T/isolation-failed.out"
+  assert_fail "no activation after failed isolation" grep -Eq '^(enable|start|restart) github-runner-ctl.service$' "$T/systemctl.log"
+}
+
+test_installer_missing_isolation_prevents_activation() {
+  setup_installer
+  assert_fail "missing isolation prevents activation" env INSTALL_ISOLATION_MISSING_RC=1 \
+    bash "$T/repo/runner/install/github-runner.sh" --no-pull > "$T/isolation-missing.out" 2>&1
+  assert_ok "missing isolation reported" grep -q 'ci-job-isolation.service missing' "$T/isolation-missing.out"
+  assert_fail "no activation without isolation" grep -Eq '^(enable|start|restart) github-runner-ctl.service$' "$T/systemctl.log"
 }

@@ -2,7 +2,7 @@
 Description=Ephemeral GitHub Actions runner controller (private repositories)
 After=docker.service network-online.target ci-job-isolation.service
 Wants=network-online.target
-Requires=docker.service
+Requires=docker.service ci-job-isolation.service
 ConditionPathExists=/etc/github-runner/config.env
 StartLimitIntervalSec=0
 

@@ -71,6 +71,7 @@ fi
 # ---- preflight ---------------------------------------------------------------------------------------------------------------
 command -v docker >/dev/null || die "docker is not installed"
 systemctl is-active --quiet docker || die "docker is not running"
+systemctl cat ci-job-isolation.service >/dev/null 2>&1 || die "ci-job-isolation.service missing: install the runner host tools first"
 getent group docker >/dev/null || die "no docker group"
 [[ -f "$SLICE" ]] || die "${SLICE} missing: run runner/setup.sh --job-limits first (the pods run inside ci-jobs.slice, which caps all CI jobs together)"
 read -r cgdrv cgver < <(docker info --format '{{.CgroupDriver}} {{.CgroupVersion}}' 2>/dev/null || echo "? ?")
@@ -218,7 +219,7 @@ install_if_changed "${REPO_ROOT}/runner/systemd/${UNIT}" "/etc/systemd/system/${
 GHR_CONFIG="$CFG" "$CTL" check-config || die "config.env is invalid (see above); fix it and rerun"
 systemctl daemon-reload
 # ci-job-isolation reads GH_JOB_SUBNET_POOL: it lets the pod networks, and only them, reach the npm cache (docker0 IP, port 4873)
-if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || log "WARN: ci-job-isolation did not restart; pods cannot reach the npm cache"; fi
+systemctl reload-or-restart ci-job-isolation.service || die "ci-job-isolation failed: inspect journalctl -u ci-job-isolation.service before enabling the runner"
 
 if (( DO_PULL )); then
   log "pulling the pinned images (the runner image is large)"
