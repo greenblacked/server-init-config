@@ -58,7 +58,9 @@ def expand(paths: list[str]) -> list[str]:
     return [f for f in out if not (f in seen or seen.add(f))]
 
 
-TOOLS = ["runner/install/host-tools.sh", "common/health", "runner/scripts/runner-weekly-cleanup.sh", "runner/scripts/runner-disk-guard.sh",
+TOOLS = ["runner/install/host-tools.sh", "common/health", "common/freshness", "common/config-drift",
+         "runner/systemd/server-freshness.service", "runner/systemd/server-freshness.timer",
+         "runner/scripts/runner-weekly-cleanup.sh", "runner/scripts/runner-disk-guard.sh",
          "runner/systemd/runner-weekly-cleanup.service", "runner/systemd/runner-weekly-cleanup.timer",
          "runner/systemd/runner-disk-guard.service", "runner/systemd/runner-disk-guard.timer",
          "runner/scripts/runner-engine-update.sh", "runner/scripts/ci-job-isolation.sh", "runner/systemd/runner-engine-update.service",
@@ -166,7 +168,7 @@ def file_heredoc(rel: str) -> list[str]:
     text = (ROOT / rel).read_text(encoding="utf-8")
     if any(line in (DELIM, "INSTALL") for line in text.splitlines()):
         raise ValueError(f"{rel} contains a heredoc delimiter line ({DELIM} or INSTALL)")
-    mode = "755" if rel.endswith(".sh") or rel == "common/health" else "644"
+    mode = "755" if rel.endswith(".sh") or rel in {"common/health", "common/freshness", "common/config-drift"} else "644"
     return [f'install -d "$R/{Path(rel).parent.as_posix()}"',
             f"cat > \"$R/{rel}\" <<'{DELIM}'", text.rstrip("\n"), DELIM, f'chmod {mode} "$R/{rel}"']
 

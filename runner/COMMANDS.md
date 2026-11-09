@@ -1553,16 +1553,24 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+command -v python3 >/dev/null || die "python3 is required for freshness checks"
 
 install -m 0755 "$REPO_ROOT/common/health" /usr/local/bin/health
 restorecon_if /usr/local/bin/health
+for f in freshness config-drift; do
+  install -m 0755 "$REPO_ROOT/common/$f" "/usr/local/bin/$f"
+  restorecon_if "/usr/local/bin/$f"
+done
+install -d -m 0755 /etc/server-freshness
+printf '%s\n' "$REPO_ROOT" | install -m 0644 /dev/stdin /etc/server-freshness/repo
+restorecon_if -R /etc/server-freshness
 for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
@@ -1581,7 +1589,7 @@ restorecon_if /etc/sysctl.d/90-ci-hardening.conf
 sysctl --system >/dev/null || log "WARN: sysctl --system reported an error"
 
 systemctl daemon-reload
-systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
+systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer server-freshness.timer
 # Needs Docker (the DOCKER-USER chain). On a host without it the unit is enabled and applies at the next Docker start.
 if systemctl is-active --quiet docker; then systemctl enable --now ci-job-isolation.service; else systemctl enable ci-job-isolation.service; fi
 
@@ -2285,7 +2293,12 @@ check_services() {
   local t next
   for t in runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer ci-image-prewarm.timer; do
     is_runner || break
-    unit_exists "$t" || continue
+    if ! unit_exists "$t"; then
+      if [[ "$t" != ci-image-prewarm.timer || -f /etc/ci-prewarm.conf ]]; then
+        warn "${t} missing (expected runner maintenance timer)"
+      fi
+      continue
+    fi
     if systemctl is-active --quiet "$t" 2>/dev/null; then
       next=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2>/dev/null || true)
       if [[ -n "$next" && "$next" != "n/a" ]]; then
@@ -2340,6 +2353,47 @@ check_services() {
         ok "image prewarm: ${summary#*summary: }"
       fi
     fi
+  fi
+  return 0
+}
+
+check_freshness() {
+  # Cached report only: quick health must never refresh packages or contact registries.
+  [[ -f /etc/server-freshness/repo ]] || return 0
+  section "Freshness and configuration drift (cached)"
+  local report rc=0
+  if ! have freshness; then
+    warn "freshness tool missing"
+  else
+    report=$(timeout 5 freshness --check --summary 2>&1) || rc=$?
+    case "$rc" in
+      0) ok "$report" ;;
+      1) warn "$report (freshness --check for details)" ;;
+      *) warn "freshness report unavailable/incomplete: ${report} (sudo freshness --refresh)" ;;
+    esac
+  fi
+  if ! unit_exists server-freshness.timer; then
+    warn "server-freshness.timer missing"
+  elif ! systemctl is-active --quiet server-freshness.timer 2>/dev/null; then
+    warn "server-freshness.timer not active"
+  else
+    ok "server-freshness.timer active (check-only; no automatic upgrades)"
+  fi
+  return 0
+}
+
+check_recent_container_oom() {
+  (( LIMITED == 0 )) || return 0
+  have docker || return 0
+  local events n
+  # Docker retains a bounded event history. This can find OOM kills even after a restart reset .State.OOMKilled.
+  if events=$(timeout 10 docker events --since 1h --until "$(date -Iseconds)" \
+      --filter type=container --filter event=oom --format '{{.Actor.ID}}' 2>/dev/null); then
+    n=$(grep -c . <<<"$events" || true)
+    if (( n > 0 )); then warn "${n} Docker OOM event(s) in retained history for the last hour"
+    else info "no Docker OOM events in retained history for the last hour"; fi
+  else
+    skip "recent Docker OOM events unavailable"
   fi
   return 0
 }
@@ -2921,15 +2975,458 @@ check_updates
 check_serverinit
 check_securitytools
 check_services
+check_freshness
 check_runner
 check_docker
 check_containers
+check_recent_container_oom
 check_caches
 check_network
 check_trends
 print_summary_and_exit
 __SIC_EOF__
 chmod 755 "$R/common/health"
+
+install -d "$R/common"
+cat > "$R/common/freshness" <<'__SIC_EOF__'
+#!/usr/bin/env python3
+"""Read cached maintenance status; refresh explicitly, never apply upgrades."""
+import argparse
+import datetime
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+STACKS = {
+    "npm-cache": ("docker-compose.yml", "config.yaml"),
+    "registry-cache": ("docker-compose.yml", "config.yml"),
+    "logging": ("docker-compose.yml", "loki.yaml", "config.alloy"),
+    "monitoring": ("docker-compose.yml",),
+}
+STATE = Path("/var/lib/server-freshness/report.json")
+MAX_AGE = 36 * 3600
+
+
+class CheckError(Exception):
+    pass
+
+
+def run(argv, timeout=30, accepted=(0,)):
+    """Never echo command output on failure: Compose output may contain secrets."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                                env={**os.environ, "LC_ALL": "C", "PYTHONDONTWRITEBYTECODE": "1"})
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CheckError(f"{argv[0]} unavailable or timed out") from exc
+    if result.returncode not in accepted:
+        raise CheckError(f"{argv[0]} failed (exit {result.returncode})")
+    return result
+
+
+def read_json(text):
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError) as exc:
+        raise CheckError("invalid JSON response") from exc
+
+
+def bridge_address():
+    rows = read_json(run(["ip", "-j", "-4", "addr", "show", "docker0"]).stdout)
+    for row in rows:
+        for address in row.get("addr_info", []):
+            if address.get("family") == "inet":
+                return str(ipaddress.IPv4Address(address["local"]))
+    raise CheckError("docker0 IPv4 address unavailable")
+
+
+def compare_file(source, deployed, findings, expected=None):
+    label = str(deployed)
+    try:
+        want = source.read_bytes() if expected is None else expected
+        have = deployed.read_bytes()
+    except OSError:
+        findings.append({"level": "error", "item": label, "detail": "managed file missing or unreadable"})
+        return
+    if want != have:
+        findings.append({"level": "warning", "item": label, "detail": "differs from repository"})
+
+
+def runtime_drift(directory, findings):
+    # Only retain image and memory fields; never emit interpolated Compose configuration.
+    config = read_json(run(["docker", "compose", "--project-directory", str(directory),
+                            "config", "--format", "json"]).stdout)
+    project = config.get("name")
+    if not project or not isinstance(config.get("services"), dict):
+        raise CheckError("Compose project/services unavailable")
+    ids = run(["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"]).stdout.split()
+    rows = []
+    if ids:
+        fmt = '{{json .Config.Labels}}|{{json .Config.Image}}|{{.HostConfig.Memory}}|{{.State.Status}}'
+        for line in run(["docker", "inspect", "--format", fmt, *ids]).stdout.splitlines():
+            labels, image, memory, status = line.split("|")
+            rows.append((read_json(labels), read_json(image), int(memory), status))
+    for name, service in config["services"].items():
+        if service.get("profiles"):
+            continue
+        matches = [r for r in rows if r[0].get("com.docker.compose.service") == name
+                   and r[0].get("com.docker.compose.oneoff") != "True"]
+        item = f"{project}/{name}"
+        if not matches:
+            findings.append({"level": "warning", "item": item, "detail": "container missing"})
+        for _, image, memory, status in matches:
+            if status != "running":
+                findings.append({"level": "warning", "item": item, "detail": f"container {status}"})
+            if image != service.get("image") or memory != int(service.get("mem_limit", 0)):
+                findings.append({"level": "warning", "item": item,
+                                 "detail": "running image reference or memory limit differs from deployed Compose"})
+
+
+def drift(repo, root=Path("/")):
+    findings = []
+    installed = []
+    if not (repo / "runner/stacks").is_dir():
+        return [{"level": "error", "item": "repository", "detail": "runner/stacks missing or unreadable"}], []
+    bridge = None
+    for stack, files in STACKS.items():
+        directory = root / "opt" / stack
+        if not directory.exists():
+            continue
+        installed.append(directory)
+        source = repo / "runner/stacks" / stack
+        try:
+            for name in files:
+                expected = None
+                if stack == "npm-cache":
+                    bridge = bridge or bridge_address()
+                    expected = (source / name).read_bytes().replace(b"172.17.0.1:4873",
+                                                                  f"{bridge}:4873".encode())
+                compare_file(source / name, directory / name, findings, expected)
+            if stack == "monitoring":
+                for subtree in ("prometheus", "grafana"):
+                    if not (source / subtree).is_dir():
+                        raise CheckError(f"repository monitoring/{subtree} missing")
+                    for file in sorted((source / subtree).rglob("*")):
+                        if not file.is_file():
+                            continue
+                        relative = file.relative_to(source)
+                        expected = file.read_bytes()
+                        if relative.as_posix() == "prometheus/prometheus.yml":
+                            additions = (
+                                ("registry-cache", "registry-cache", "127.0.0.1:5001"),
+                                ("logging", "loki", "127.0.0.1:3100"),
+                                ("logging", "alloy", "127.0.0.1:12345"),
+                            )
+                            for component, job, target in additions:
+                                if (root / "opt" / component / "docker-compose.yml").exists():
+                                    if f"job_name: {job}".encode() not in expected:
+                                        expected += (f'  - job_name: {job}\n    static_configs:\n'
+                                                     f'      - targets: ["{target}"]\n').encode()
+                        compare_file(file, directory / relative, findings, expected)
+                if (root / "opt/logging/docker-compose.yml").exists():
+                    compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
+                                 directory / "grafana/provisioning/datasources/loki.yml", findings)
+            runtime_drift(directory, findings)
+        except (CheckError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            detail = str(exc) if isinstance(exc, CheckError) else "cannot inspect managed stack"
+            findings.append({"level": "error", "item": stack, "detail": detail})
+    if not installed:
+        findings.append({"level": "error", "item": "stacks", "detail": "no installed managed stacks found"})
+    return findings, installed
+
+
+def version(tag):
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", tag)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def hub_tags(image):
+    name = image.split("@", 1)[0]
+    repository, sep, tag = name.rpartition(":")
+    if not sep or "/" in tag:
+        raise CheckError("image has no explicit version tag")
+    if repository.startswith(("docker.io/", "index.docker.io/")):
+        repository = repository.split("/", 1)[1]
+    elif "." in repository.split("/")[0] or ":" in repository.split("/")[0]:
+        raise CheckError("release discovery supports Docker Hub only")
+    if "/" not in repository:
+        repository = f"library/{repository}"
+    current = version(tag)
+    if current is None:
+        raise CheckError("release discovery requires a stable major.minor.patch tag")
+    url = f"https://hub.docker.com/v2/repositories/{urllib.parse.quote(repository, safe='/')}/tags?page_size=100&ordering=last_updated"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as response:
+            payload = response.read(2_000_001)
+        if len(payload) > 2_000_000:
+            raise CheckError("Docker Hub response too large")
+        data = read_json(payload)
+        candidates = [row["name"] for row in data["results"] if version(row.get("name", ""))]
+    except (urllib.error.URLError, TimeoutError, OSError, KeyError, TypeError, AttributeError) as exc:
+        raise CheckError("Docker Hub tag lookup unavailable") from exc
+    newer = [tag for tag in candidates if version(tag) > current]
+    same = [tag for tag in newer if version(tag)[0] == current[0]]
+    return {"image": image, "same_major": max(same, key=version) if same else None,
+            "newest_sampled": max(newer, key=version) if newer else None,
+            "scope": "100 most recently updated tags; stable x.y.z only, not a support/EOL check"}
+
+
+def packages():
+    """Refresh metadata only. This function is never called by --check or health."""
+    if shutil.which("dnf"):
+        rows = run(["dnf", "-q", "--refresh", "--setopt=*.skip_if_unavailable=False", "check-update"],
+                   timeout=150, accepted=(0, 100))
+        pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src)\s+(\S+)\s+\S+")
+        updates = sorted({match.group(1) for line in rows.stdout.splitlines()
+                          if (match := pattern.match(line))})
+        if rows.returncode == 100 and not updates:
+            raise CheckError("DNF reports updates but package list could not be parsed")
+        security = run(["dnf", "-q", "--cacheonly", "updateinfo", "list", "--security"], timeout=60)
+        advisories = {line.split()[0] for line in security.stdout.splitlines()
+                      if re.match(r"^\S+\s+(?:\S+/)?(?:Security|Sec\.)\s+", line, re.I)}
+        return {"updates": len(updates), "packages": updates, "security_advisories": len(advisories),
+                "scope": "enabled DNF repositories"}
+    if shutil.which("apt-get"):
+        run(["apt-get", "-q", "-o", "APT::Update::Error-Mode=any", "update"], timeout=150)
+        result = run(["apt-get", "-s", "-o", "Debug::NoLocking=1", "upgrade"], timeout=60)
+        rows = [line for line in result.stdout.splitlines() if line.startswith("Inst ")]
+        return {"updates": len(rows), "packages": [line.split()[1] for line in rows],
+                "security_packages": sum("security" in line.lower() for line in rows),
+                "scope": "APT upgrade simulation (held-back packages not included)"}
+    raise CheckError("no supported package manager")
+
+
+def reboot_state():
+    if Path("/var/run/reboot-required").exists():
+        return "required"
+    if shutil.which("needs-restarting"):
+        result = run(["needs-restarting", "-r"], timeout=30, accepted=(0, 1))
+        if result.returncode == 0:
+            return "not-required"
+        if "reboot is required" in result.stdout.lower():
+            return "required"
+    return "unknown"
+
+
+def collect(repo):
+    report = {"schema": 1, "checked_at": int(time.time()), "errors": [], "releases": []}
+    for key, callback in (("os", packages), ("reboot", reboot_state)):
+        try:
+            report[key] = callback()
+        except CheckError as exc:
+            report["errors"].append(f"{key}: {exc}")
+    findings, installed = drift(repo)
+    report["drift"] = findings
+    images = set()
+    for directory in installed:
+        try:
+            data = read_json(run(["docker", "compose", "--project-directory", str(directory),
+                                  "config", "--format", "json"]).stdout)
+            images.update(service["image"] for service in data["services"].values() if "image" in service)
+        except (CheckError, KeyError, TypeError, AttributeError):
+            report["errors"].append(f"{directory.name}: image inventory unavailable")
+    for image in sorted(images):
+        try:
+            report["releases"].append(hub_tags(image))
+        except CheckError as exc:
+            report["errors"].append(f"{image}: {exc}")
+    report["versions"] = {}
+    for name, argv in (("docker", ["docker", "--version"]), ("runner", ["gitlab-runner", "--version"])):
+        if shutil.which(argv[0]):
+            try:
+                output = run(argv).stdout
+                match = re.search(r"(?:Version:\s*|version\s+)([0-9][0-9.\w+-]*)", output, re.I)
+                report["versions"][name] = match.group(1) if match else "unknown"
+            except CheckError as exc:
+                report["errors"].append(f"{name}: {exc}")
+    return report
+
+
+def save_report(path, report):
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".report-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(report, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchmod(stream.fileno(), 0o644)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def report_status(report, now=None):
+    now = time.time() if now is None else now
+    if (not isinstance(report, dict) or report.get("schema") != 1
+            or not isinstance(report.get("checked_at"), int)
+            or not isinstance(report.get("errors"), list)
+            or not isinstance(report.get("drift"), list)
+            or not isinstance(report.get("releases"), list)):
+        raise CheckError("invalid cached report")
+    if (not all(isinstance(row, dict) and row.get("level") in ("warning", "error")
+                and isinstance(row.get("item"), str) and isinstance(row.get("detail"), str)
+                for row in report["drift"])
+            or not all(isinstance(row, dict) and "newest_sampled" in row
+                       and "same_major" in row and isinstance(row.get("image"), str)
+                       for row in report["releases"])
+            or not all(isinstance(error, str) for error in report["errors"])
+            or not isinstance(report.get("os", {}), dict)):
+        raise CheckError("invalid cached report fields")
+    age = now - report["checked_at"]
+    if age < 0:
+        raise CheckError("cached report timestamp is in the future")
+    errors = len(report["errors"]) + sum(f["level"] == "error" for f in report["drift"])
+    drift_count = sum(f["level"] == "warning" for f in report["drift"])
+    releases = sum(bool(row["newest_sampled"]) for row in report["releases"])
+    os_updates = report.get("os", {}).get("updates")
+    if os_updates is not None and (type(os_updates) is not int or os_updates < 0):
+        raise CheckError("invalid cached package update count")
+    stale = age > MAX_AGE
+    rc = 2 if errors else int(stale or drift_count > 0 or releases > 0
+                             or os_updates is None or bool(os_updates) or report.get("reboot") != "not-required")
+    summary = (f"OS updates={os_updates if os_updates is not None else 'unknown'}, "
+               f"image release candidates={releases}, drift={drift_count}, errors={errors}, "
+               f"reboot={report.get('reboot', 'unknown')}, age={int(age // 3600)}h"
+               f"{' (STALE)' if stale else ''}")
+    return rc, summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true", help="read cached report only; no network or writes")
+    mode.add_argument("--refresh", action="store_true", help="refresh metadata/network checks and write cached report; never upgrade")
+    parser.add_argument("--drift", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--repo", type=Path, help="repository root (default: /etc/server-freshness/repo)")
+    parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
+    parser.add_argument("--state", type=Path, default=STATE)
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--summary", action="store_true", help="one-line cached summary")
+    args = parser.parse_args()
+    if args.drift and (args.refresh or args.summary):
+        parser.error("--drift requires --check and cannot use --summary")
+    if args.refresh and os.geteuid() != 0:
+        parser.error("--refresh requires root (package metadata and report writes)")
+    try:
+        if args.drift or args.refresh:
+            repo = args.repo or Path("/etc/server-freshness/repo").read_text().strip()
+            repo = Path(repo)
+            if not repo.is_absolute():
+                raise CheckError("repository path must be absolute")
+        if args.drift:
+            findings, _ = drift(repo, args.root)
+            if args.json:
+                print(json.dumps(findings, indent=2))
+            else:
+                for row in findings:
+                    print(f"{row['level'].upper()}: {row['item']}: {row['detail']}")
+                print(f"Checked managed stack files and runtime image/memory; {len(findings)} finding(s)")
+            return 2 if any(r["level"] == "error" for r in findings) else int(bool(findings))
+        if args.refresh:
+            args.state.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            with (args.state.parent / ".refresh.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise CheckError("another freshness refresh is running") from exc
+                print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} INFO freshness refresh started",
+                      file=sys.stderr)
+                started = time.monotonic()
+                report = collect(repo)
+                save_report(args.state, report)
+        else:
+            report = read_json(args.state.read_text())
+        rc, summary = report_status(report)
+        if args.refresh:
+            print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} INFO freshness refresh completed "
+                  f"exit={rc} duration={time.monotonic() - started:.1f}s", file=sys.stderr)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(summary)
+            if not args.summary:
+                print(f"Details: freshness --check --json ({args.state})")
+                for error in report["errors"]:
+                    print(f"ERROR: {error}")
+                for row in report["releases"]:
+                    if row["newest_sampled"]:
+                        print(f"REVIEW: {row['image']}: same major={row['same_major'] or 'none found'}, "
+                              f"newest sampled={row['newest_sampled']}")
+                for row in report["drift"]:
+                    print(f"{row['level'].upper()}: {row['item']}: {row['detail']}")
+                print("Release candidates are sampled stable Docker Hub tags, not support/EOL guarantees.")
+        return rc
+    except (CheckError, OSError, ValueError, KeyError, TypeError) as exc:
+        detail = str(exc) if isinstance(exc, CheckError) else "report/input missing, unreadable, or invalid"
+        print(f"freshness: {detail}; run sudo freshness --refresh to collect a report", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+__SIC_EOF__
+chmod 755 "$R/common/freshness"
+
+install -d "$R/common"
+cat > "$R/common/config-drift" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Uses the same comparison rules as the daily freshness report.
+set -Eeuo pipefail
+exec python3 "$(dirname "$(readlink -f "$0")")/freshness" --drift "$@"
+__SIC_EOF__
+chmod 755 "$R/common/config-drift"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/server-freshness.service" <<'__SIC_EOF__'
+[Unit]
+Description=Check package freshness and managed stack drift without upgrading
+After=network-online.target docker.service
+Wants=network-online.target
+ConditionPathExists=/etc/server-freshness/repo
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freshness --refresh
+# 1 means updates/drift/reboot pending; 2 means one or more checks could not complete.
+SuccessExitStatus=1
+TimeoutStartSec=10min
+Nice=10
+IOSchedulingClass=idle
+UMask=0022
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=true
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/server-freshness.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/server-freshness.timer" <<'__SIC_EOF__'
+[Unit]
+Description=Daily check-only freshness and configuration drift report
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/server-freshness.timer"
 
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-weekly-cleanup.sh" <<'__SIC_EOF__'
@@ -3401,7 +3898,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 15"
+echo "files written to $R: 19"
 bash "$R/runner/install/host-tools.sh" </dev/null
 INSTALL
 ````
@@ -7639,7 +8136,7 @@ services:
     image: verdaccio/verdaccio:7.0.2
     restart: unless-stopped
     network_mode: host
-    mem_limit: 256m
+    mem_limit: 1g
     # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
     # and exposes the cache (access: $all) on every interface. runner/install/npm-cache.sh and update.sh
     # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
@@ -10237,16 +10734,24 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+command -v python3 >/dev/null || die "python3 is required for freshness checks"
 
 install -m 0755 "$REPO_ROOT/common/health" /usr/local/bin/health
 restorecon_if /usr/local/bin/health
+for f in freshness config-drift; do
+  install -m 0755 "$REPO_ROOT/common/$f" "/usr/local/bin/$f"
+  restorecon_if "/usr/local/bin/$f"
+done
+install -d -m 0755 /etc/server-freshness
+printf '%s\n' "$REPO_ROOT" | install -m 0644 /dev/stdin /etc/server-freshness/repo
+restorecon_if -R /etc/server-freshness
 for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
@@ -10265,7 +10770,7 @@ restorecon_if /etc/sysctl.d/90-ci-hardening.conf
 sysctl --system >/dev/null || log "WARN: sysctl --system reported an error"
 
 systemctl daemon-reload
-systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
+systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer server-freshness.timer
 # Needs Docker (the DOCKER-USER chain). On a host without it the unit is enabled and applies at the next Docker start.
 if systemctl is-active --quiet docker; then systemctl enable --now ci-job-isolation.service; else systemctl enable ci-job-isolation.service; fi
 
@@ -11362,13 +11867,18 @@ update_os() {
   fi
 }
 
-script_path() { if [[ "$1" == health ]]; then echo common/health; else echo "runner/scripts/$1"; fi; }
+script_path() {
+  case "$1" in
+    health|freshness|config-drift) echo "common/$1" ;;
+    *) echo "runner/scripts/$1" ;;
+  esac
+}
 
 update_host_tools() {
   local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
-  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
   local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
-                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service)
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -11377,9 +11887,20 @@ update_host_tools() {
   fi
 
   # health is shared with plain servers (common/); the other scripts belong to the runner host.
+  command -v python3 >/dev/null || die "python3 is required for freshness checks"
   for f in "${scripts[@]}"; do
-    bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
+    if [[ "$f" == freshness ]]; then
+      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/common/freshness" \
+        || die "syntax error in freshness, nothing changed"
+    else
+      bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
+    fi
   done
+
+  printf '%s\n' "$REPO_ROOT" > "${WORK}/freshness-repo"
+  if sync_file "${WORK}/freshness-repo" /etc/server-freshness/repo 0644; then
+    CHANGED+=("freshness/repo")
+  fi
 
   for f in "${scripts[@]}"; do
     if sync_file "${REPO_ROOT}/$(script_path "$f")" "/usr/local/bin/${f}" 0755; then
@@ -12657,6 +13178,45 @@ WantedBy=timers.target
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/runner-weekly-cleanup.timer"
 
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/server-freshness.service" <<'__SIC_EOF__'
+[Unit]
+Description=Check package freshness and managed stack drift without upgrading
+After=network-online.target docker.service
+Wants=network-online.target
+ConditionPathExists=/etc/server-freshness/repo
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freshness --refresh
+# 1 means updates/drift/reboot pending; 2 means one or more checks could not complete.
+SuccessExitStatus=1
+TimeoutStartSec=10min
+Nice=10
+IOSchedulingClass=idle
+UMask=0022
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=true
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/server-freshness.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/server-freshness.timer" <<'__SIC_EOF__'
+[Unit]
+Description=Daily check-only freshness and configuration drift report
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/server-freshness.timer"
+
 install -d "$R/runner/stacks/logging"
 cat > "$R/runner/stacks/logging/config.alloy" <<'__SIC_EOF__'
 // Container logs and the systemd journal to the local Loki.
@@ -13182,7 +13742,7 @@ services:
     image: verdaccio/verdaccio:7.0.2
     restart: unless-stopped
     network_mode: host
-    mem_limit: 256m
+    mem_limit: 1g
     # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
     # and exposes the cache (access: $all) on every interface. runner/install/npm-cache.sh and update.sh
     # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
@@ -13404,6 +13964,408 @@ done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"
 __SIC_EOF__
 chmod 755 "$R/common/admin-tools.sh"
+
+install -d "$R/common"
+cat > "$R/common/config-drift" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Uses the same comparison rules as the daily freshness report.
+set -Eeuo pipefail
+exec python3 "$(dirname "$(readlink -f "$0")")/freshness" --drift "$@"
+__SIC_EOF__
+chmod 755 "$R/common/config-drift"
+
+install -d "$R/common"
+cat > "$R/common/freshness" <<'__SIC_EOF__'
+#!/usr/bin/env python3
+"""Read cached maintenance status; refresh explicitly, never apply upgrades."""
+import argparse
+import datetime
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+STACKS = {
+    "npm-cache": ("docker-compose.yml", "config.yaml"),
+    "registry-cache": ("docker-compose.yml", "config.yml"),
+    "logging": ("docker-compose.yml", "loki.yaml", "config.alloy"),
+    "monitoring": ("docker-compose.yml",),
+}
+STATE = Path("/var/lib/server-freshness/report.json")
+MAX_AGE = 36 * 3600
+
+
+class CheckError(Exception):
+    pass
+
+
+def run(argv, timeout=30, accepted=(0,)):
+    """Never echo command output on failure: Compose output may contain secrets."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                                env={**os.environ, "LC_ALL": "C", "PYTHONDONTWRITEBYTECODE": "1"})
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CheckError(f"{argv[0]} unavailable or timed out") from exc
+    if result.returncode not in accepted:
+        raise CheckError(f"{argv[0]} failed (exit {result.returncode})")
+    return result
+
+
+def read_json(text):
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError) as exc:
+        raise CheckError("invalid JSON response") from exc
+
+
+def bridge_address():
+    rows = read_json(run(["ip", "-j", "-4", "addr", "show", "docker0"]).stdout)
+    for row in rows:
+        for address in row.get("addr_info", []):
+            if address.get("family") == "inet":
+                return str(ipaddress.IPv4Address(address["local"]))
+    raise CheckError("docker0 IPv4 address unavailable")
+
+
+def compare_file(source, deployed, findings, expected=None):
+    label = str(deployed)
+    try:
+        want = source.read_bytes() if expected is None else expected
+        have = deployed.read_bytes()
+    except OSError:
+        findings.append({"level": "error", "item": label, "detail": "managed file missing or unreadable"})
+        return
+    if want != have:
+        findings.append({"level": "warning", "item": label, "detail": "differs from repository"})
+
+
+def runtime_drift(directory, findings):
+    # Only retain image and memory fields; never emit interpolated Compose configuration.
+    config = read_json(run(["docker", "compose", "--project-directory", str(directory),
+                            "config", "--format", "json"]).stdout)
+    project = config.get("name")
+    if not project or not isinstance(config.get("services"), dict):
+        raise CheckError("Compose project/services unavailable")
+    ids = run(["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"]).stdout.split()
+    rows = []
+    if ids:
+        fmt = '{{json .Config.Labels}}|{{json .Config.Image}}|{{.HostConfig.Memory}}|{{.State.Status}}'
+        for line in run(["docker", "inspect", "--format", fmt, *ids]).stdout.splitlines():
+            labels, image, memory, status = line.split("|")
+            rows.append((read_json(labels), read_json(image), int(memory), status))
+    for name, service in config["services"].items():
+        if service.get("profiles"):
+            continue
+        matches = [r for r in rows if r[0].get("com.docker.compose.service") == name
+                   and r[0].get("com.docker.compose.oneoff") != "True"]
+        item = f"{project}/{name}"
+        if not matches:
+            findings.append({"level": "warning", "item": item, "detail": "container missing"})
+        for _, image, memory, status in matches:
+            if status != "running":
+                findings.append({"level": "warning", "item": item, "detail": f"container {status}"})
+            if image != service.get("image") or memory != int(service.get("mem_limit", 0)):
+                findings.append({"level": "warning", "item": item,
+                                 "detail": "running image reference or memory limit differs from deployed Compose"})
+
+
+def drift(repo, root=Path("/")):
+    findings = []
+    installed = []
+    if not (repo / "runner/stacks").is_dir():
+        return [{"level": "error", "item": "repository", "detail": "runner/stacks missing or unreadable"}], []
+    bridge = None
+    for stack, files in STACKS.items():
+        directory = root / "opt" / stack
+        if not directory.exists():
+            continue
+        installed.append(directory)
+        source = repo / "runner/stacks" / stack
+        try:
+            for name in files:
+                expected = None
+                if stack == "npm-cache":
+                    bridge = bridge or bridge_address()
+                    expected = (source / name).read_bytes().replace(b"172.17.0.1:4873",
+                                                                  f"{bridge}:4873".encode())
+                compare_file(source / name, directory / name, findings, expected)
+            if stack == "monitoring":
+                for subtree in ("prometheus", "grafana"):
+                    if not (source / subtree).is_dir():
+                        raise CheckError(f"repository monitoring/{subtree} missing")
+                    for file in sorted((source / subtree).rglob("*")):
+                        if not file.is_file():
+                            continue
+                        relative = file.relative_to(source)
+                        expected = file.read_bytes()
+                        if relative.as_posix() == "prometheus/prometheus.yml":
+                            additions = (
+                                ("registry-cache", "registry-cache", "127.0.0.1:5001"),
+                                ("logging", "loki", "127.0.0.1:3100"),
+                                ("logging", "alloy", "127.0.0.1:12345"),
+                            )
+                            for component, job, target in additions:
+                                if (root / "opt" / component / "docker-compose.yml").exists():
+                                    if f"job_name: {job}".encode() not in expected:
+                                        expected += (f'  - job_name: {job}\n    static_configs:\n'
+                                                     f'      - targets: ["{target}"]\n').encode()
+                        compare_file(file, directory / relative, findings, expected)
+                if (root / "opt/logging/docker-compose.yml").exists():
+                    compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
+                                 directory / "grafana/provisioning/datasources/loki.yml", findings)
+            runtime_drift(directory, findings)
+        except (CheckError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            detail = str(exc) if isinstance(exc, CheckError) else "cannot inspect managed stack"
+            findings.append({"level": "error", "item": stack, "detail": detail})
+    if not installed:
+        findings.append({"level": "error", "item": "stacks", "detail": "no installed managed stacks found"})
+    return findings, installed
+
+
+def version(tag):
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", tag)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def hub_tags(image):
+    name = image.split("@", 1)[0]
+    repository, sep, tag = name.rpartition(":")
+    if not sep or "/" in tag:
+        raise CheckError("image has no explicit version tag")
+    if repository.startswith(("docker.io/", "index.docker.io/")):
+        repository = repository.split("/", 1)[1]
+    elif "." in repository.split("/")[0] or ":" in repository.split("/")[0]:
+        raise CheckError("release discovery supports Docker Hub only")
+    if "/" not in repository:
+        repository = f"library/{repository}"
+    current = version(tag)
+    if current is None:
+        raise CheckError("release discovery requires a stable major.minor.patch tag")
+    url = f"https://hub.docker.com/v2/repositories/{urllib.parse.quote(repository, safe='/')}/tags?page_size=100&ordering=last_updated"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as response:
+            payload = response.read(2_000_001)
+        if len(payload) > 2_000_000:
+            raise CheckError("Docker Hub response too large")
+        data = read_json(payload)
+        candidates = [row["name"] for row in data["results"] if version(row.get("name", ""))]
+    except (urllib.error.URLError, TimeoutError, OSError, KeyError, TypeError, AttributeError) as exc:
+        raise CheckError("Docker Hub tag lookup unavailable") from exc
+    newer = [tag for tag in candidates if version(tag) > current]
+    same = [tag for tag in newer if version(tag)[0] == current[0]]
+    return {"image": image, "same_major": max(same, key=version) if same else None,
+            "newest_sampled": max(newer, key=version) if newer else None,
+            "scope": "100 most recently updated tags; stable x.y.z only, not a support/EOL check"}
+
+
+def packages():
+    """Refresh metadata only. This function is never called by --check or health."""
+    if shutil.which("dnf"):
+        rows = run(["dnf", "-q", "--refresh", "--setopt=*.skip_if_unavailable=False", "check-update"],
+                   timeout=150, accepted=(0, 100))
+        pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src)\s+(\S+)\s+\S+")
+        updates = sorted({match.group(1) for line in rows.stdout.splitlines()
+                          if (match := pattern.match(line))})
+        if rows.returncode == 100 and not updates:
+            raise CheckError("DNF reports updates but package list could not be parsed")
+        security = run(["dnf", "-q", "--cacheonly", "updateinfo", "list", "--security"], timeout=60)
+        advisories = {line.split()[0] for line in security.stdout.splitlines()
+                      if re.match(r"^\S+\s+(?:\S+/)?(?:Security|Sec\.)\s+", line, re.I)}
+        return {"updates": len(updates), "packages": updates, "security_advisories": len(advisories),
+                "scope": "enabled DNF repositories"}
+    if shutil.which("apt-get"):
+        run(["apt-get", "-q", "-o", "APT::Update::Error-Mode=any", "update"], timeout=150)
+        result = run(["apt-get", "-s", "-o", "Debug::NoLocking=1", "upgrade"], timeout=60)
+        rows = [line for line in result.stdout.splitlines() if line.startswith("Inst ")]
+        return {"updates": len(rows), "packages": [line.split()[1] for line in rows],
+                "security_packages": sum("security" in line.lower() for line in rows),
+                "scope": "APT upgrade simulation (held-back packages not included)"}
+    raise CheckError("no supported package manager")
+
+
+def reboot_state():
+    if Path("/var/run/reboot-required").exists():
+        return "required"
+    if shutil.which("needs-restarting"):
+        result = run(["needs-restarting", "-r"], timeout=30, accepted=(0, 1))
+        if result.returncode == 0:
+            return "not-required"
+        if "reboot is required" in result.stdout.lower():
+            return "required"
+    return "unknown"
+
+
+def collect(repo):
+    report = {"schema": 1, "checked_at": int(time.time()), "errors": [], "releases": []}
+    for key, callback in (("os", packages), ("reboot", reboot_state)):
+        try:
+            report[key] = callback()
+        except CheckError as exc:
+            report["errors"].append(f"{key}: {exc}")
+    findings, installed = drift(repo)
+    report["drift"] = findings
+    images = set()
+    for directory in installed:
+        try:
+            data = read_json(run(["docker", "compose", "--project-directory", str(directory),
+                                  "config", "--format", "json"]).stdout)
+            images.update(service["image"] for service in data["services"].values() if "image" in service)
+        except (CheckError, KeyError, TypeError, AttributeError):
+            report["errors"].append(f"{directory.name}: image inventory unavailable")
+    for image in sorted(images):
+        try:
+            report["releases"].append(hub_tags(image))
+        except CheckError as exc:
+            report["errors"].append(f"{image}: {exc}")
+    report["versions"] = {}
+    for name, argv in (("docker", ["docker", "--version"]), ("runner", ["gitlab-runner", "--version"])):
+        if shutil.which(argv[0]):
+            try:
+                output = run(argv).stdout
+                match = re.search(r"(?:Version:\s*|version\s+)([0-9][0-9.\w+-]*)", output, re.I)
+                report["versions"][name] = match.group(1) if match else "unknown"
+            except CheckError as exc:
+                report["errors"].append(f"{name}: {exc}")
+    return report
+
+
+def save_report(path, report):
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".report-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(report, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchmod(stream.fileno(), 0o644)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def report_status(report, now=None):
+    now = time.time() if now is None else now
+    if (not isinstance(report, dict) or report.get("schema") != 1
+            or not isinstance(report.get("checked_at"), int)
+            or not isinstance(report.get("errors"), list)
+            or not isinstance(report.get("drift"), list)
+            or not isinstance(report.get("releases"), list)):
+        raise CheckError("invalid cached report")
+    if (not all(isinstance(row, dict) and row.get("level") in ("warning", "error")
+                and isinstance(row.get("item"), str) and isinstance(row.get("detail"), str)
+                for row in report["drift"])
+            or not all(isinstance(row, dict) and "newest_sampled" in row
+                       and "same_major" in row and isinstance(row.get("image"), str)
+                       for row in report["releases"])
+            or not all(isinstance(error, str) for error in report["errors"])
+            or not isinstance(report.get("os", {}), dict)):
+        raise CheckError("invalid cached report fields")
+    age = now - report["checked_at"]
+    if age < 0:
+        raise CheckError("cached report timestamp is in the future")
+    errors = len(report["errors"]) + sum(f["level"] == "error" for f in report["drift"])
+    drift_count = sum(f["level"] == "warning" for f in report["drift"])
+    releases = sum(bool(row["newest_sampled"]) for row in report["releases"])
+    os_updates = report.get("os", {}).get("updates")
+    if os_updates is not None and (type(os_updates) is not int or os_updates < 0):
+        raise CheckError("invalid cached package update count")
+    stale = age > MAX_AGE
+    rc = 2 if errors else int(stale or drift_count > 0 or releases > 0
+                             or os_updates is None or bool(os_updates) or report.get("reboot") != "not-required")
+    summary = (f"OS updates={os_updates if os_updates is not None else 'unknown'}, "
+               f"image release candidates={releases}, drift={drift_count}, errors={errors}, "
+               f"reboot={report.get('reboot', 'unknown')}, age={int(age // 3600)}h"
+               f"{' (STALE)' if stale else ''}")
+    return rc, summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true", help="read cached report only; no network or writes")
+    mode.add_argument("--refresh", action="store_true", help="refresh metadata/network checks and write cached report; never upgrade")
+    parser.add_argument("--drift", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--repo", type=Path, help="repository root (default: /etc/server-freshness/repo)")
+    parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
+    parser.add_argument("--state", type=Path, default=STATE)
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--summary", action="store_true", help="one-line cached summary")
+    args = parser.parse_args()
+    if args.drift and (args.refresh or args.summary):
+        parser.error("--drift requires --check and cannot use --summary")
+    if args.refresh and os.geteuid() != 0:
+        parser.error("--refresh requires root (package metadata and report writes)")
+    try:
+        if args.drift or args.refresh:
+            repo = args.repo or Path("/etc/server-freshness/repo").read_text().strip()
+            repo = Path(repo)
+            if not repo.is_absolute():
+                raise CheckError("repository path must be absolute")
+        if args.drift:
+            findings, _ = drift(repo, args.root)
+            if args.json:
+                print(json.dumps(findings, indent=2))
+            else:
+                for row in findings:
+                    print(f"{row['level'].upper()}: {row['item']}: {row['detail']}")
+                print(f"Checked managed stack files and runtime image/memory; {len(findings)} finding(s)")
+            return 2 if any(r["level"] == "error" for r in findings) else int(bool(findings))
+        if args.refresh:
+            args.state.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            with (args.state.parent / ".refresh.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise CheckError("another freshness refresh is running") from exc
+                print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} INFO freshness refresh started",
+                      file=sys.stderr)
+                started = time.monotonic()
+                report = collect(repo)
+                save_report(args.state, report)
+        else:
+            report = read_json(args.state.read_text())
+        rc, summary = report_status(report)
+        if args.refresh:
+            print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} INFO freshness refresh completed "
+                  f"exit={rc} duration={time.monotonic() - started:.1f}s", file=sys.stderr)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(summary)
+            if not args.summary:
+                print(f"Details: freshness --check --json ({args.state})")
+                for error in report["errors"]:
+                    print(f"ERROR: {error}")
+                for row in report["releases"]:
+                    if row["newest_sampled"]:
+                        print(f"REVIEW: {row['image']}: same major={row['same_major'] or 'none found'}, "
+                              f"newest sampled={row['newest_sampled']}")
+                for row in report["drift"]:
+                    print(f"{row['level'].upper()}: {row['item']}: {row['detail']}")
+                print("Release candidates are sampled stable Docker Hub tags, not support/EOL guarantees.")
+        return rc
+    except (CheckError, OSError, ValueError, KeyError, TypeError) as exc:
+        detail = str(exc) if isinstance(exc, CheckError) else "report/input missing, unreadable, or invalid"
+        print(f"freshness: {detail}; run sudo freshness --refresh to collect a report", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+__SIC_EOF__
+chmod 755 "$R/common/freshness"
 
 install -d "$R/common"
 cat > "$R/common/health" <<'__SIC_EOF__'
@@ -14099,7 +15061,12 @@ check_services() {
   local t next
   for t in runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer ci-image-prewarm.timer; do
     is_runner || break
-    unit_exists "$t" || continue
+    if ! unit_exists "$t"; then
+      if [[ "$t" != ci-image-prewarm.timer || -f /etc/ci-prewarm.conf ]]; then
+        warn "${t} missing (expected runner maintenance timer)"
+      fi
+      continue
+    fi
     if systemctl is-active --quiet "$t" 2>/dev/null; then
       next=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2>/dev/null || true)
       if [[ -n "$next" && "$next" != "n/a" ]]; then
@@ -14154,6 +15121,47 @@ check_services() {
         ok "image prewarm: ${summary#*summary: }"
       fi
     fi
+  fi
+  return 0
+}
+
+check_freshness() {
+  # Cached report only: quick health must never refresh packages or contact registries.
+  [[ -f /etc/server-freshness/repo ]] || return 0
+  section "Freshness and configuration drift (cached)"
+  local report rc=0
+  if ! have freshness; then
+    warn "freshness tool missing"
+  else
+    report=$(timeout 5 freshness --check --summary 2>&1) || rc=$?
+    case "$rc" in
+      0) ok "$report" ;;
+      1) warn "$report (freshness --check for details)" ;;
+      *) warn "freshness report unavailable/incomplete: ${report} (sudo freshness --refresh)" ;;
+    esac
+  fi
+  if ! unit_exists server-freshness.timer; then
+    warn "server-freshness.timer missing"
+  elif ! systemctl is-active --quiet server-freshness.timer 2>/dev/null; then
+    warn "server-freshness.timer not active"
+  else
+    ok "server-freshness.timer active (check-only; no automatic upgrades)"
+  fi
+  return 0
+}
+
+check_recent_container_oom() {
+  (( LIMITED == 0 )) || return 0
+  have docker || return 0
+  local events n
+  # Docker retains a bounded event history. This can find OOM kills even after a restart reset .State.OOMKilled.
+  if events=$(timeout 10 docker events --since 1h --until "$(date -Iseconds)" \
+      --filter type=container --filter event=oom --format '{{.Actor.ID}}' 2>/dev/null); then
+    n=$(grep -c . <<<"$events" || true)
+    if (( n > 0 )); then warn "${n} Docker OOM event(s) in retained history for the last hour"
+    else info "no Docker OOM events in retained history for the last hour"; fi
+  else
+    skip "recent Docker OOM events unavailable"
   fi
   return 0
 }
@@ -14735,9 +15743,11 @@ check_updates
 check_serverinit
 check_securitytools
 check_services
+check_freshness
 check_runner
 check_docker
 check_containers
+check_recent_container_oom
 check_caches
 check_network
 check_trends
@@ -14875,7 +15885,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 52"
+echo "files written to $R: 56"
 INSTALL
 sudo bash /root/server-init-config/runner/install/update.sh
 ````
@@ -15437,16 +16447,24 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 require_root
+command -v python3 >/dev/null || die "python3 is required for freshness checks"
 
 install -m 0755 "$REPO_ROOT/common/health" /usr/local/bin/health
 restorecon_if /usr/local/bin/health
+for f in freshness config-drift; do
+  install -m 0755 "$REPO_ROOT/common/$f" "/usr/local/bin/$f"
+  restorecon_if "/usr/local/bin/$f"
+done
+install -d -m 0755 /etc/server-freshness
+printf '%s\n' "$REPO_ROOT" | install -m 0644 /dev/stdin /etc/server-freshness/repo
+restorecon_if -R /etc/server-freshness
 for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
@@ -15465,7 +16483,7 @@ restorecon_if /etc/sysctl.d/90-ci-hardening.conf
 sysctl --system >/dev/null || log "WARN: sysctl --system reported an error"
 
 systemctl daemon-reload
-systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer
+systemctl enable --now runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer server-freshness.timer
 # Needs Docker (the DOCKER-USER chain). On a host without it the unit is enabled and applies at the next Docker start.
 if systemctl is-active --quiet docker; then systemctl enable --now ci-job-isolation.service; else systemctl enable ci-job-isolation.service; fi
 
@@ -16562,13 +17580,18 @@ update_os() {
   fi
 }
 
-script_path() { if [[ "$1" == health ]]; then echo common/health; else echo "runner/scripts/$1"; fi; }
+script_path() {
+  case "$1" in
+    health|freshness|config-drift) echo "common/$1" ;;
+    *) echo "runner/scripts/$1" ;;
+  esac
+}
 
 update_host_tools() {
   local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
-  local -a scripts=(health runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
   local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
-                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service)
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -16577,9 +17600,20 @@ update_host_tools() {
   fi
 
   # health is shared with plain servers (common/); the other scripts belong to the runner host.
+  command -v python3 >/dev/null || die "python3 is required for freshness checks"
   for f in "${scripts[@]}"; do
-    bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
+    if [[ "$f" == freshness ]]; then
+      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/common/freshness" \
+        || die "syntax error in freshness, nothing changed"
+    else
+      bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
+    fi
   done
+
+  printf '%s\n' "$REPO_ROOT" > "${WORK}/freshness-repo"
+  if sync_file "${WORK}/freshness-repo" /etc/server-freshness/repo 0644; then
+    CHANGED+=("freshness/repo")
+  fi
 
   for f in "${scripts[@]}"; do
     if sync_file "${REPO_ROOT}/$(script_path "$f")" "/usr/local/bin/${f}" 0755; then
@@ -17857,6 +18891,45 @@ WantedBy=timers.target
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/runner-weekly-cleanup.timer"
 
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/server-freshness.service" <<'__SIC_EOF__'
+[Unit]
+Description=Check package freshness and managed stack drift without upgrading
+After=network-online.target docker.service
+Wants=network-online.target
+ConditionPathExists=/etc/server-freshness/repo
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freshness --refresh
+# 1 means updates/drift/reboot pending; 2 means one or more checks could not complete.
+SuccessExitStatus=1
+TimeoutStartSec=10min
+Nice=10
+IOSchedulingClass=idle
+UMask=0022
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=true
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/server-freshness.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/server-freshness.timer" <<'__SIC_EOF__'
+[Unit]
+Description=Daily check-only freshness and configuration drift report
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/server-freshness.timer"
+
 install -d "$R/runner/stacks/logging"
 cat > "$R/runner/stacks/logging/config.alloy" <<'__SIC_EOF__'
 // Container logs and the systemd journal to the local Loki.
@@ -18382,7 +19455,7 @@ services:
     image: verdaccio/verdaccio:7.0.2
     restart: unless-stopped
     network_mode: host
-    mem_limit: 256m
+    mem_limit: 1g
     # The image's default command passes --listen 0.0.0.0:4873, which overrides "listen:" in config.yaml
     # and exposes the cache (access: $all) on every interface. runner/install/npm-cache.sh and update.sh
     # replace 172.17.0.1 below with the docker0 IP, as they do in config.yaml.
@@ -18604,6 +19677,408 @@ done
 log "OK: aliases work in new shells (or run: source /etc/profile.d/ci-runner.sh); Docker and journal aliases use sudo"
 __SIC_EOF__
 chmod 755 "$R/common/admin-tools.sh"
+
+install -d "$R/common"
+cat > "$R/common/config-drift" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Uses the same comparison rules as the daily freshness report.
+set -Eeuo pipefail
+exec python3 "$(dirname "$(readlink -f "$0")")/freshness" --drift "$@"
+__SIC_EOF__
+chmod 755 "$R/common/config-drift"
+
+install -d "$R/common"
+cat > "$R/common/freshness" <<'__SIC_EOF__'
+#!/usr/bin/env python3
+"""Read cached maintenance status; refresh explicitly, never apply upgrades."""
+import argparse
+import datetime
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+STACKS = {
+    "npm-cache": ("docker-compose.yml", "config.yaml"),
+    "registry-cache": ("docker-compose.yml", "config.yml"),
+    "logging": ("docker-compose.yml", "loki.yaml", "config.alloy"),
+    "monitoring": ("docker-compose.yml",),
+}
+STATE = Path("/var/lib/server-freshness/report.json")
+MAX_AGE = 36 * 3600
+
+
+class CheckError(Exception):
+    pass
+
+
+def run(argv, timeout=30, accepted=(0,)):
+    """Never echo command output on failure: Compose output may contain secrets."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                                env={**os.environ, "LC_ALL": "C", "PYTHONDONTWRITEBYTECODE": "1"})
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CheckError(f"{argv[0]} unavailable or timed out") from exc
+    if result.returncode not in accepted:
+        raise CheckError(f"{argv[0]} failed (exit {result.returncode})")
+    return result
+
+
+def read_json(text):
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError) as exc:
+        raise CheckError("invalid JSON response") from exc
+
+
+def bridge_address():
+    rows = read_json(run(["ip", "-j", "-4", "addr", "show", "docker0"]).stdout)
+    for row in rows:
+        for address in row.get("addr_info", []):
+            if address.get("family") == "inet":
+                return str(ipaddress.IPv4Address(address["local"]))
+    raise CheckError("docker0 IPv4 address unavailable")
+
+
+def compare_file(source, deployed, findings, expected=None):
+    label = str(deployed)
+    try:
+        want = source.read_bytes() if expected is None else expected
+        have = deployed.read_bytes()
+    except OSError:
+        findings.append({"level": "error", "item": label, "detail": "managed file missing or unreadable"})
+        return
+    if want != have:
+        findings.append({"level": "warning", "item": label, "detail": "differs from repository"})
+
+
+def runtime_drift(directory, findings):
+    # Only retain image and memory fields; never emit interpolated Compose configuration.
+    config = read_json(run(["docker", "compose", "--project-directory", str(directory),
+                            "config", "--format", "json"]).stdout)
+    project = config.get("name")
+    if not project or not isinstance(config.get("services"), dict):
+        raise CheckError("Compose project/services unavailable")
+    ids = run(["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"]).stdout.split()
+    rows = []
+    if ids:
+        fmt = '{{json .Config.Labels}}|{{json .Config.Image}}|{{.HostConfig.Memory}}|{{.State.Status}}'
+        for line in run(["docker", "inspect", "--format", fmt, *ids]).stdout.splitlines():
+            labels, image, memory, status = line.split("|")
+            rows.append((read_json(labels), read_json(image), int(memory), status))
+    for name, service in config["services"].items():
+        if service.get("profiles"):
+            continue
+        matches = [r for r in rows if r[0].get("com.docker.compose.service") == name
+                   and r[0].get("com.docker.compose.oneoff") != "True"]
+        item = f"{project}/{name}"
+        if not matches:
+            findings.append({"level": "warning", "item": item, "detail": "container missing"})
+        for _, image, memory, status in matches:
+            if status != "running":
+                findings.append({"level": "warning", "item": item, "detail": f"container {status}"})
+            if image != service.get("image") or memory != int(service.get("mem_limit", 0)):
+                findings.append({"level": "warning", "item": item,
+                                 "detail": "running image reference or memory limit differs from deployed Compose"})
+
+
+def drift(repo, root=Path("/")):
+    findings = []
+    installed = []
+    if not (repo / "runner/stacks").is_dir():
+        return [{"level": "error", "item": "repository", "detail": "runner/stacks missing or unreadable"}], []
+    bridge = None
+    for stack, files in STACKS.items():
+        directory = root / "opt" / stack
+        if not directory.exists():
+            continue
+        installed.append(directory)
+        source = repo / "runner/stacks" / stack
+        try:
+            for name in files:
+                expected = None
+                if stack == "npm-cache":
+                    bridge = bridge or bridge_address()
+                    expected = (source / name).read_bytes().replace(b"172.17.0.1:4873",
+                                                                  f"{bridge}:4873".encode())
+                compare_file(source / name, directory / name, findings, expected)
+            if stack == "monitoring":
+                for subtree in ("prometheus", "grafana"):
+                    if not (source / subtree).is_dir():
+                        raise CheckError(f"repository monitoring/{subtree} missing")
+                    for file in sorted((source / subtree).rglob("*")):
+                        if not file.is_file():
+                            continue
+                        relative = file.relative_to(source)
+                        expected = file.read_bytes()
+                        if relative.as_posix() == "prometheus/prometheus.yml":
+                            additions = (
+                                ("registry-cache", "registry-cache", "127.0.0.1:5001"),
+                                ("logging", "loki", "127.0.0.1:3100"),
+                                ("logging", "alloy", "127.0.0.1:12345"),
+                            )
+                            for component, job, target in additions:
+                                if (root / "opt" / component / "docker-compose.yml").exists():
+                                    if f"job_name: {job}".encode() not in expected:
+                                        expected += (f'  - job_name: {job}\n    static_configs:\n'
+                                                     f'      - targets: ["{target}"]\n').encode()
+                        compare_file(file, directory / relative, findings, expected)
+                if (root / "opt/logging/docker-compose.yml").exists():
+                    compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
+                                 directory / "grafana/provisioning/datasources/loki.yml", findings)
+            runtime_drift(directory, findings)
+        except (CheckError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            detail = str(exc) if isinstance(exc, CheckError) else "cannot inspect managed stack"
+            findings.append({"level": "error", "item": stack, "detail": detail})
+    if not installed:
+        findings.append({"level": "error", "item": "stacks", "detail": "no installed managed stacks found"})
+    return findings, installed
+
+
+def version(tag):
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", tag)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def hub_tags(image):
+    name = image.split("@", 1)[0]
+    repository, sep, tag = name.rpartition(":")
+    if not sep or "/" in tag:
+        raise CheckError("image has no explicit version tag")
+    if repository.startswith(("docker.io/", "index.docker.io/")):
+        repository = repository.split("/", 1)[1]
+    elif "." in repository.split("/")[0] or ":" in repository.split("/")[0]:
+        raise CheckError("release discovery supports Docker Hub only")
+    if "/" not in repository:
+        repository = f"library/{repository}"
+    current = version(tag)
+    if current is None:
+        raise CheckError("release discovery requires a stable major.minor.patch tag")
+    url = f"https://hub.docker.com/v2/repositories/{urllib.parse.quote(repository, safe='/')}/tags?page_size=100&ordering=last_updated"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as response:
+            payload = response.read(2_000_001)
+        if len(payload) > 2_000_000:
+            raise CheckError("Docker Hub response too large")
+        data = read_json(payload)
+        candidates = [row["name"] for row in data["results"] if version(row.get("name", ""))]
+    except (urllib.error.URLError, TimeoutError, OSError, KeyError, TypeError, AttributeError) as exc:
+        raise CheckError("Docker Hub tag lookup unavailable") from exc
+    newer = [tag for tag in candidates if version(tag) > current]
+    same = [tag for tag in newer if version(tag)[0] == current[0]]
+    return {"image": image, "same_major": max(same, key=version) if same else None,
+            "newest_sampled": max(newer, key=version) if newer else None,
+            "scope": "100 most recently updated tags; stable x.y.z only, not a support/EOL check"}
+
+
+def packages():
+    """Refresh metadata only. This function is never called by --check or health."""
+    if shutil.which("dnf"):
+        rows = run(["dnf", "-q", "--refresh", "--setopt=*.skip_if_unavailable=False", "check-update"],
+                   timeout=150, accepted=(0, 100))
+        pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src)\s+(\S+)\s+\S+")
+        updates = sorted({match.group(1) for line in rows.stdout.splitlines()
+                          if (match := pattern.match(line))})
+        if rows.returncode == 100 and not updates:
+            raise CheckError("DNF reports updates but package list could not be parsed")
+        security = run(["dnf", "-q", "--cacheonly", "updateinfo", "list", "--security"], timeout=60)
+        advisories = {line.split()[0] for line in security.stdout.splitlines()
+                      if re.match(r"^\S+\s+(?:\S+/)?(?:Security|Sec\.)\s+", line, re.I)}
+        return {"updates": len(updates), "packages": updates, "security_advisories": len(advisories),
+                "scope": "enabled DNF repositories"}
+    if shutil.which("apt-get"):
+        run(["apt-get", "-q", "-o", "APT::Update::Error-Mode=any", "update"], timeout=150)
+        result = run(["apt-get", "-s", "-o", "Debug::NoLocking=1", "upgrade"], timeout=60)
+        rows = [line for line in result.stdout.splitlines() if line.startswith("Inst ")]
+        return {"updates": len(rows), "packages": [line.split()[1] for line in rows],
+                "security_packages": sum("security" in line.lower() for line in rows),
+                "scope": "APT upgrade simulation (held-back packages not included)"}
+    raise CheckError("no supported package manager")
+
+
+def reboot_state():
+    if Path("/var/run/reboot-required").exists():
+        return "required"
+    if shutil.which("needs-restarting"):
+        result = run(["needs-restarting", "-r"], timeout=30, accepted=(0, 1))
+        if result.returncode == 0:
+            return "not-required"
+        if "reboot is required" in result.stdout.lower():
+            return "required"
+    return "unknown"
+
+
+def collect(repo):
+    report = {"schema": 1, "checked_at": int(time.time()), "errors": [], "releases": []}
+    for key, callback in (("os", packages), ("reboot", reboot_state)):
+        try:
+            report[key] = callback()
+        except CheckError as exc:
+            report["errors"].append(f"{key}: {exc}")
+    findings, installed = drift(repo)
+    report["drift"] = findings
+    images = set()
+    for directory in installed:
+        try:
+            data = read_json(run(["docker", "compose", "--project-directory", str(directory),
+                                  "config", "--format", "json"]).stdout)
+            images.update(service["image"] for service in data["services"].values() if "image" in service)
+        except (CheckError, KeyError, TypeError, AttributeError):
+            report["errors"].append(f"{directory.name}: image inventory unavailable")
+    for image in sorted(images):
+        try:
+            report["releases"].append(hub_tags(image))
+        except CheckError as exc:
+            report["errors"].append(f"{image}: {exc}")
+    report["versions"] = {}
+    for name, argv in (("docker", ["docker", "--version"]), ("runner", ["gitlab-runner", "--version"])):
+        if shutil.which(argv[0]):
+            try:
+                output = run(argv).stdout
+                match = re.search(r"(?:Version:\s*|version\s+)([0-9][0-9.\w+-]*)", output, re.I)
+                report["versions"][name] = match.group(1) if match else "unknown"
+            except CheckError as exc:
+                report["errors"].append(f"{name}: {exc}")
+    return report
+
+
+def save_report(path, report):
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".report-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(report, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchmod(stream.fileno(), 0o644)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def report_status(report, now=None):
+    now = time.time() if now is None else now
+    if (not isinstance(report, dict) or report.get("schema") != 1
+            or not isinstance(report.get("checked_at"), int)
+            or not isinstance(report.get("errors"), list)
+            or not isinstance(report.get("drift"), list)
+            or not isinstance(report.get("releases"), list)):
+        raise CheckError("invalid cached report")
+    if (not all(isinstance(row, dict) and row.get("level") in ("warning", "error")
+                and isinstance(row.get("item"), str) and isinstance(row.get("detail"), str)
+                for row in report["drift"])
+            or not all(isinstance(row, dict) and "newest_sampled" in row
+                       and "same_major" in row and isinstance(row.get("image"), str)
+                       for row in report["releases"])
+            or not all(isinstance(error, str) for error in report["errors"])
+            or not isinstance(report.get("os", {}), dict)):
+        raise CheckError("invalid cached report fields")
+    age = now - report["checked_at"]
+    if age < 0:
+        raise CheckError("cached report timestamp is in the future")
+    errors = len(report["errors"]) + sum(f["level"] == "error" for f in report["drift"])
+    drift_count = sum(f["level"] == "warning" for f in report["drift"])
+    releases = sum(bool(row["newest_sampled"]) for row in report["releases"])
+    os_updates = report.get("os", {}).get("updates")
+    if os_updates is not None and (type(os_updates) is not int or os_updates < 0):
+        raise CheckError("invalid cached package update count")
+    stale = age > MAX_AGE
+    rc = 2 if errors else int(stale or drift_count > 0 or releases > 0
+                             or os_updates is None or bool(os_updates) or report.get("reboot") != "not-required")
+    summary = (f"OS updates={os_updates if os_updates is not None else 'unknown'}, "
+               f"image release candidates={releases}, drift={drift_count}, errors={errors}, "
+               f"reboot={report.get('reboot', 'unknown')}, age={int(age // 3600)}h"
+               f"{' (STALE)' if stale else ''}")
+    return rc, summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true", help="read cached report only; no network or writes")
+    mode.add_argument("--refresh", action="store_true", help="refresh metadata/network checks and write cached report; never upgrade")
+    parser.add_argument("--drift", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--repo", type=Path, help="repository root (default: /etc/server-freshness/repo)")
+    parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
+    parser.add_argument("--state", type=Path, default=STATE)
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--summary", action="store_true", help="one-line cached summary")
+    args = parser.parse_args()
+    if args.drift and (args.refresh or args.summary):
+        parser.error("--drift requires --check and cannot use --summary")
+    if args.refresh and os.geteuid() != 0:
+        parser.error("--refresh requires root (package metadata and report writes)")
+    try:
+        if args.drift or args.refresh:
+            repo = args.repo or Path("/etc/server-freshness/repo").read_text().strip()
+            repo = Path(repo)
+            if not repo.is_absolute():
+                raise CheckError("repository path must be absolute")
+        if args.drift:
+            findings, _ = drift(repo, args.root)
+            if args.json:
+                print(json.dumps(findings, indent=2))
+            else:
+                for row in findings:
+                    print(f"{row['level'].upper()}: {row['item']}: {row['detail']}")
+                print(f"Checked managed stack files and runtime image/memory; {len(findings)} finding(s)")
+            return 2 if any(r["level"] == "error" for r in findings) else int(bool(findings))
+        if args.refresh:
+            args.state.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            with (args.state.parent / ".refresh.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise CheckError("another freshness refresh is running") from exc
+                print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} INFO freshness refresh started",
+                      file=sys.stderr)
+                started = time.monotonic()
+                report = collect(repo)
+                save_report(args.state, report)
+        else:
+            report = read_json(args.state.read_text())
+        rc, summary = report_status(report)
+        if args.refresh:
+            print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} INFO freshness refresh completed "
+                  f"exit={rc} duration={time.monotonic() - started:.1f}s", file=sys.stderr)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(summary)
+            if not args.summary:
+                print(f"Details: freshness --check --json ({args.state})")
+                for error in report["errors"]:
+                    print(f"ERROR: {error}")
+                for row in report["releases"]:
+                    if row["newest_sampled"]:
+                        print(f"REVIEW: {row['image']}: same major={row['same_major'] or 'none found'}, "
+                              f"newest sampled={row['newest_sampled']}")
+                for row in report["drift"]:
+                    print(f"{row['level'].upper()}: {row['item']}: {row['detail']}")
+                print("Release candidates are sampled stable Docker Hub tags, not support/EOL guarantees.")
+        return rc
+    except (CheckError, OSError, ValueError, KeyError, TypeError) as exc:
+        detail = str(exc) if isinstance(exc, CheckError) else "report/input missing, unreadable, or invalid"
+        print(f"freshness: {detail}; run sudo freshness --refresh to collect a report", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+__SIC_EOF__
+chmod 755 "$R/common/freshness"
 
 install -d "$R/common"
 cat > "$R/common/health" <<'__SIC_EOF__'
@@ -19299,7 +20774,12 @@ check_services() {
   local t next
   for t in runner-weekly-cleanup.timer runner-disk-guard.timer runner-engine-update.timer ci-image-prewarm.timer; do
     is_runner || break
-    unit_exists "$t" || continue
+    if ! unit_exists "$t"; then
+      if [[ "$t" != ci-image-prewarm.timer || -f /etc/ci-prewarm.conf ]]; then
+        warn "${t} missing (expected runner maintenance timer)"
+      fi
+      continue
+    fi
     if systemctl is-active --quiet "$t" 2>/dev/null; then
       next=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2>/dev/null || true)
       if [[ -n "$next" && "$next" != "n/a" ]]; then
@@ -19354,6 +20834,47 @@ check_services() {
         ok "image prewarm: ${summary#*summary: }"
       fi
     fi
+  fi
+  return 0
+}
+
+check_freshness() {
+  # Cached report only: quick health must never refresh packages or contact registries.
+  [[ -f /etc/server-freshness/repo ]] || return 0
+  section "Freshness and configuration drift (cached)"
+  local report rc=0
+  if ! have freshness; then
+    warn "freshness tool missing"
+  else
+    report=$(timeout 5 freshness --check --summary 2>&1) || rc=$?
+    case "$rc" in
+      0) ok "$report" ;;
+      1) warn "$report (freshness --check for details)" ;;
+      *) warn "freshness report unavailable/incomplete: ${report} (sudo freshness --refresh)" ;;
+    esac
+  fi
+  if ! unit_exists server-freshness.timer; then
+    warn "server-freshness.timer missing"
+  elif ! systemctl is-active --quiet server-freshness.timer 2>/dev/null; then
+    warn "server-freshness.timer not active"
+  else
+    ok "server-freshness.timer active (check-only; no automatic upgrades)"
+  fi
+  return 0
+}
+
+check_recent_container_oom() {
+  (( LIMITED == 0 )) || return 0
+  have docker || return 0
+  local events n
+  # Docker retains a bounded event history. This can find OOM kills even after a restart reset .State.OOMKilled.
+  if events=$(timeout 10 docker events --since 1h --until "$(date -Iseconds)" \
+      --filter type=container --filter event=oom --format '{{.Actor.ID}}' 2>/dev/null); then
+    n=$(grep -c . <<<"$events" || true)
+    if (( n > 0 )); then warn "${n} Docker OOM event(s) in retained history for the last hour"
+    else info "no Docker OOM events in retained history for the last hour"; fi
+  else
+    skip "recent Docker OOM events unavailable"
   fi
   return 0
 }
@@ -19935,9 +21456,11 @@ check_updates
 check_serverinit
 check_securitytools
 check_services
+check_freshness
 check_runner
 check_docker
 check_containers
+check_recent_container_oom
 check_caches
 check_network
 check_trends
@@ -20075,7 +21598,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 52"
+echo "files written to $R: 56"
 bash "$R/runner/install/users.sh" </dev/null
 bash "$R/common/admin-tools.sh" </dev/null
 bash "$R/runner/install/host-tools.sh" </dev/null

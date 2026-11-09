@@ -1,0 +1,19 @@
+[Unit]
+Description=Check package freshness and managed stack drift without upgrading
+After=network-online.target docker.service
+Wants=network-online.target
+ConditionPathExists=/etc/server-freshness/repo
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freshness --refresh
+# 1 means updates/drift/reboot pending; 2 means one or more checks could not complete.
+SuccessExitStatus=1
+TimeoutStartSec=10min
+Nice=10
+IOSchedulingClass=idle
+UMask=0022
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=true

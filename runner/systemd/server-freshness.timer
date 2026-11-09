@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily check-only freshness and configuration drift report
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -2,6 +2,53 @@
 
 A Hetzner server that runs CI jobs for GitLab with the docker executor. Built for an ARM64 CAX11 (2 vCPU, 4 GB) on Rocky Linux 10; Debian 13 and x86_64 work too. For a plain server without a runner see [../server/README.md](../server/README.md).
 
+## Check-only freshness and configuration drift
+Installed by `runner/install/host-tools.sh` and maintained by `runner/update.sh`.
+The repository location is recorded in `/etc/server-freshness/repo`; update it
+when moving the checkout. Python 3 is required.
+
+- `freshness --check`: read the cached report; no network calls or filesystem writes.
+- `freshness --check --json`: full cached results, including package names, tool
+  versions, release candidates, check errors, and drift findings.
+- `sudo freshness --refresh`: refresh package metadata, query public Docker Hub
+  tags, inspect local stack state, and atomically save the report. Never installs
+  packages, pulls images, restarts services, prunes data, or reboots.
+- `sudo config-drift --check`: inspect live managed files and runtime image
+  references/memory limits against the configured repository and deployed Compose.
+  `--repo /absolute/path` selects another checkout. No contents or credentials
+  are printed, and no changes are applied.
+- `health -q`: includes a cached summary and warns when the report is incomplete
+  or more than 36 hours old. It does not trigger a refresh.
+
+Exit codes for both tools: **0** no findings, **1** updates/reboot/drift/stale or
+unknown reboot state, **2** missing/invalid report or checks that could not complete.
+The daily `server-freshness.timer` runs at 06:00 with up to 45 minutes jitter.
+Inspect it with `systemctl list-timers server-freshness.timer` and
+`journalctl -u server-freshness.service`. A report with check errors is saved but
+the service fails visibly; available updates alone do not fail the service.
+The first cached report is unavailable until a refresh completes.
+
+Release discovery samples the 100 most recently updated tags for each deployed
+Docker Hub image, considering only stable `major.minor.patch` tags (optional `v`).
+It reports same-major and cross-major candidates separately. This is not an
+exhaustive version listing, digest/security scan, compatibility recommendation,
+architecture-availability check, or support/EOL guarantee. DNF checks enabled
+repositories; APT uses `upgrade` simulation and excludes held-back packages.
+Registry failures are unknown/errors, never “up to date.”
+
+Drift checks cover managed stack Compose/config files, monitoring provisioning
+and dashboards, and running service image references/memory limits. They account
+for rendered npm bridge addresses and installer-added Prometheus scrape jobs.
+Secrets (`.env`, runner tokens), generated Compose overrides, arbitrary local
+files, and live application data are not compared byte-for-byte. Runtime checks
+use the effective deployed Compose configuration, including its overrides; same-tag
+image digest changes are not detected. Findings are informational, not auto-fixed.
+
+Health also warns about missing expected runner maintenance timers and recent
+Docker OOM events within Docker's retained event history. Optional image prewarming
+is only required when configured. Installing freshness alone does not enable the
+separate automatic runner/engine updater.
+
 ## Build one
 
 1. **GitLab**: Settings, CI/CD, Runners, New runner. Set tags and "run untagged jobs", copy the `glrt-` token (shown once).

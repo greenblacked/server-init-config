@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Uses the same comparison rules as the daily freshness report.
+set -Eeuo pipefail
+exec python3 "$(dirname "$(readlink -f "$0")")/freshness" --drift "$@"
