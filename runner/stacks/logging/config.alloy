@@ -1,5 +1,5 @@
 // Container logs and the systemd journal to the local Loki.
-// CI job containers are skipped: their output is already the job log in GitLab.
+// CI job containers are skipped: their output is already the job log in GitLab (or in GitHub, for the pods of the GitHub Actions runner).
 
 logging {
   level = "warn"
@@ -22,6 +22,12 @@ discovery.relabel "containers" {
   rule {
     source_labels = ["__meta_docker_container_label_com_gitlab_gitlab_runner_managed"]
     regex         = "true"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_io_server_init_github_runner"]
+    regex         = "job"
     action        = "drop"
   }
 

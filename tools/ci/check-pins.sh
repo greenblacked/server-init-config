@@ -41,4 +41,22 @@ if [[ "$dir" == "$CI_ROOT/.github/workflows" ]]; then
   if (( seen == 0 )); then fail "no alpine pin found in tracked files (git ls-files failed or returned nothing); common/lib.sh alone must match"
   elif (( bad == 0 )); then pass "every alpine pin in tracked files equals HELPER_IMAGE (${seen} checked)"; fi
 fi
+# The two images of the opt-in GitHub Actions runner (GHR_RUNNER_IMAGE, GHR_BUILDKIT_IMAGE in common/lib.sh): each is name:tag@sha256:<64 hex>,
+# declared once, and no other tracked file may spell the image with another tag or digest (docs name the images without a tag).
+if [[ "$dir" == "$CI_ROOT/.github/workflows" ]]; then
+  for spec in "GHR_RUNNER_IMAGE|ghcr\\.io/actions/actions-runner" "GHR_BUILDKIT_IMAGE|moby/buildkit"; do
+    var=${spec%%|*}; re=${spec#*|}
+    pin=$(sed -n "s/^${var}=\"\(.*\)\"\$/\1/p" "$CI_ROOT/common/lib.sh")
+    if [[ ! "$pin" =~ ^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$ ]]; then fail "common/lib.sh: ${var} is not a name:tag@sha256:<64 hex> string (got '${pin}')"; continue; fi
+    [[ "$(grep -c "^${var}=" "$CI_ROOT/common/lib.sh")" == 1 ]] || fail "common/lib.sh declares ${var} more than once"
+    bad=0 seen=0
+    while IFS=: read -r file no found; do
+      seen=$((seen + 1))
+      [[ "$found" == "$pin" ]] && continue
+      fail "${file}:${no} image '${found}' differs from ${var} in common/lib.sh"; bad=1
+    done < <(cd "$CI_ROOT" && git ls-files -z | xargs -0 grep -noE "${re}:[^[:space:]\"'\`)]+" -- 2>/dev/null || true)
+    if (( seen == 0 )); then fail "no ${var} pin found in tracked files (git ls-files failed or returned nothing)"
+    elif (( bad == 0 )); then pass "every ${re//\\/} pin in tracked files equals ${var} (${seen} checked)"; fi
+  done
+fi
 finish

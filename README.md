@@ -2,6 +2,14 @@
 
 Set up and look after Hetzner Cloud servers: a plain hardened server, or a GitLab Runner host. Everything is run from your laptop over SSH; the repo is streamed to the server with `git archive` by default (nothing is cloned there, no credential goes there); cloning it on the server also works: `git clone https://github.com/greenblacked/server-init-config`. Root keeps key login on port 22 throughout, so none of this can lock you out.
 
+## Guides
+
+- [Plain servers](server/README.md): supported systems, bootstrap, maintenance.
+- [Runner hosts](runner/README.md): GitLab setup, caches, monitoring, updates.
+- [Optional GitHub Actions runner](runner/docs/github-runner.md): trusted private repositories, GitHub App setup, limitations.
+- [Copy-paste installation blocks](runner/COMMANDS.md): generated alternative to a repository checkout.
+- [CI reference](docs/ci.md): workflow coverage and local checks.
+
 ## Which one do I need?
 
 | Goal | OS | Cloud config (optional, paste when creating the server) | First command, on your laptop in the repo root |
@@ -41,7 +49,7 @@ ssh ops@SERVER_IP 'sudo -n true && echo ok'
 runner/bootstrap.sh SERVER_IP
 ```
 
-It installs the users, admin tools, health and cleanup, registers the runner (you type the token at the prompt on the server, it never goes into a command line), the Docker Hub cache, monitoring, logging and the npm and shared caches, and ends with `health`. Run `runner/ci/smoke.yml` in a project: the log must show `on <runner description>` and `aarch64` (`x86_64` on x86). Close root SSH only after the `ops` login works: see [runner/README.md](runner/README.md#close-root-ssh).
+It installs the users, admin tools, health and cleanup, registers the runner (you type the token at the prompt on the server, it never goes into a command line), the Docker Hub cache, monitoring, logging and the npm and shared caches, and ends with `health`. An opt-in GitHub Actions runner for your private repositories (GitHub App, one ephemeral runner per job) is described in [runner/README.md](runner/README.md#github-actions-runner-private-repositories). Run `runner/ci/smoke.yml` in a project: the log must show `on <runner description>` and `aarch64` (`x86_64` on x86). Close root SSH only after the `ops` login works: see [runner/README.md](runner/README.md#close-root-ssh).
 
 Rerunning either bootstrap is safe. Options: `--help`.
 
@@ -67,6 +75,21 @@ health -q
 ```
 
 `health` is the one report for system, security, firewall, services, containers and trends (full report 10 to 40 seconds; exit code 0 ok, 1 warnings, 2 failures). It re-runs itself through sudo when that needs no password.
+
+On runner hosts, freshness and drift checks report changes without applying them:
+
+```bash path=null start=null
+freshness --check
+sudo config-drift --check
+```
+
+The daily `server-freshness.timer` refreshes the cached report; `sudo freshness --refresh`
+does it on demand. Refreshing checks package metadata and public image tags, never
+upgrades packages, pulls images, or restarts services. `health` reads the cache only.
+The first report needs a completed refresh. Image candidates are a bounded tag
+sample, not a security, compatibility, or EOL guarantee. See
+[freshness and drift](runner/README.md#check-only-freshness-and-configuration-drift)
+for scope and exit codes.
 
 On Fedora and EL plain servers, `srv` is the single entry point (`srv status`, `srv update`, `srv clean`, `srv logs`, `srv timers`), and the admin sees a 7-line summary at login: load, disk, memory, firewall, banned IPs, pending updates and reboot, last update and cleanup. On Ubuntu, Debian and openSUSE use `health` and the init's own timers. On runner hosts, aliases:
 
@@ -190,33 +213,16 @@ Generated files (`*/cloud-init/*.yaml`, `runner/COMMANDS.md`) are never edited b
 
 ### CI
 
-GitHub Actions (`.github/workflows/`) test what a laptop cannot: real package mirrors, real Docker, a real kernel with WireGuard. No secrets are used or needed; actions are pinned by commit SHA; every workflow has `permissions: contents: read`, per-job timeouts, and uploads its logs as an artifact when it fails. `.github/dependabot.yml` opens one weekly pull request for the actions (SHA pin and version comment are updated together) and one for the tag-pinned compose images that no generated file embeds (`server/ai`; the `runner/stacks/*` images are embedded in the rendered cloud-init and `runner/COMMANDS.md`, so bump them by hand, re-render, and check `logging`, `monitoring`, `npm-cache` and `registry-cache` for new image versions periodically). All logic lives in `tools/ci/*.sh` (the workflows only call them), so the same checks run by hand.
-
-| Workflow | Runs on | What it checks | Same check locally |
-|---|---|---|---|
-| `lint.yml` | every push and pull request | shellcheck `-S warning` and `bash -n` on every shell file, generated files current (`--check`), yamllint, hadolint, `docker compose config` on every compose file, actionlint; `tools/ci/check-pins.sh` (every `uses:` is a 40-hex commit SHA, every workflow has a top-level `permissions:`); unit tests of the shell helpers in `tests/unit/` (`backup`, `edit_with_backup`, `put`, the log redaction in `tools/ci/lib.sh`; plain bash, run by `tests/unit/run.sh`, time-zone independent, refuses to run as root without `cmp`); `tools/test-cloud-init.py` with the real cloud-init CLI (schema) and a live sshd test; `tools/test-server-tools.sh` including the destructive tests in a container | `tools/ci/lint.sh [shell\|render\|cloud-init\|server-tools\|yaml\|dockerfiles\|compose\|actionlint\|pins\|unit]` |
-| `server-matrix.yml` | every push to `main`; pull requests touching `server/`, `common/`, `tools/ci/`; weekly; manual | per OS (CentOS Stream 10, Rocky 10, Alma 10, Fedora 44, Ubuntu 26.04, Debian 13, openSUSE Leap 16.0): a privileged systemd container, the real `server/bootstrap.sh` over its sshd, then assertions: OS detected, every init step ok except a documented list of container-only failures (`swap`, `system-tuning`, `docker`; bootstrap stops after a failed init step, so the test then runs the tools/health step itself), firewall allows SSH, fail2ban sshd jail, update timer, `ops` and sudoers, rerun changes no managed file, `bootstrap --user ops`, `health --brief` and `health -q` free of bash errors | `tools/ci/server-e2e.sh debian:13` (Docker; `STRICT=1` empties the allow-list) |
-| `runner-matrix.yml` | every push to `main`; pull requests touching `runner/`, `common/`, `tools/ci/`; weekly; manual | Rocky 10 and Debian 13 in a systemd container: users and SSH, admin tools, `health` and timers, firewall and fail2ban, job limits on a stand-in `config.toml`, rerun is a no-op. On the runner VM itself (a container cannot test the host's netfilter): registry cache, `DOCKER-USER` isolation of the metadata address and host services (a network namespace plays the metadata service), re-applied after a Docker restart, npm cache stack. Runner cloud-init files against the cloud-init schema. No runner is ever registered. | `tools/ci/runner-e2e.sh debian:13`; `sudo ALLOW_LOCAL=1 tools/ci/runner-host-e2e.sh` (disposable VM only) |
-| `stacks.yml` | every push to `main`; pull requests touching `other/`, `tools/ci/`; weekly; manual | TorrServer: local and public mode (Caddy's own CA, because Let's Encrypt cannot reach a CI VM), 401 without and 200 with the login, streaming-only settings read back, fail2ban ban, cleanup dry run, mode switch, `--uninstall --purge` leaves nothing, public IP found through the real `api.ipify.org`. Lampa stack: `--local` with the real Lampac image and `tests/smoke.sh` without `SMOKE_SKIP_LAMPAC`, `--enable-sisi` and `--disable-sisi`, devices, `--vpn` with a real WireGuard tunnel from a network namespace, `--remove-device` revokes it | `sudo ALLOW_LOCAL=1 tools/ci/stack-torrserver.sh`, `sudo ALLOW_LOCAL=1 tools/ci/stack-lampa.sh` (disposable VM only) |
-| `security-tools.yml` | every push to `main`; pull requests touching `common/`, `tools/ci/`; weekly; manual | `common/security-tools.sh --scan` with real downloads and SHA-256 checks on amd64 and arm64 runners, each binary run for its pinned version; `--audit --network` package names on Rocky 10, Fedora 44, Debian 13, Ubuntu 26.04 with EPEL and CRB | `sudo ALLOW_LOCAL=1 tools/ci/security-tools-e2e.sh scan`; `tools/ci/security-tools-e2e.sh pkgs debian:13` |
-| `vm.yml` | every push to `main`; pull requests touching `server/`, `runner/cloud-init/`, `common/`, `tools/ci/vm*`, `tools/ci/lib.sh`, `tools/ci/server-assert.sh`; weekly; manual | The pasted cloud-init files on a real VM (QEMU/KVM on an amd64 runner, official cloud image of each OS, checksum verified against the distro's own checksum file): Rocky 10, Alma 10, CentOS Stream 10 (`server-el10.yaml`), Fedora 44, Debian 13, Ubuntu 26.04 (`server-debian.yaml`), openSUSE Leap 16.0. The YAML is the NoCloud user-data unchanged; the SSH key arrives in meta-data as on Hetzner. Checks: `cloud-init status --wait` is `done` without errors, `cloud-init schema --system`, no failed step, the `server-assert.sh` assertions with nothing allow-listed (swap, tuning and Docker included), swap active, sysctl values live, `docker run`, firewall and fail2ban, `ops` over SSH with `sudo -n`; then a **reboot** and the same again; then `server-init.sh` rerun changes no managed file. The runner files `rocky-x86.yaml` and `debian-x86.yaml` boot too, without a GitLab token (nothing is registered; they need none at boot): Docker, `gitlab-runner` installed, timers, job-isolation rules, reboot | `ALLOW_LOCAL=1 tools/ci/vm-e2e.sh debian13` (Linux with `/dev/kvm`; keys in `tools/ci/vm-images.sh list`); `tools/ci/vm-selftest.sh` needs no VM |
-
-The heavy matrices run on every push to `main`, on pull requests that touch their paths, and once a week (Monday) to catch mirror, image and upstream changes. `server-matrix.yml` and `security-tools.yml` run on both amd64 and arm64 runners. Superseded pull request runs are cancelled automatically. To run one matrix by hand: Actions tab, pick the workflow, Run workflow.
-
-On Fedora 44 cloud-init may report `degraded done` because of an image-side hostname race (its local stage runs `hostnamectl` before D-Bus exists, retries in the network stage and succeeds); the hostname is still set correctly. `vm-e2e.sh` accepts exactly that case, with a warning, and fails on any other warning.
-
-Image URLs live in one file, `tools/ci/vm-images.sh`; where a distro has no stable `latest` name (Fedora, openSUSE) the name is resolved from its official directory listing. The checksum files are fetched over HTTPS from the same official site and are not GPG-verified; no digest is pinned because the images are rebuilt. Images are downloaded on every run (no cache action is used). The image names for Leap 16.0, Fedora 44 and the checksum file names are not yet confirmed by a run: expect the first manual run (`workflow_dispatch`) to need small fixes in that file, and a stricter-than-usual reading of `cloud-init` warnings (any recoverable error counts as a failure). Downloads are HTTPS only, including redirects, so a mirror that serves only http makes the job fail safely. Booting the images is slow without KVM, so the job fails with a clear message when `/dev/kvm` is missing.
-
-Limits of what CI proves: the VM tests cover cloud-init, swap, kernel tuning, Docker, the firewall and a reboot on x86_64 only (the arm64 images are not booted); the Hetzner metadata service, its Cloud Firewall and Hetzner's own images are not available. For the container tests: a container shares the runner's kernel (no reboot, `swap` and some sysctl keys cannot be tested), Docker Engine inside the server containers may not start (that is why `docker` is in the allow-list), the Hetzner metadata service, Let's Encrypt on a real public port and the Hetzner Cloud Firewall are not available.
-
-To update a pinned action: look up the tag's commit (`git ls-remote --tags https://github.com/OWNER/REPO`), put the full SHA in the workflow and the version in the comment next to it. The lint tool downloads (`tools/ci/install-lint-tools.sh`) pin version and SHA-256 together.
+See [the CI reference](docs/ci.md) for workflow coverage, local equivalents,
+pinned dependencies, and what the tests do not prove. Quick source checks are
+listed under [Changing the repo](#changing-the-repo).
 
 ### Security notes
 
 - No tokens or passwords are stored in the repo, in command lines or in logs. The runner token is typed at a prompt; the Grafana password is generated on the server.
 - Never put the runner token in user-data: anything on the server, including job containers, can read it through the metadata service.
 - Ports published by Docker (`-p 8080:80`) bypass firewalld and ufw. Bind to `127.0.0.1` unless the port should be public. The Hetzner Cloud Firewall still filters them.
-- Job containers are not privileged. Membership of the `docker` group is root-equivalent; only `gitlab-runner` has it.
+- Job containers are not privileged. Membership of the `docker` group is root-equivalent; only `gitlab-runner` has it (and `github-runner`, if the opt-in GitHub Actions runner is installed).
 - `/srv/ci-cache` and the npm cache are shared by every project on the runner: do not attach untrusted projects or forks.
 - Reach Grafana and Prometheus through an SSH tunnel (laptop, any directory): `ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ops@SERVER_IP`.
 

@@ -106,3 +106,39 @@ test_require_compose_min() {
   FAKE_COMPOSE=2.22.0 assert_fail "old compose dies" bash -c 'source "$1"; require_compose_min 2.23.1 test' _ "$REPO/common/lib.sh"
   FAKE_COMPOSE='' assert_fail "missing compose dies" bash -c 'source "$1"; require_compose_min 2.23.1 test' _ "$REPO/common/lib.sh"
 }
+
+# ci_jobs_running / ci_job_ids with a stub "docker ps" that answers per label filter: $FAKE_GITLAB and $FAKE_GITHUB hold container ids
+fake_docker_ps() {
+  mkdir -p "$T/bin"
+  cat > "$T/bin/docker" <<'STUB'
+#!/bin/sh
+[ -n "$FAKE_DOCKER_FAIL" ] && exit 1
+case "$*" in
+  *com.gitlab.gitlab-runner.managed=true*) [ -n "$FAKE_GITLAB" ] && printf '%s\n' $FAKE_GITLAB ;;
+  *io.server-init.github-runner=job*) [ -n "$FAKE_GITHUB" ] && printf '%s\n' $FAKE_GITHUB ;;
+esac
+exit 0
+STUB
+  chmod +x "$T/bin/docker"
+  PATH="$T/bin:$PATH"
+}
+
+test_ci_jobs_running_counts_gitlab_and_github_containers() {
+  fake_docker_ps
+  assert_eq "$(ci_jobs_running)" 0 "idle host"
+  assert_eq "$(FAKE_GITLAB='a b' ci_jobs_running)" 2 "two GitLab job containers"
+  assert_eq "$(FAKE_GITHUB='c' ci_jobs_running)" 1 "one GitHub runner container is a job too"
+  assert_eq "$(FAKE_GITLAB='a' FAKE_GITHUB='c d' ci_jobs_running)" 3 "both kinds"
+}
+
+test_ci_job_ids_is_an_error_when_docker_fails() {
+  fake_docker_ps
+  assert_fail "docker not answering is not 'no jobs'" env FAKE_DOCKER_FAIL=1 bash -c 'source "$1"; ci_job_ids' _ "$REPO/common/lib.sh"
+  assert_eq "$(FAKE_GITLAB='a' bash -c 'source "$1"; ci_job_ids' _ "$REPO/common/lib.sh")" a
+}
+
+test_require_runner_idle_dies_for_a_github_pod() {
+  fake_docker_ps
+  assert_ok "idle passes" bash -c 'source "$1"; require_runner_idle' _ "$REPO/common/lib.sh"
+  assert_fail "a GitHub pod blocks the update gate" env FAKE_GITHUB=c bash -c 'source "$1"; require_runner_idle' _ "$REPO/common/lib.sh"
+}

@@ -1,0 +1,53 @@
+[Unit]
+Description=Ephemeral GitHub Actions runner controller (private repositories)
+After=docker.service network-online.target ci-job-isolation.service
+Wants=network-online.target
+Requires=docker.service ci-job-isolation.service
+ConditionPathExists=/etc/github-runner/config.env
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=github-runner
+Group=github-runner
+# docker group = root on this host; the controller only runs the fixed docker commands of runner/scripts/github-runner-ctl
+SupplementaryGroups=docker
+ExecStart=/usr/local/bin/github-runner-ctl run
+SyslogIdentifier=github-runner-ctl
+# Pods are independent Docker containers: stopping or restarting the controller does not end a running job, the next start adopts it.
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=300
+# invalid config (exit 2) is not fixed by a restart
+RestartPreventExitStatus=2
+RuntimeDirectory=github-runner
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+MemoryMax=256M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

@@ -6,7 +6,8 @@
 #   1. registry cache (runner/install/registry-cache.sh): starts, mirror wired into daemon.json, a pull goes through it, rerun is a no-op
 #   2. job isolation (runner/scripts/ci-job-isolation.sh): a container cannot reach 169.254.169.254 (a network namespace answers
 #      there, forwarded through the host like the real Hetzner address) or the host's services, but can reach the internet side and
-#      the npm-cache port; custom bridges too; the systemd unit re-applies the rules after a Docker restart
+#      the npm-cache port; custom bridges too; the address pool of the GitHub runner pods (GH_JOB_SUBNET_POOL) may also reach the
+#      npm-cache port, no other br- network may; the systemd unit re-applies the rules after a Docker restart
 #   3. npm cache stack (runner/stacks/npm-cache): comes up bound to the docker0 IP only; a job container installs a package through
 #      it; the server secret is valid, mode 600 and never logged; simulated 6.x storage is moved aside (not deleted) on the 7.x
 #      upgrade and a restart changes nothing
@@ -34,7 +35,7 @@ cleanup() {
   set +e
   rm -f "${TRUNC:-}" "${CB:-}" "${PB:-}" "${CI_RAW:-}"
   { docker ps -aq --filter label=ci-e2e=1 | xargs -r docker rm -f
-    docker network rm ci-e2e-br
+    docker network rm ci-e2e-br ci-e2e-pool
     docker compose -f /opt/npm-cache/docker-compose.yml down -v
     docker compose -f /opt/monitoring/docker-compose.yml down -v
     pkill -f "$W/runner-metrics.py"
@@ -127,6 +128,29 @@ echo "-- rerun is idempotent"
 bash runner/scripts/ci-job-isolation.sh >/dev/null 2>&1
 iptables-save | grep -c ci-job-isolation > "$W/rules-2.count" || true
 expect_eq "rule count after a second run" "$(cat "$W/rules-2.count")" "$(cat "$W/rules-1.count")"
+echo "-- GitHub runner pods: only their address pool may reach the npm-cache port, no other br- network and nothing else on the host"
+# the controller carves one /28 per pod from GH_JOB_SUBNET_POOL; here one network with an explicit subnet plays the pod network
+printf 'GH_OWNER=octo\nGH_JOB_SUBNET_POOL=10.213.0.0/20\n' > "$W/ghr-config.env"
+GHR_CONFIG="$W/ghr-config.env" bash runner/scripts/ci-job-isolation.sh 2>&1 | tee "$W/isolation-pool.log"
+iptables -S CI-JOBS-IN | grep -q -- '-s 10.213.0.0/20 .*--dport 4873 -j ACCEPT' && pass "CI-JOBS-IN has the pool rule for the npm-cache port" || fail "no pool rule in CI-JOBS-IN"
+docker network create --subnet 10.213.0.0/28 ci-e2e-pool >/dev/null
+POOLGW=$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' ci-e2e-pool)
+NET_ARGS=(--network ci-e2e-pool)
+reach http://10.99.0.2/ && pass "control: container on the pool network starts and reaches a forwarded address" || fail "control failed: pool container has no networking, the checks below prove nothing"
+reach "http://${GW}:4873/" && pass "pool container reaches the npm-cache port on the docker0 IP (${GW}:4873)" || fail "pool container cannot reach the npm cache"
+reach "http://${GW}:18080/" && fail "pool container reaches another port on the docker0 IP" || pass "pool container cannot reach other host ports (${GW}:18080)"
+reach "http://${POOLGW}:4873/" && fail "pool container reaches ${POOLGW}:4873 (its own gateway, a host address that is not docker0)" || pass "pool container cannot reach the npm port on another host address (${POOLGW})"
+reach http://169.254.169.254/ && fail "pool container reaches 169.254.169.254" || pass "metadata stays dropped for the pool container"
+NET_ARGS=(--network ci-e2e-br)
+reach "http://${GW}:4873/" && fail "a br- network outside the pool reaches the npm cache" || pass "a br- network outside the pool cannot reach the npm cache"
+reach http://169.254.169.254/ && fail "br- container outside the pool reaches 169.254.169.254" || pass "metadata stays dropped for br- networks outside the pool"
+NET_ARGS=()
+reach "http://${GW}:4873/" && pass "docker0 still reaches the npm cache" || fail "docker0 lost the npm cache"
+bash runner/scripts/ci-job-isolation.sh >/dev/null 2>&1   # no GitHub runner config: the pool rule is gone again
+NET_ARGS=(--network ci-e2e-pool)
+reach "http://${GW}:4873/" && fail "pool rule survived a run without the config" || pass "without the config the pool no longer reaches the npm cache"
+NET_ARGS=()
+docker network rm ci-e2e-pool >/dev/null 2>&1 || true
 echo "-- survives a Docker restart through the systemd unit"
 install -m 0755 runner/scripts/ci-job-isolation.sh /usr/local/bin/ci-job-isolation.sh
 install -m 0644 runner/systemd/ci-job-isolation.service /etc/systemd/system/ci-job-isolation.service

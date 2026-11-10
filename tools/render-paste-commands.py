@@ -72,6 +72,7 @@ LOGGING = ["runner/install/logging.sh", "runner/stacks/logging"]
 NPM = ["runner/install/npm-cache.sh", "runner/stacks/npm-cache"]
 PREWARM = ["runner/install/image-prewarm.sh", "runner/scripts/ci-image-prewarm.sh",
            "runner/systemd/ci-image-prewarm.service", "runner/systemd/ci-image-prewarm.timer"]
+GITHUB_RUNNER = ["runner/install/github-runner.sh", "runner/scripts/github-runner-ctl", "runner/systemd/github-runner-ctl.service"]
 # Optional security tooling: has its own block, left out of the update and everything-at-once blocks to keep them small.
 SECURITY = ["common/security-tools.sh", "common/kali", "common/security-audit-run.sh", "common/security/kali/Dockerfile",
             "common/systemd/security-audit.service", "common/systemd/security-audit.timer",
@@ -131,6 +132,13 @@ BLOCKS = [
     Block("shared-cache", "Shared cache /srv/ci-cache",
           "Needs a registered runner. Mounts `/srv/ci-cache` into every job for npm and Sonar. Trusted projects only.",
           ["runner/install/shared-cache.sh"], run=["runner/install/shared-cache.sh"]),
+    Block("github-runner", "GitHub Actions runner (private repositories)",
+          "Optional, needs the per-job limits. Ephemeral just-in-time runners for the private repositories of a GitHub App installation, one job at a time, "
+          "image builds through a rootless BuildKit sidecar, no Docker socket in jobs. Create the GitHub App first (permissions, no webhook, install on All repositories: "
+          "see runner/docs/github-runner.md, including its trust requirements and unverified live-host checks), download its private key and copy it to the server, laptop, any directory: "
+          "`scp app-key.pem ops@SERVER_IP:/home/ops/app-key.pem`. The last line asks for your GitHub user, the App's client ID and the path of the key "
+          "(`/home/ops/app-key.pem`), runs a self-test that lists which repositories would be served, and only then enables the service. Delete the key copy afterwards.",
+          GITHUB_RUNNER, interactive=["sudo bash {d}/runner/install/github-runner.sh"]),
     Block("prewarm", "Image prewarm",
           "Asks for the path of one image (copy icon in Container Registry) and a deploy token with `read_registry`.",
           PREWARM, interactive=["sudo bash {d}/runner/install/image-prewarm.sh"]),

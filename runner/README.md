@@ -103,9 +103,10 @@ You can run every step yourself with `setup.sh`, on the server, as root, in `/ro
 | 7 | Logging (Loki, Alloy) | `--logging` | `health` shows both ready |
 | 8 | npm cache (needs 4) | `--npm-cache` | `sudo grep 'environment =' /etc/gitlab-runner/config.toml` |
 | 9 | Shared cache `/srv/ci-cache` (needs 4, trusted projects only) | `--shared-cache` | `sudo grep 'volumes =' /etc/gitlab-runner/config.toml` |
+| 10 | GitHub Actions runner for private repositories (opt-in, needs 4; see [GitHub Actions runner](#github-actions-runner-private-repositories)) | `--github-runner` | `health` section "GitHub Actions runner", `sudo bash /root/server-init-config/runner/install/github-runner.sh --self-test` |
 | opt | Image prewarm, Grafana domain, security tools, SELinux, lock root | `--prewarm`, `--grafana-domain`, `--security`, `--selinux`, `--lock-root` | see below |
 
-`--base` is steps 1, 2, 3, 3b, 5, 6; `--all` is `--base` plus 4, 7, 8, 9 and asks for the token. Components are installed in this order whatever the flag order. If one fails, fix the cause and rerun the same command.
+`--base` is steps 1, 2, 3, 3b, 5, 6; `--all` is `--base` plus 4, 7, 8, 9 and asks for the token. Step 10 is never part of either. Components are installed in this order whatever the flag order. If one fails, fix the cause and rerun the same command.
 
 Server, as `ops`, any directory:
 
@@ -129,6 +130,7 @@ The domain needs monitoring, an A record and TCP 80 and 443 in the Cloud Firewal
 |---|---|---|---|
 | `ops` | admin | by key | your login; sudo without password; not in the `docker` group, so Docker needs `sudo` |
 | `gitlab-runner` | service | no | the runner service; Docker access through the `docker` group, which the executor needs |
+| `github-runner` | service | no | only with `--github-runner`: the controller of the GitHub Actions runner; also in the `docker` group (root-equivalent, it starts the job containers) |
 | `monitoring` | service | no | Prometheus, node_exporter, Grafana, Loki and Alloy; reads its config but cannot change it |
 | `root` | | by key until locked | the init does not change it |
 
@@ -279,13 +281,24 @@ sudo bash -c 'cd /root/server-init-config && JOB_MEMORY=3g JOB_CPUS=2 runner/ins
 - Traffic from containers to `169.254.169.254` (Hetzner metadata) is dropped in `DOCKER-USER`.
 - Traffic from `docker0` and the `br-*` bridges to the host itself goes through the chain `CI-JOBS-IN`: replies, ping and the npm cache (docker0 IP, port 4873) are let in, everything else is dropped.
 
-Internet access of jobs, the Docker Hub cache (Docker pulls through the mirror, jobs do not) and traffic between the containers of one job are not affected. Check, server, as `ops`, any directory: `sudo iptables -S DOCKER-USER`, `sudo iptables -S CI-JOBS-IN`. If a job legitimately needs a host service, add an `ACCEPT` rule for it to `CI-JOBS-IN` in `runner/scripts/ci-job-isolation.sh` and rerun `sudo systemctl restart ci-job-isolation`.
+The pods of the GitHub Actions runner (`--github-runner`) get one exception: their own address pool (`GH_JOB_SUBNET_POOL`, one `/28` per pod) may also reach the npm cache port on the docker0 IP (`-i br-+ -s <pool> -d <docker0 IP> -p tcp --dport 4873`, added only when `/etc/github-runner/config.env` exists); the other `br-` networks and the metadata address stay closed to them, see [the GitHub runner guide](docs/github-runner.md#what-these-jobs-can-and-cannot-reach). Internet access of jobs, the Docker Hub cache (Docker pulls through the mirror, jobs do not) and traffic between the containers of one job are not affected. Check, server, as `ops`, any directory: `sudo iptables -S DOCKER-USER`, `sudo iptables -S CI-JOBS-IN`. If a job legitimately needs a host service, add an `ACCEPT` rule for it to `CI-JOBS-IN` in `runner/scripts/ci-job-isolation.sh` and rerun `sudo systemctl restart ci-job-isolation`.
 
 ### Updates of Docker and GitLab Runner
 
 `dnf-automatic` (security only) and `unattended-upgrades` do not cover the Docker and GitLab repositories. `runner-engine-update.timer` (Sunday 04:30) upgrades `docker-ce*`, `containerd.io` and `gitlab-runner` only when `docker ps` answers and shows no CI job; otherwise it logs why it skipped and tries again next week. Before upgrading it stops the runner gracefully (no new job, a job already running finishes; the script adds a `KillSignal=SIGQUIT` drop-in for that), looks at the job list again, and only then upgrades; if a job is still there it starts the runner again and changes nothing. It then restarts Docker, starts the runner and checks both are active. The result is one line in `/var/log/runner-engine-update.log`, which `health` shows. Run it now (server, as `ops`, any directory): `sudo runner-engine-update.sh --dry-run`, then `sudo runner-engine-update.sh`.
 
 `pull_policy = "if-not-present"` reuses images on the host; GitLab allows that only for runners limited to trusted projects. Use `always` if you attach projects you don't control.
+
+## GitHub Actions runner (private repositories)
+
+Optional, never part of `--base` or `--all`. One ephemeral JIT runner per job,
+with an optional rootless BuildKit sidecar, alongside the GitLab runner.
+**Trusted private repositories only; no fork workflows.** The controller has
+root-equivalent Docker access, and BuildKit relaxes container isolation.
+
+See [the GitHub runner guide](docs/github-runner.md) for prerequisites, GitHub App
+setup, installation, workflows, capacity, key rotation, removal, and the live-host
+checks that have not been verified yet. Start there before enabling `--github-runner`.
 
 ## Update
 
@@ -307,7 +320,7 @@ sudo bash -c 'cd /root/server-init-config && runner/update.sh --dry-run'
 sudo bash -c 'cd /root/server-init-config && runner/update.sh'
 ```
 
-Add `--os` to upgrade OS packages including Docker and GitLab Runner (never reboots), `--rollback` to restore the newest backup. `--pull` needs a git clone and a credential on the server, which this setup deliberately does not have: do not use it. The update only touches installed components; it syncs scripts, units and stack configs, backs up each changed file to `/var/backups/server-init-config/<timestamp>/` (last 5 kept), restores them if a check fails, skips CI-affecting steps while jobs run (exit code 3) and ends with `health -q`. It never touches secrets, `config.toml`, the registration, `daemon.json` or SSH.
+Add `--os` to upgrade OS packages including Docker and GitLab Runner (never reboots), `--rollback` to restore the newest backup. `--pull` needs a git clone. The default streamed copy has no `.git`, so do not use it there. A clone of this public repository can pull anonymously; credentials are needed only for a private fork or an authenticated remote. The update only touches installed components; it syncs scripts, units and stack configs, backs up each changed file to `/var/backups/server-init-config/<timestamp>/` (last 5 kept), restores them if a check fails, skips CI-affecting steps while jobs run (exit code 3) and ends with `health -q`. It never touches secrets, `config.toml`, the registration, `daemon.json` or SSH.
 
 ## Troubleshooting
 
@@ -323,10 +336,15 @@ Runner-specific; the general table is in the [main README](../README.md#troubles
 | Runner offline in GitLab | `systemctl is-active gitlab-runner`, `sudo gitlab-runner verify`; the Cloud Firewall may block outbound HTTPS. |
 | No logs in Grafana | `health` shows whether Loki and Alloy are ready; `sudo docker compose -f /opt/logging/docker-compose.yml logs --tail 50 alloy`. |
 | `reboot` or `systemctl restart gitlab-runner` takes very long | After the weekly engine update has run once, the runner stops gracefully (`KillSignal=SIGQUIT`, no stop timeout): a reboot or restart waits until running jobs finish, bounded only by the GitLab job timeout. To force it now: `sudo systemctl kill -s SIGTERM gitlab-runner` (running jobs are lost). |
+| GitHub job stays queued | `journalctl -u github-runner-ctl -n 50`: `jobs_queued` shows it was seen. Check the labels (`runs-on: [self-hosted, hetzner]`; a job with an extra label is not ours), that the repository is private and not excluded (`runner/install/github-runner.sh --self-test`), `GH_MAX_JOBS`, and `event=jit_failed` (a 422 names `GH_RUNNER_GROUP_ID`). |
+| `event=runner_update_required` / health "runner image is N days old" | The pinned runner image is too old for GitHub: bump `GHR_RUNNER_IMAGE` in `common/lib.sh` and run `runner/install/update.sh`. |
+| Buildx fails with `connection refused` or a TLS error | The BuildKit container did not start (`event=buildkit_missing`): `user.max_user_namespaces` must be above 0; on SELinux or AppArmor hosts see [the BuildKit trade-off](docs/github-runner.md#the-buildkit-trade-off). |
 | Verdaccio restart-loops | The `docker0` IP changed (`bip` in `daemon.json`). Rerun `runner/update.sh` or `setup.sh --npm-cache`. |
 | Verdaccio restart-loops after an upgrade | `sudo docker compose -f /opt/npm-cache/docker-compose.yml logs --tail 30`. The start script prints what it did (lines starting with `npm-cache:`); see [npm cache upgrade](#npm-cache-upgrade-and-rollback). |
 
 ### npm cache upgrade and rollback
+
+The cache serves the GitHub Actions pods too when `--github-runner` is installed (they get `NPM_CONFIG_REGISTRY` with the docker0 address, and `ci-job-isolation` opens the port to their address pool only, `GH_JOB_SUBNET_POOL`). The pool rule is there whether or not the cache is installed; the next pod after installing the cache picks the registry up.
 
 Verdaccio 7 (`verdaccio/verdaccio:7.0.2`) replaced 6.1.2. The cache only holds copies of what npmjs serves, so the upgrade does not convert anything. The compose file carries its start script as inline `configs: content:`, which needs Docker Compose 2.23.1 or newer (`docker compose version`); `npm-cache.sh` checks this first and stops with a message, before changing anything. `update.sh` checks it when `/opt/npm-cache` is installed, after the optional `--os` upgrade (which can bring a newer Compose) and before the host tools or any stack are touched; `--rollback` skips the check.
 
@@ -359,7 +377,7 @@ Replace `BACKUP` with the directory name from the `ls` (for example `backup-6.x-
 | `register.sh` | registers the runner (asks for the `glrt-` token); wraps `install/register-runner.sh` |
 | `update.sh` | brings installed components to the repo state; wraps `install/update.sh` |
 | `install/` | one installer per component, `users.sh`, `lock-root.sh`, `update.sh` |
-| `scripts/`, `systemd/` | weekly cleanup, disk guard, image prewarm and their timers |
+| `scripts/`, `systemd/` | weekly cleanup, disk guard, image prewarm and their timers; `github-runner-ctl` and its unit (opt-in) |
 | `stacks/` | Compose stacks: `monitoring`, `logging`, `registry-cache`, `npm-cache` |
 | `ci/` | `.gitlab-ci.yml` snippets: smoke test, defaults, image mirroring |
 | `cloud-init/` | generated user-data; sources in `templates/` |
@@ -393,6 +411,7 @@ The log file does not exist when nothing failed. Before the users step, run the 
 
 | Flag | Installs |
 |---|---|
+| `--github-runner` | ephemeral GitHub Actions runner for private repositories (GitHub App, JIT runners, rootless BuildKit); asks for the Client ID and the key; not part of `--base` or `--all` |
 | `--security` | security tools for your own host (lynis, OpenSCAP, auditd, nmap, trivy, gitleaks, ...); not part of `--base` or `--all` |
 | `--prewarm` | daily pre-pull of CI images; asks for a deploy token with `read_registry` |
 | `--selinux` | SELinux enforcing, then checks Docker and the runner; restarts Docker, so no jobs running; last |
@@ -426,6 +445,7 @@ Then delete the runner in GitLab if it still shows, create a new one and run `re
 
 - The token is stored only in `/etc/gitlab-runner/config.toml` (owner `gitlab-runner`, mode `600`). Never put it in user-data.
 - Job containers are not privileged. Enable `privileged = true` only for trusted projects that need Docker-in-Docker.
+- GitHub Actions runner (opt-in): the GitHub App private key is only in `/etc/github-runner/app.pem` (mode 600, owner `github-runner`); `config.env` holds no secret. The JIT runner config of a pod is a file (`/run/github-runner/jobs/<pod>/jit/config`, mode 0644 inside a 0700 directory tree owned by `github-runner`), so only root and `github-runner` can read it on the host; inside the pod the job itself (same uid 1001) can read it too, by design, because it is the one job that runner may take; it is handed to the Listener as an environment variable, never on a command line (unless you set `GH_JIT_PASS=arg`, which shows it in `/proc/<pid>/cmdline`) and not in `docker inspect`. The App tokens are narrower than the App: reads use a token with `Actions: read`, and creating or deleting runners uses a token of the one repository concerned with `Administration: write`; they live in the controller's memory; each token lives under an hour. Job pods get no Docker socket, no capabilities and no `sudo`; only the BuildKit sidecar runs with the unconfined syscall filter described above. `github-runner` is in the `docker` group (root-equivalent), like `gitlab-runner`.
 - Monitoring, logging and the caches listen on `127.0.0.1` or the `docker0` bridge. `/srv/ci-cache` and the npm cache are shared by every project: no untrusted projects or forks.
 - The host firewall (`--firewall`), fail2ban for SSH, the block of the cloud metadata address and host services for jobs, and per-job resource limits are set up by the steps above. IPv6 is not filtered by the job isolation.
 - Not done here: rootless Docker and `userns-remap` (they change ownership of bind mounts and caches).

@@ -21,6 +21,7 @@ whole block again, the installers are safe to rerun or tell you the component is
 - [Logging: Loki + Grafana Alloy](#logging)
 - [npm cache (Verdaccio)](#npm-cache)
 - [Shared cache /srv/ci-cache](#shared-cache)
+- [GitHub Actions runner (private repositories)](#github-runner)
 - [Image prewarm](#prewarm)
 - [Grafana on a domain (HTTPS via Caddy)](#grafana-domain)
 - [SELinux enforcing](#selinux)
@@ -123,13 +124,9 @@ chmod 644 /etc/yum.repos.d/gitlab-runner.repo
 install -d "$(dirname /usr/local/sbin/pin-repo-key)"
 cat > /usr/local/sbin/pin-repo-key <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Download a package repository signing key and install it only if it has the expected fingerprint.
-# Usage: pin-repo-key URL FINGERPRINT DEST
-# The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
-# keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
-# On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+# Usage: pin-repo-key URL FINGERPRINT DEST. Downloads a repository signing key, checks it with gpg in an empty keyring and writes only
+# the key with that fingerprint (40 hex digits, spaces allowed) to DEST. On a mismatch nothing is written and the exit code is 1.
 set -Eeuo pipefail
-
 if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
   echo "Usage: $0 URL FINGERPRINT DEST" >&2
   exit 2
@@ -139,7 +136,6 @@ want=$(printf '%s' "$2" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
 dest="$3"
 [[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
 command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 chmod 0700 "$work"
@@ -191,7 +187,6 @@ cat > /etc/profile.d/90-shell-history.sh <<'__SIC_EOF__'
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
-
 __shell_history_vars() {
   HISTSIZE=100000
   HISTFILESIZE=200000
@@ -200,9 +195,7 @@ __shell_history_vars() {
 }
 __shell_history_vars
 shopt -s histappend cmdhist
-
-# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
-# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
+# Before each prompt: append the last command to the history; the first prompt re-applies the limits (Debian lowers them).
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -210,9 +203,8 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
-# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
-# element 0 for /etc/bashrc's title command; the hook stays in element 1.
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. Still empty (Fedora/EL): an array whose element 0 is left
+# empty for /etc/bashrc's title command.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -231,7 +223,6 @@ case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
     fi
     ;;
 esac
-
 # Debian and Ubuntu install fd as fdfind.
 if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
   alias fd=fdfind
@@ -245,7 +236,6 @@ if [[ -n "${__fd-}" ]]; then
   export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
 fi
 unset __fd
-
 if command -v fzf >/dev/null 2>&1; then
   for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
     if [[ -r "$__f" ]]; then
@@ -376,7 +366,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -511,6 +506,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -953,7 +958,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -1088,6 +1098,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -1216,7 +1236,6 @@ cat > "$R/common/shell-history.sh" <<'__SIC_EOF__'
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
-
 __shell_history_vars() {
   HISTSIZE=100000
   HISTFILESIZE=200000
@@ -1225,9 +1244,7 @@ __shell_history_vars() {
 }
 __shell_history_vars
 shopt -s histappend cmdhist
-
-# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
-# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
+# Before each prompt: append the last command to the history; the first prompt re-applies the limits (Debian lowers them).
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -1235,9 +1252,8 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
-# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
-# element 0 for /etc/bashrc's title command; the hook stays in element 1.
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. Still empty (Fedora/EL): an array whose element 0 is left
+# empty for /etc/bashrc's title command.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -1256,7 +1272,6 @@ case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
     fi
     ;;
 esac
-
 # Debian and Ubuntu install fd as fdfind.
 if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
   alias fd=fdfind
@@ -1270,7 +1285,6 @@ if [[ -n "${__fd-}" ]]; then
   export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
 fi
 unset __fd
-
 if command -v fzf >/dev/null 2>&1; then
   for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
     if [[ -r "$__f" ]]; then
@@ -1385,7 +1399,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -1520,6 +1539,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -1909,13 +1938,15 @@ check_security() {
   fi
 
   local members u shell pid ru
-  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vx 'gitlab-runner' | grep . | tr '\n' ' ' || true)
+  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vxE 'gitlab-runner|github-runner' | grep . | tr '\n' ' ' || true)
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
+    if is_runner; then
+      if getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -qx 'github-runner'; then ok "docker group: only gitlab-runner and github-runner"; else ok "docker group: only gitlab-runner"; fi
+    else ok "docker group: no members"; fi
   fi
-  for u in gitlab-runner monitoring; do
+  for u in gitlab-runner github-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
     shell=$(getent passwd "$u" | cut -d: -f7)
     case "$shell" in
@@ -2454,8 +2485,8 @@ check_runner() {
   fi
 
   local jobs
-  jobs=$(docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true 2>/dev/null | wc -l || true)
-  info "running job containers: ${jobs:-0}"
+  jobs=$({ docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true; docker ps -q --filter label=io.server-init.github-runner=job; } 2>/dev/null | wc -l || true)
+  info "running job containers (GitLab jobs and GitHub runner pods): ${jobs:-0}"
 
   if grep -q '^listen_address' "$CFG"; then
     if [[ "$(http_code http://127.0.0.1:9252/metrics 3)" == "200" ]]; then
@@ -2471,6 +2502,94 @@ check_runner() {
     warn "${errs} error lines in runner log in the last hour (journalctl -u gitlab-runner --since -1h | grep ERROR)"
   else
     ok "no runner errors in the last hour"
+  fi
+  return 0
+}
+
+# Opt-in GitHub Actions runner (runner/install/github-runner.sh): the controller writes /run/github-runner/status.json every poll,
+# so this check makes no GitHub API call. HEALTH_GHR_STATUS and HEALTH_GHR_CONFIG are for tests.
+check_github_runner() {
+  local unit=github-runner-ctl.service st="${HEALTH_GHR_STATUS:-/run/github-runner/status.json}" gcfg="${HEALTH_GHR_CONFIG:-/etc/github-runner/config.env}"
+  if ! unit_exists "$unit" && [[ ! -f "$gcfg" ]]; then return 0; fi
+  if (( LIMITED )); then
+    skip "github runner: needs root (skipped)"
+    return 0
+  fi
+  section "GitHub Actions runner"
+  if ! have jq; then
+    warn "jq missing: the GitHub runner status cannot be read"
+    return 0
+  fi
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    ok "${unit} active"
+  elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+    fail "${unit} $(systemctl is-active "$unit" 2>/dev/null || true) (journalctl -u github-runner-ctl -n 30)"
+  else
+    warn "${unit} installed but not enabled (systemctl enable --now github-runner-ctl)"
+    return 0
+  fi
+  if [[ ! -s "$st" ]]; then
+    warn "no controller status yet (${st}); the first poll writes it"
+    return 0
+  fi
+  local now age v owner image created img_age
+  now=$(date +%s)
+  owner=$(sed -nE 's/^GH_OWNER="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  info "private repositories of ${owner:-?}: $(jq -r '"\(.served // 0) served, \(.skipped // 0) skipped (public, archived or excluded)"' "$st" 2>/dev/null || echo unknown)"
+  v=$(jq -r '.last_poll_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 300 )); then ok "last successful poll $(human_age "$age") ago"
+    elif (( age <= 900 )); then warn "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"
+    else fail "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"; fi
+  else
+    warn "no successful poll yet ($(jq -r '.last_error // "no error recorded"' "$st" 2>/dev/null))"
+  fi
+  v=$(jq -r '.last_token_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 4200 )); then ok "installation token minted $(human_age "$age") ago"
+    else warn "installation token last minted $(human_age "$age") ago (the GitHub App key or installation may be gone: github-runner-ctl self-test)"; fi
+  else
+    warn "no installation token minted yet"
+  fi
+  v=$(jq -r '.rate_remaining // empty' "$st" 2>/dev/null || true)
+  if [[ -n "$v" ]] && isnum "$v"; then
+    if (( v < 100 )); then fail "GitHub API quota nearly used up: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    elif (( v < 500 )); then warn "GitHub API quota low: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    else ok "GitHub API quota: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"; fi
+  fi
+  info "pods: $(jq -r '"\(.active_pods // 0) active (\(.idle_pods // 0) waiting for a job), limit \(.max_jobs // "?")"' "$st" 2>/dev/null)"
+  if [[ "$(jq -r '.update_required // false' "$st" 2>/dev/null)" == true ]]; then
+    fail "a runner exited with code 3 or 4 (it wanted to update itself): the pinned runner image is too old; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+  fi
+  v=$(jq -r '.backoff_until // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > now )); then
+    warn "pod start paused after repeated runner failures (until $(date -d "@${v}" +%H:%M:%S)); journalctl -u github-runner-ctl"
+  fi
+  # age of the pinned runner image: GitHub stops queuing jobs to a runner that was not updated for 30 days
+  image=$(sed -nE 's/^GH_RUNNER_IMAGE="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  created=""
+  if [[ -n "$image" ]] && have docker; then created=$(docker image inspect -f '{{.Created}}' "$image" 2>/dev/null || true); fi
+  if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); else created=$(jq -r '.runner_image_created // empty' "$st" 2>/dev/null || true); fi
+  if [[ -n "$created" ]] && isnum "$created"; then
+    img_age=$(( (now - created) / 86400 ))
+    # age alone is only a warning (a newer pin may already be waiting for update.sh); a runner that really cannot take jobs shows up as update_required
+    if (( img_age >= 25 )); then warn "runner image is ${img_age} days old (GitHub stops queuing jobs to a runner older than 30 days): bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    else ok "runner image is ${img_age} days old"; fi
+  else
+    info "runner image age unknown (image not on disk and not yet recorded)"
+  fi
+  if have docker && docker info >/dev/null 2>&1; then
+    local stopped nets running
+    stopped=$(docker ps -aq --filter label=io.server-init.github-runner=job --filter status=exited --filter status=dead --filter status=created 2>/dev/null | wc -l || true)
+    nets=$(docker network ls -q --filter label=io.server-init.github-runner=job 2>/dev/null | wc -l || true)
+    running=$(docker ps -q --filter label=io.server-init.github-runner.role=runner 2>/dev/null | wc -l || true)
+    if (( ${stopped:-0} > 0 || ${nets:-0} > ${running:-0} )); then
+      warn "leftover pod parts: ${stopped:-0} stopped container(s), ${nets:-0} network(s) for ${running:-0} running pod(s); the controller removes them on its next poll"
+    else
+      ok "no leftover pod containers or networks"
+    fi
   fi
   return 0
 }
@@ -2540,12 +2659,13 @@ check_containers() {
     s_pids[$name]="$pids"
   done < <(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}' "${ids[@]}" 2>/dev/null || true)
 
-  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}'
-  local state health restarts oom started memlimit job started_s age short details level reasons
+  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}|{{index .Config.Labels "io.server-init.github-runner"}}'
+  local state health restarts oom started memlimit job ghjob started_s age short details level reasons
   local n_total=0 n_jobs=0
 
-  while IFS='|' read -r name state health restarts oom started memlimit job; do
+  while IFS='|' read -r name state health restarts oom started memlimit job ghjob; do
     [[ -z "$name" ]] && continue
+    if [[ "$ghjob" == "job" ]]; then job=true; fi
     name="${name#/}"
     n_total=$((n_total + 1))
     short="$name"
@@ -2977,6 +3097,7 @@ check_securitytools
 check_services
 check_freshness
 check_runner
+check_github_runner
 check_docker
 check_containers
 check_recent_container_oom
@@ -3433,25 +3554,20 @@ cat > "$R/runner/scripts/runner-weekly-cleanup.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Weekly cleanup of the GitLab Runner host: Docker, runner caches, packages, logs, temp files.
 set -Eeuo pipefail
-
 RETENTION_DAYS="${RETENTION_DAYS:-7}"
 JOURNAL_MAX="${JOURNAL_MAX:-500M}"
 SHARED_CACHE_DIR="${SHARED_CACHE_DIR:-/srv/ci-cache}"
 SHARED_CACHE_MAX_AGE_DAYS="${SHARED_CACHE_MAX_AGE_DAYS:-14}"
 DRY_RUN="${DRY_RUN:-0}"
-
 CACHE_DIRS=(/home/gitlab-runner/cache /home/gitlab-runner/.cache /var/lib/gitlab-runner/cache /root/.cache)
 BUILD_DIRS=(/home/gitlab-runner/builds /var/lib/gitlab-runner/builds)
-
 log()  { logger -t runner-weekly-cleanup -- "$*"; echo "$(date -u +%FT%TZ) $*"; }
 disk() { df --output=used,avail,pcent -h / | tail -1 | xargs; }
-
 run() {
   log "-> $*"
   [[ "$DRY_RUN" == "1" ]] && return 0
   "$@" || log "WARN: failed: $*"
 }
-
 wipe_dir() {
   local dir="$1" age="${2:-}"
   [[ -d "$dir" ]] || return 0
@@ -3465,7 +3581,6 @@ wipe_dir() {
     find "$dir" -mindepth 1 -delete 2>/dev/null || log "WARN: partial wipe of $dir"
   fi
 }
-
 usage() {
   cat <<USAGE
 Usage: $0 [--dry-run] [--help]
@@ -3478,7 +3593,6 @@ Env:
   DRY_RUN=1                   show what would be cleaned without deleting anything
 USAGE
 }
-
 while (( $# )); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -3488,19 +3602,15 @@ while (( $# )); do
   shift
 done
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-
 exec 9>/run/runner-weekly-cleanup.lock
 flock -n 9 || { log "another cleanup is running, exit"; exit 0; }
-
 hours=$(( RETENTION_DAYS * 24 ))
 log "start (dry_run=${DRY_RUN}), disk before: $(disk)"
-
 if command -v docker >/dev/null 2>&1; then
-  # Never guess the job count: if docker does not answer, a default of 0 would wipe the caches under running jobs.
-  # stderr goes to a temp file so a docker WARNING is never counted as a running job.
+  # docker not answering is not "no jobs"; stderr is kept apart so a warning is not counted as a job
   ps_err=$(mktemp)
   trap 'rm -f "$ps_err"' EXIT
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+  if ! job_ids=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; } 2>"$ps_err"); then
     log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
@@ -3516,12 +3626,14 @@ if command -v docker >/dev/null 2>&1; then
   fi
   run docker container prune -f --filter "until=${hours}h"
   run docker image prune -af --filter "until=${hours}h"
+  # the prune takes the pinned GitHub runner images too: fetch them again
+  for img in $(sed -n 's/^GH_\(RUNNER\|BUILDKIT\)_IMAGE=//p' "${GHR_CONFIG:-/etc/github-runner/config.env}" 2>/dev/null); do
+    docker image inspect "$img" >/dev/null 2>&1 || run docker pull -q "$img"
+  done
   run docker builder prune -af --filter "until=${hours}h"
   run docker network prune -f --filter "until=${hours}h"
 fi
-
 for dir in "${BUILD_DIRS[@]}"; do wipe_dir "$dir" "$RETENTION_DAYS"; done
-
 if command -v apt-get >/dev/null 2>&1; then
   run apt-get -o DPkg::Lock::Timeout=600 autoremove --purge -y -q
   run apt-get -o DPkg::Lock::Timeout=600 autoclean -q
@@ -3530,22 +3642,18 @@ elif command -v dnf >/dev/null 2>&1; then
   run dnf -y -q autoremove
   run dnf -q clean all
 fi
-
 run journalctl --vacuum-time="$(( RETENTION_DAYS * 2 ))d" --vacuum-size="$JOURNAL_MAX"
-
 if [[ "$DRY_RUN" != "1" ]]; then
   log "-> removing rotated logs older than 30d"
   find /var/log -type f \( -name '*.gz' -o -name '*-[0-9]*' -o -name '*.[0-9]' -o -name '*.old' \) -mtime +30 -delete 2>/dev/null || true
   find /tmp /var/tmp -xdev -mindepth 1 -type f -atime +"$RETENTION_DAYS" -delete 2>/dev/null || true
 fi
 run systemd-tmpfiles --clean
-
 if [[ -d "$SHARED_CACHE_DIR" && "$DRY_RUN" != "1" ]]; then
   log "-> pruning ${SHARED_CACHE_DIR} files not used for ${SHARED_CACHE_MAX_AGE_DAYS}d"
   find "$SHARED_CACHE_DIR" -xdev -type f -atime +"$SHARED_CACHE_MAX_AGE_DAYS" -delete 2>/dev/null || true
   find "$SHARED_CACHE_DIR" -xdev -mindepth 2 -type d -empty -delete 2>/dev/null || true
 fi
-
 log "done, disk after: $(disk)"
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/runner-weekly-cleanup.sh"
@@ -3555,14 +3663,11 @@ cat > "$R/runner/scripts/runner-disk-guard.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Emergency cleanup when the root filesystem crosses HARD_LIMIT percent.
 set -Eeuo pipefail
-
 HARD_LIMIT="${HARD_LIMIT:-85}"
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0  (env: HARD_LIMIT=85) runs runner-weekly-cleanup.sh with RETENTION_DAYS=1 when disk usage >= HARD_LIMIT%"
   exit 0
 fi
-
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
@@ -3629,23 +3734,16 @@ chmod 644 "$R/runner/systemd/runner-disk-guard.timer"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
-# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
-# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
-# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
-# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
-# The result is one line in /var/log/runner-engine-update.log, which health reads.
-# Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
+# Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
+# stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
+# One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
 set -Eeuo pipefail
-
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-
 note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
   exit 0
@@ -3654,9 +3752,9 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>/run/runner-engine-update.lock
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-
-# A docker error is not "no jobs": updating then could kill running jobs.
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
 fi
@@ -3664,7 +3762,6 @@ if [[ -n "$jobs" ]]; then
   note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
   exit 0
 fi
-
 installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
@@ -3679,30 +3776,24 @@ else
   exit 1
 fi
 (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
-
 if ! pending; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
-# Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
 docker_pkgs=(); runner_pkgs=()
 for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
 if [[ "$DRY_RUN" == 1 ]]; then
   note "DRY-RUN would upgrade ${installed[*]}"
   exit 0
 fi
-
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
-
-# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
-# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
-runner_stopped=0
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
+# From here whatever happens: start the runner again.
+runner_stopped=0 ctl_stopped=0
+ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
-
-# `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+# SIGQUIT = graceful stop (jobs finish). Returns 1 when still running after STOP_WAIT.
 stop_runner_wait() {
   local waited=0 st
   systemctl stop --no-block gitlab-runner
@@ -3714,48 +3805,44 @@ stop_runner_wait() {
     waited=$((waited + 5))
   done
 }
-no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
-
-# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
-# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+no_jobs() { local j; j=$(job_ids 2>/dev/null) && [[ -z "$j" ]]; }
+# SIGTERM would end jobs; TimeoutStopSec=infinity: systemd never SIGKILLs the runner.
 if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
   printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
+# no new GitHub pod during the upgrade
+if systemctl is-active --quiet github-runner-ctl 2>/dev/null; then systemctl stop github-runner-ctl && ctl_stopped=1; fi
 if ! stop_runner_wait; then
-  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
-  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
+  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
   exit 0
 fi
 if ! no_jobs; then
-  note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
+  note "SKIP a CI job appeared or docker does not answer after the runner stopped; will retry next week"
   exit 0
 fi
-
-# Docker packages first, runner stopped: their own Docker restart finds no job.
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
-# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
-# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+# a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
+    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
     exit 0
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
+  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
   exit 0
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
   systemctl restart docker
   sleep 5
-  # The isolation rules live in iptables; reapply them after the Docker restart.
+  # reapply the isolation rules
   if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
 fi
 if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
@@ -3764,6 +3851,7 @@ if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
 fi
 systemctl start gitlab-runner || true
 runner_stopped=0
+ctl_back
 sleep 5
 for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
 if [[ -n "$bad" ]]; then
@@ -3777,53 +3865,38 @@ chmod 755 "$R/runner/scripts/runner-engine-update.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/ci-job-isolation.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Keep CI job containers away from the cloud metadata service and from services on the host.
-# Run at boot and after every Docker start by ci-job-isolation.service; safe to rerun any time.
-#
-#   DOCKER-USER   drops traffic to 169.254.169.254 (Hetzner metadata: server data, user-data, tokens).
-#   INPUT         traffic from docker0 and the br-* bridges to the host itself goes through the chain CI-JOBS-IN:
-#                 only replies, ping and the npm cache (docker0 IP, port 4873) are let in, the rest is dropped.
-#
-# Not affected: internet access of jobs, the Docker Hub cache (Docker pulls through the mirror on 127.0.0.1:5000,
-# jobs do not), traffic between containers of one job, and the host-network stacks (monitoring, logging, caches).
-# Only IPv4 is handled. Remove the rules: systemctl disable --now ci-job-isolation; then iptables -F CI-JOBS-IN
-# and delete the two "ci-job-isolation" rules shown by iptables -S.
+# Keeps CI jobs away from the cloud metadata service (DOCKER-USER drops 169.254.169.254) and from host services (INPUT from docker0
+# and br-* goes through CI-JOBS-IN: replies, ping and the npm cache, docker0 IP port 4873, pass; br-* only from GH_JOB_SUBNET_POOL).
+# Run by ci-job-isolation.service at boot and after every Docker start; IPv4 only. Remove: disable the unit, iptables -F CI-JOBS-IN,
+# delete the two "ci-job-isolation" rules shown by iptables -S.
 set -Eeuo pipefail
-
 META_IP="${META_IP:-169.254.169.254}"
 NPM_PORT="${NPM_PORT:-4873}"
 TAG=ci-job-isolation
-
 log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$*"; }
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0   blocks CI jobs from ${META_IP} and from host services (except the npm cache on the docker0 IP, port ${NPM_PORT})"
   exit 0
 fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 command -v iptables >/dev/null 2>&1 || { log "iptables not found, nothing applied"; exit 1; }
-
 # Docker creates DOCKER-USER when it starts; wait for it after a boot.
 for _ in $(seq 1 30); do
   if iptables -n -L DOCKER-USER >/dev/null 2>&1; then break; fi
   sleep 1
 done
 iptables -n -L DOCKER-USER >/dev/null 2>&1 || { log "chain DOCKER-USER does not exist (is Docker running?), nothing applied"; exit 1; }
-
 # Insert a rule at the top of a chain unless it is there already.
 ensure() {
   local chain="$1"
   shift
   iptables -C "$chain" "$@" 2>/dev/null || iptables -I "$chain" 1 "$@"
 }
-
 ensure DOCKER-USER -d "$META_IP" -m comment --comment "$TAG" -j DROP
-
 BRIDGE_IP="${BRIDGE_IP:-}"
 if [[ -z "$BRIDGE_IP" ]] && command -v ip >/dev/null 2>&1; then
   BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
 fi
-
 iptables -N CI-JOBS-IN 2>/dev/null || true
 iptables -F CI-JOBS-IN
 iptables -A CI-JOBS-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
@@ -3831,11 +3904,21 @@ iptables -A CI-JOBS-IN -p icmp --icmp-type echo-request -j ACCEPT
 if [[ -n "$BRIDGE_IP" ]]; then
   iptables -A CI-JOBS-IN -i docker0 -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT
 fi
+POOL=$(sed -n 's/^GH_JOB_SUBNET_POOL=//p' "${GHR_CONFIG:-/etc/github-runner/config.env}" 2>/dev/null | tr -d '"' | head -1 || true)
+if [[ -n "$POOL" && -n "$BRIDGE_IP" ]]; then
+  # only a private /16 to /27 block with zero host bits (as the controller checks it); a failing rule must not skip the DROP
+  IFS=. read -r o1 o2 o3 o4 <<<"${POOL%/*}"
+  if [[ "$POOL" =~ ^(10(\.[0-9]{1,3}){3}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2}|192\.168(\.[0-9]{1,3}){2})/(1[6-9]|2[0-7])$ ]] \
+     && (( ((10#$o1 << 24 | 10#$o2 << 16 | 10#$o3 << 8 | 10#$o4) & ((1 << (32 - ${POOL#*/})) - 1)) == 0 )); then
+    iptables -A CI-JOBS-IN -i 'br-+' -s "$POOL" -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT || { log "WARN: pool rule failed"; POOL=""; }
+  else
+    log "WARN: GH_JOB_SUBNET_POOL '${POOL}' is not an aligned private /16-/27 block, ignored"; POOL=""
+  fi
+fi
 iptables -A CI-JOBS-IN -j DROP
 ensure INPUT -i docker0 -m comment --comment "$TAG" -j CI-JOBS-IN
 ensure INPUT -i 'br-+' -m comment --comment "$TAG" -j CI-JOBS-IN
-
-log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT})"
+log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT}${POOL:+, also for ${POOL}})"
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/ci-job-isolation.sh"
 
@@ -3994,7 +4077,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -4129,6 +4217,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -4433,7 +4531,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -4568,6 +4671,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -5531,7 +5644,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -5667,6 +5785,16 @@ own_stack_dir() {
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -5766,7 +5894,9 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
 # JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
-# out-of-memory kill (exit 137) instead of freezing the host.
+# out-of-memory kill (exit 137) instead of freezing the host. The opt-in GitHub Actions runner (runner/install/github-runner.sh) shares
+# this slice: its pod is a runner container with the same JOB_CPUS/JOB_MEMORY plus a BuildKit sidecar (768m), one pod at a time, so with it
+# installed keep concurrent = 1 (or raise JOBS_MEMORY_MAX on a bigger host) or a busy host hits the ceiling and kills a job.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
@@ -5780,7 +5910,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root
@@ -5977,7 +6107,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -6113,6 +6248,16 @@ own_stack_dir() {
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -6146,7 +6291,9 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
 # JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
-# out-of-memory kill (exit 137) instead of freezing the host.
+# out-of-memory kill (exit 137) instead of freezing the host. The opt-in GitHub Actions runner (runner/install/github-runner.sh) shares
+# this slice: its pod is a runner container with the same JOB_CPUS/JOB_MEMORY plus a BuildKit sidecar (768m), one pod at a time, so with it
+# installed keep concurrent = 1 (or raise JOBS_MEMORY_MAX on a bigger host) or a busy host hits the ceiling and kills a job.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
@@ -6160,7 +6307,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root
@@ -6357,7 +6504,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -6492,6 +6644,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -6729,7 +6891,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -6864,6 +7031,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -7308,7 +7485,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -7444,6 +7626,16 @@ own_stack_dir() {
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -7573,7 +7765,7 @@ chmod 755 "$R/runner/install/logging.sh"
 install -d "$R/runner/stacks/logging"
 cat > "$R/runner/stacks/logging/config.alloy" <<'__SIC_EOF__'
 // Container logs and the systemd journal to the local Loki.
-// CI job containers are skipped: their output is already the job log in GitLab.
+// CI job containers are skipped: their output is already the job log in GitLab (or in GitHub, for the pods of the GitHub Actions runner).
 
 logging {
   level = "warn"
@@ -7596,6 +7788,12 @@ discovery.relabel "containers" {
   rule {
     source_labels = ["__meta_docker_container_label_com_gitlab_gitlab_runner_managed"]
     regex         = "true"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_io_server_init_github_runner"]
+    regex         = "job"
     action        = "drop"
   }
 
@@ -7872,7 +8070,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -8007,6 +8210,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -8298,7 +8511,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -8434,6 +8652,16 @@ own_stack_dir() {
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -8502,6 +8730,1620 @@ chmod 755 "$R/runner/install/shared-cache.sh"
 echo "files written to $R: 2"
 bash "$R/runner/install/shared-cache.sh" </dev/null
 INSTALL
+````
+
+<a id="github-runner"></a>
+## GitHub Actions runner (private repositories)
+
+Optional, needs the per-job limits. Ephemeral just-in-time runners for the private repositories of a GitHub App installation, one job at a time, image builds through a rootless BuildKit sidecar, no Docker socket in jobs. Create the GitHub App first (permissions, no webhook, install on All repositories: see runner/docs/github-runner.md, including its trust requirements and unverified live-host checks), download its private key and copy it to the server, laptop, any directory: `scp app-key.pem ops@SERVER_IP:/home/ops/app-key.pem`. The last line asks for your GitHub user, the App's client ID and the path of the key (`/home/ops/app-key.pem`), runs a self-test that lists which repositories would be served, and only then enables the service. Delete the key copy afterwards.
+
+````bash
+sudo bash <<'INSTALL'
+set -Eeuo pipefail
+R=/root/server-init-config
+
+install -d "$R/common"
+cat > "$R/common/lib.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Shared helpers for the installers (runner/install, server and common). Sourced, not executed.
+# shellcheck shell=bash
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export REPO_ROOT
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+require_root() { [[ $EUID -eq 0 ]] || die "run as root"; }
+
+selinux_on() { command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; }
+
+pkg_install() {
+  if command -v dnf >/dev/null 2>&1; then
+    dnf -y -q install "$@"
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update -q && apt-get install -y -q "$@"
+  else
+    die "no supported package manager"
+  fi
+}
+
+# cmp (diffutils) is missing on minimal hosts but the installers compare files with it; fetch it when run as root.
+if [[ $EUID -eq 0 ]] && ! command -v cmp >/dev/null 2>&1; then pkg_install diffutils >/dev/null || log "WARN: diffutils not installed, cmp is missing"; fi
+
+# Label a directory so containers may read files in it (no-op without SELinux).
+selinux_label_dir() {
+  local dir="$1"
+  install -d -m 0755 "$dir"
+  selinux_on || return 0
+  command -v semanage >/dev/null 2>&1 || pkg_install policycoreutils-python-utils
+  # Read the whole list first: grep -q exits at the first match and would SIGPIPE the producer under pipefail.
+  if ! grep -q "^${dir}(/\.\*)?" <<<"$(semanage fcontext -l)"; then
+    semanage fcontext -a -t container_file_t "${dir}(/.*)?"
+  fi
+  restorecon -R "$dir"
+}
+
+restorecon_if() { if command -v restorecon >/dev/null 2>&1; then restorecon "$@" || true; fi; }
+
+# RHEL-family sudo resets PATH to secure_path, which can leave out /usr/local/bin (so `sudo health` fails).
+# Adds a validated drop-in unless some sudoers file already sets a secure_path that includes it.
+ensure_secure_path() {
+  local f=/etc/sudoers.d/50-secure-path tmp
+  command -v visudo >/dev/null 2>&1 || return 0
+  if grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path[[:space:]]*=.*/usr/local/bin' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if ! grep -rhsE '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
+    return 0   # no secure_path at all (Debian family keeps it in sudoers; others use the caller PATH)
+  fi
+  tmp=$(mktemp)
+  printf 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' > "$tmp"
+  if visudo -cqf "$tmp"; then
+    install -d -m 0750 /etc/sudoers.d
+    install -m 0440 -o root -g root "$tmp" "$f"
+    log "sudo secure_path now includes /usr/local/bin (${f})"
+  else
+    echo "WARN: generated sudoers drop-in is invalid, secure_path left as it was" >&2
+  fi
+  rm -f "$tmp"
+}
+
+# version_ge HAVE WANT: true when dotted version HAVE >= WANT (numeric, sort -V).
+version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
+
+# require_compose_min WANT WHAT: die before anything is changed when the Docker Compose plugin is older than WANT.
+# Why: a stack that needs a newer compose would otherwise fail later at "docker compose config", mid-update.
+require_compose_min() {
+  local want=$1 what=$2 have
+  have=$(docker compose version --short 2>/dev/null || true)
+  have=${have#v}
+  have=${have%%[!0-9.]*}
+  [[ -n "$have" ]] || die "${what} needs Docker Compose ${want} or newer, but 'docker compose version' gives no answer: install the docker-compose-plugin"
+  version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
+}
+
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
+
+require_runner_idle() {
+  local n
+  n=$(ci_jobs_running)
+  (( n == 0 )) || die "${n} CI job container(s) running, retry when the runner is idle"
+}
+
+# Timestamped copy before a change. Skipped when an identical backup already exists, so reruns of an idempotent
+# installer do not pile up copies of an unchanged file.
+backup() {
+  local f=$1 b
+  for b in "${f}".bak.*; do
+    [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
+  done
+  cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
+# but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
+edit_with_backup() {
+  local f=$1 bak; shift
+  # The snapshot lives next to FILE (cp -a keeps its mode), never in /tmp: it can hold a token, and a CMD that dies leaves it behind.
+  # mktemp makes the name unique, so a second call on the same file in the same second cannot overwrite (and then delete) the
+  # first call's backup of the original content.
+  bak=$(mktemp "${f}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
+  cp -a "$f" "$bak"
+  "$@"
+  if cmp -s "$f" "$bak"; then rm -f "$bak"; fi
+}
+
+# Prometheus scrape jobs for the logging stack, shared by runner/install/logging.sh and runner/install/update.sh.
+prom_jobs_logging() {
+  cat <<'YAML'
+  - job_name: loki
+    static_configs:
+      - targets: ["127.0.0.1:3100"]
+  - job_name: alloy
+    static_configs:
+      - targets: ["127.0.0.1:12345"]
+YAML
+}
+
+# Merge KEY=VALUE entries into the single [[runners]] environment line of config.toml.
+runner_env_merge() {
+  local cfg=/etc/gitlab-runner/config.toml existing list key e line
+  [[ $(grep -c '^\[\[runners\]\]' "$cfg") -eq 1 ]] || die "expected exactly one [[runners]] block in $cfg"
+  existing=$(grep -E '^  environment = \[' "$cfg" | sed -E 's/^  environment = \[(.*)\]$/\1/' || true)
+  list="$existing"
+  for e in "$@"; do
+    key="${e%%=*}"
+    if grep -q "\"${key}=" <<<"$list"; then
+      list=$(sed -E "s|\"${key}=[^\"]*\"|\"${e}\"|" <<<"$list")
+    else
+      list="${list:+${list}, }\"${e}\""
+    fi
+  done
+  line="  environment = [${list}]"
+  if grep -qE '^  environment = \[' "$cfg"; then
+    sed -i -E "s|^  environment = \[.*\]$|${line}|" "$cfg"
+  else
+    sed -i -E "0,/^  executor = .*/s||${line}\n&|" "$cfg"
+  fi
+  chmod 600 "$cfg"
+  runner_cfg_owner
+}
+
+# When the runner service runs as gitlab-runner (runner/install/users.sh), it must own its config after root edits it.
+runner_cfg_owner() {
+  local cfg=/etc/gitlab-runner/config.toml
+  if [[ -f /etc/systemd/system/gitlab-runner.service.d/10-service-user.conf ]] && id gitlab-runner >/dev/null 2>&1; then
+    chown -R gitlab-runner:gitlab-runner /etc/gitlab-runner
+    chmod 600 "$cfg"
+  fi
+}
+
+# --- service user for the monitoring and logging stacks (created by runner/install/users.sh) ---------------
+MON_USER="${MON_USER:-monitoring}"
+
+# Set MON_UID and MON_GID, or stop if the service user is missing.
+mon_ids() {
+  id "$MON_USER" >/dev/null 2>&1 || die "service user ${MON_USER} missing, run runner/install/users.sh first"
+  MON_UID=$(id -u "$MON_USER")
+  MON_GID=$(id -g "$MON_USER")
+}
+
+# env_set FILE KEY VALUE: set KEY=VALUE in a root-only env file.
+env_set() {
+  local f="$1" k="$2" v="$3"
+  touch "$f"
+  chmod 600 "$f"
+  if grep -q "^${k}=" "$f"; then
+    sed -i "s|^${k}=.*|${k}=${v}|" "$f"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$f"
+  fi
+}
+
+# stack_ids DIR [logging]: write the ids the compose file needs into DIR/.env.
+stack_ids() {
+  local dir="$1" docker_gid journal_gid
+  mon_ids
+  env_set "${dir}/.env" MON_UID "$MON_UID"
+  env_set "${dir}/.env" MON_GID "$MON_GID"
+  if [[ "${2:-}" == logging ]]; then
+    docker_gid=$(getent group docker | cut -d: -f3)
+    [[ -n "$docker_gid" ]] || die "docker group missing"
+    env_set "${dir}/.env" DOCKER_GID "$docker_gid"
+    journal_gid=$(getent group systemd-journal | cut -d: -f3)
+    [[ -n "$journal_gid" ]] || die "systemd-journal group missing"
+    # compose rejects equal group_add items, so the journal group is only added when it differs from docker's.
+    if [[ "$journal_gid" != "$docker_gid" ]]; then
+      printf 'services:\n  alloy:\n    group_add:\n      - "%s"\n' "$journal_gid" > "${dir}/docker-compose.override.yml"
+    else
+      rm -f "${dir}/docker-compose.override.yml"
+    fi
+  fi
+}
+
+# Config readable by the service user, writable by root only; .env (secrets) stays root-only.
+own_stack_dir() {
+  local dir="$1"
+  chown -R "root:${MON_USER}" "$dir"
+  chmod -R u=rwX,g=rX,o= "$dir"
+  if [[ -f "${dir}/.env" ]]; then
+    chown root:root "${dir}/.env"
+    chmod 600 "${dir}/.env"
+  fi
+}
+
+# Helper container that runs as root next to stack volumes (chown_volumes, the Grafana backup, the README restore command).
+# The single pin: alpine 3.20 is end of life. Pinned by the digest of the multi-arch index (amd64 and arm64), so a moved tag cannot change
+# what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
+# runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
+HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
+
+# Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
+chown_volumes() {
+  local dir="$1" project v
+  mon_ids
+  project=$(cd "$dir" && docker compose config --format json | jq -r .name)
+  (cd "$dir" && docker compose up --no-start --quiet-pull >/dev/null 2>&1) || (cd "$dir" && docker compose up --no-start >/dev/null)
+  for v in $(docker volume ls -q --filter "label=com.docker.compose.project=${project}"); do
+    # root in the helper only needs to chown and to enter other users' 0700 trees: no network, read-only rootfs, two capabilities, no setuid escalation, symlinks are not followed (-h)
+    docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+      --security-opt no-new-privileges \
+      -v "${v}:/v" "$HELPER_IMAGE" chown -Rh "${MON_UID}:${MON_GID}" /v
+  done
+}
+__SIC_EOF__
+chmod 755 "$R/common/lib.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/github-runner.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Opt-in ephemeral GitHub Actions runner for the PRIVATE repositories of one GitHub App installation (a personal account), on this host
+# next to the GitLab Runner. Installs the controller (runner/scripts/github-runner-ctl) and its systemd unit, the service user
+# github-runner, /etc/github-runner/config.env (no secrets) and the GitHub App private key /etc/github-runner/app.pem (mode 0600,
+# owner github-runner), pulls the pinned images (common/lib.sh), runs a self-test against GitHub and only then enables the service.
+# Each job gets a just-in-time runner in its own pod (network, rootless BuildKit sidecar, runner container); no Docker socket in jobs.
+# Needs: Docker, runner/install/job-limits.sh (ci-jobs.slice), a GitHub App (see runner/README.md). Safe to rerun: values already in
+# config.env are kept unless you pass them in the environment, a changed file gets a backup.
+#
+# Asks (read -rp) for what is missing: GH_OWNER (GitHub user), GH_APP_CLIENT_ID (the App's client ID) and the path of the downloaded
+# private key (.pem; copied, never printed; delete the download afterwards). Without a terminal pass them in the environment: GH_OWNER,
+# GH_APP_CLIENT_ID, GH_KEY_SRC.
+# Env (all optional, kept from config.env on a rerun): GH_INSTALLATION_ID (found by itself), GH_LABELS (default
+# self-hosted,linux,<arm64|x64>,hetzner), GH_RUNNER_GROUP_ID (1), GH_MAX_JOBS (1), GH_POLL_INTERVAL (30), GH_IDLE_TIMEOUT (300),
+# GH_EXCLUDE_REPOS, GH_BUILDKIT (1), GH_JOB_CPUS / GH_JOB_MEMORY (the GitLab per-job values from config.toml, else 1.5 / 1536m),
+# GH_BUILDKIT_CPUS (1), GH_BUILDKIT_MEMORY (768m), GH_JOB_SUBNET_POOL (10.213.0.0/20), GH_MAX_RUNTIME. See runner/README.md.
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
+
+ETC=/etc/github-runner
+CFG="${ETC}/config.env"
+KEY="${ETC}/app.pem"
+KEY_RESTART="${ETC}/key-restart-required"
+SVC_USER=github-runner
+UNIT=github-runner-ctl.service
+CTL=/usr/local/bin/github-runner-ctl
+SLICE=/etc/systemd/system/ci-jobs.slice
+USERNS_DROPIN=/etc/sysctl.d/91-github-runner-userns.conf
+GITLAB_CFG=/etc/gitlab-runner/config.toml
+DO_PULL=1 DO_SELFTEST=1 DO_START=1 ONLY_SELFTEST=0
+
+usage() {
+  sed -n '2,/^set -E/{/^set -E/!p}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  cat <<USAGE
+
+Usage: $0 [--self-test] [--no-self-test] [--no-start] [--no-pull]
+  --self-test     only run the self-test with the installed config: mint a JWT, get an installation token, list the repositories and
+                  print which would be served (names and visibility); starts and changes nothing
+  --no-self-test  install and enable without the live check against GitHub (offline)
+  --no-start      enable the service but do not start it
+  --no-pull       do not pull the images now (the controller pulls a missing image before its first job)
+Removal: see runner/docs/github-runner.md (Remove it). Stop the controller, review and remove only containers and networks labelled
+  io.server-init.github-runner=job; never prune unrelated networks. Running pods survive a controller stop.
+USAGE
+}
+
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) ONLY_SELFTEST=1 ;;
+    --no-self-test) DO_SELFTEST=0 ;;
+    --no-start) DO_START=0 ;;
+    --no-pull) DO_PULL=0 ;;
+    *) usage >&2; die "unknown option: $1" ;;
+  esac
+  shift
+done
+require_root
+
+run_selftest() {
+  runuser -u "$SVC_USER" -- env GHR_CONFIG="$CFG" "$CTL" self-test
+}
+
+if (( ONLY_SELFTEST )); then
+  [[ -x "$CTL" && -f "$CFG" ]] || die "not installed yet: run $0 first"
+  run_selftest
+  exit $?
+fi
+
+# ---- preflight ---------------------------------------------------------------------------------------------------------------
+command -v docker >/dev/null || die "docker is not installed"
+systemctl is-active --quiet docker || die "docker is not running"
+systemctl cat ci-job-isolation.service >/dev/null 2>&1 || die "ci-job-isolation.service missing: install the runner host tools first"
+getent group docker >/dev/null || die "no docker group"
+[[ -f "$SLICE" ]] || die "${SLICE} missing: run runner/setup.sh --job-limits first (the pods run inside ci-jobs.slice, which caps all CI jobs together)"
+read -r cgdrv cgver < <(docker info --format '{{.CgroupDriver}} {{.CgroupVersion}}' 2>/dev/null || echo "? ?")
+[[ "$cgdrv" == systemd && "$cgver" == 2 ]] || die "Docker must use cgroup v2 with the systemd cgroup driver (found: ${cgdrv} v${cgver}); --cgroup-parent ci-jobs.slice needs it"
+for t in curl jq openssl; do command -v "$t" >/dev/null || pkg_install "$t"; done
+command -v runuser >/dev/null || die "runuser (util-linux) is missing"
+[[ -f "${REPO_ROOT}/runner/scripts/github-runner-ctl" && -f "${REPO_ROOT}/runner/systemd/${UNIT}" ]] || die "incomplete copy of the repository"
+
+existing() { # existing KEY: the value in config.env, quotes removed
+  [[ -f "$CFG" ]] || return 0
+  { grep -m1 "^$1=" "$CFG" || true; } | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/'
+}
+# pick KEY DEFAULT: environment, else config.env, else DEFAULT
+pick() {
+  local v=${!1:-}
+  [[ -n "$v" ]] || v=$(existing "$1")
+  printf '%s' "${v:-$2}"
+}
+
+# Rootless BuildKit needs user namespaces for non-root (kernel: user.max_user_namespaces > 0). Only written when it is 0.
+buildkit_wanted=$(pick GH_BUILDKIT 1)
+if [[ "$buildkit_wanted" == 1 ]]; then
+  maxns=$(sysctl -n user.max_user_namespaces 2>/dev/null || echo 0)
+  if [[ "$maxns" =~ ^[0-9]+$ ]] && (( maxns == 0 )); then
+    printf '# Written by runner/install/github-runner.sh: rootless BuildKit needs user namespaces.\nuser.max_user_namespaces = 28633\n' > "${USERNS_DROPIN}.new"
+    if ! cmp -s "${USERNS_DROPIN}.new" "$USERNS_DROPIN" 2>/dev/null; then mv "${USERNS_DROPIN}.new" "$USERNS_DROPIN"; else rm -f "${USERNS_DROPIN}.new"; fi
+    sysctl -q -w user.max_user_namespaces=28633 || log "WARN: could not set user.max_user_namespaces now; it applies after a reboot"
+    log "user.max_user_namespaces was 0: set to 28633 (${USERNS_DROPIN}); rootless BuildKit needs it"
+  else
+    log "user.max_user_namespaces = ${maxns}: ok for rootless BuildKit"
+  fi
+  if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" == 1 ]]; then
+    log "WARN: kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu): rootless BuildKit will fail; set it to 0 in /etc/sysctl.d or use GH_BUILDKIT=0"
+  fi
+fi
+
+# ---- service user ----------------------------------------------------------------------------------------------------------------
+NOLOGIN=$(command -v nologin || echo /sbin/nologin)
+if ! id "$SVC_USER" >/dev/null 2>&1; then
+  useradd -r -U -M -d /nonexistent -s "$NOLOGIN" -c "GitHub Actions runner controller" "$SVC_USER"
+  log "created service user ${SVC_USER}"
+fi
+usermod -s "$NOLOGIN" "$SVC_USER" >/dev/null 2>&1 || true
+usermod -L "$SVC_USER" 2>/dev/null || true
+usermod -aG docker "$SVC_USER"   # root-equivalent: it is what the controller needs to start the pods
+install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
+
+# ---- the key ---------------------------------------------------------------------------------------------------------------------
+changed=0
+src=${GH_KEY_SRC:-}
+if [[ -z "$src" && ! -f "$KEY" ]]; then
+  [[ -t 0 ]] || die "no private key yet: pass its path in GH_KEY_SRC (the .pem downloaded from the GitHub App page)"
+  read -rp "Path of the downloaded GitHub App private key (.pem): " src
+fi
+if [[ -n "$src" ]]; then
+  [[ -f "$src" && -r "$src" ]] || die "cannot read ${src}"
+  openssl rsa -in "$src" -passin pass: -noout >/dev/null 2>&1 || die "${src} is not an RSA private key (download it from the GitHub App page, Generate a private key)"
+  if ! cmp -s "$src" "$KEY" 2>/dev/null; then
+    [[ ! -f "$KEY" ]] || backup "$KEY"
+    install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$src" "$KEY"
+    ( umask 077; : > "$KEY_RESTART" )
+    changed=1   # clear cached credentials after a successful self-test, even when config and code are unchanged
+    log "private key installed: ${KEY} (mode 0600, owner ${SVC_USER})"
+  fi
+  if [[ "$(realpath "$src")" != "$(realpath "$KEY")" ]]; then
+    log "REMINDER: the downloaded copy ${src} is still on disk: delete it once the self-test passes (shred -u '${src}')"
+  fi
+fi
+[[ -f "$KEY" ]] || die "no ${KEY}"
+openssl rsa -in "$KEY" -passin pass: -noout >/dev/null 2>&1 || die "${KEY} is not an RSA private key"
+chown "${SVC_USER}:${SVC_USER}" "$KEY"; chmod 0600 "$KEY"
+[[ ! -f "$KEY_RESTART" ]] || changed=1   # retry a rotation whose self-test or activation previously failed
+
+# ---- config ----------------------------------------------------------------------------------------------------------------------
+GH_OWNER=$(pick GH_OWNER "")
+if [[ -z "$GH_OWNER" ]]; then
+  [[ -t 0 ]] || die "GH_OWNER is not set: pass the GitHub user name in the environment"
+  read -rp "GitHub user (owner of the private repositories): " GH_OWNER
+fi
+GH_APP_CLIENT_ID=$(pick GH_APP_CLIENT_ID "")
+if [[ -z "$GH_APP_CLIENT_ID" ]]; then
+  [[ -t 0 ]] || die "GH_APP_CLIENT_ID is not set: pass the App's client ID in the environment"
+  read -rp "Client ID of the GitHub App (Iv...): " GH_APP_CLIENT_ID
+fi
+case "$(uname -m)" in aarch64|arm64) arch=arm64 ;; *) arch=x64 ;; esac
+# the per-job limits of the GitLab jobs (same numbers): from config.toml when job-limits.sh wrote them
+gl() { [[ -f "$GITLAB_CFG" ]] && sed -nE "s/^[[:space:]]+$1 = \"([^\"]+)\".*/\1/p" "$GITLAB_CFG" | head -n1 || true; }
+job_mem_default=$(gl memory); job_cpu_default=$(gl cpus)
+
+# only plain characters: the value goes through sed (env_set) and into a file the controller parses
+set_cfg() {
+  [[ "$2" =~ ^[A-Za-z0-9_.,@:/+-]*$ ]] || die "$1: unexpected characters in '$2'"
+  [[ -n "${CFG_DRY:-}" ]] || env_set "${CFG_TARGET:-$CFG}" "$1" "$2"
+}
+write_config() {
+  set_cfg GH_OWNER "$GH_OWNER"
+  set_cfg GH_APP_CLIENT_ID "$GH_APP_CLIENT_ID"
+  set_cfg GH_INSTALLATION_ID "$(pick GH_INSTALLATION_ID "")"
+  set_cfg GH_LABELS "$(pick GH_LABELS "self-hosted,linux,${arch},hetzner")"
+  set_cfg GH_RUNNER_GROUP_ID "$(pick GH_RUNNER_GROUP_ID 1)"
+  set_cfg GH_MAX_JOBS "$(pick GH_MAX_JOBS 1)"
+  set_cfg GH_POLL_INTERVAL "$(pick GH_POLL_INTERVAL 30)"
+  set_cfg GH_IDLE_TIMEOUT "$(pick GH_IDLE_TIMEOUT 300)"
+  set_cfg GH_MAX_RUNTIME "$(pick GH_MAX_RUNTIME 21900)"
+  set_cfg GH_EXCLUDE_REPOS "$(pick GH_EXCLUDE_REPOS "")"
+  set_cfg GH_BUILDKIT "$buildkit_wanted"
+  set_cfg GH_JOB_CPUS "$(pick GH_JOB_CPUS "${job_cpu_default:-1.5}")"
+  set_cfg GH_JOB_MEMORY "$(pick GH_JOB_MEMORY "${job_mem_default:-1536m}")"
+  set_cfg GH_BUILDKIT_CPUS "$(pick GH_BUILDKIT_CPUS 1)"
+  set_cfg GH_BUILDKIT_MEMORY "$(pick GH_BUILDKIT_MEMORY 768m)"
+  set_cfg GH_JOB_SUBNET_POOL "$(pick GH_JOB_SUBNET_POOL 10.213.0.0/20)"
+  set_cfg GH_KEY_FILE "$KEY"
+  # the images are pinned in common/lib.sh and follow the repository (a bump reaches the host with this script or update.sh)
+  set_cfg GH_RUNNER_IMAGE "$GHR_RUNNER_IMAGE"
+  set_cfg GH_BUILDKIT_IMAGE "$GHR_BUILDKIT_IMAGE"
+}
+CFG_DRY=1 write_config   # checks every value first: a bad one must not leave a half-written file
+cfg_candidate=$(mktemp)
+trap 'rm -f -- "$cfg_candidate"' EXIT
+if [[ -f "$CFG" ]]; then cp "$CFG" "$cfg_candidate"; fi
+CFG_TARGET="$cfg_candidate" write_config
+GHR_CONFIG="$cfg_candidate" bash "${REPO_ROOT}/runner/scripts/github-runner-ctl" check-config \
+  || die "candidate config is invalid; installed config was not changed"
+apply_config() { cat "$cfg_candidate" > "$CFG"; }
+if [[ ! -f "$CFG" ]]; then
+  printf '# Written by runner/install/github-runner.sh. No secrets here: the private key is %s.\n# Documentation: runner/README.md (GitHub Actions runner).\n' "$KEY" > "$CFG"
+  write_config   # a new file: nothing to back up
+else
+  cfg_before=$(sha256sum < "$CFG")
+  edit_with_backup "$CFG" apply_config
+  [[ "$cfg_before" == "$(sha256sum < "$CFG")" ]] || changed=1   # restart below so the controller reads the new values
+fi
+chown "root:${SVC_USER}" "$CFG"; chmod 0640 "$CFG"
+
+# ---- files, unit, images -----------------------------------------------------------------------------------------------------------
+install_if_changed() { # SRC DST MODE
+  if ! cmp -s "$1" "$2" 2>/dev/null || [[ "$(stat -c %a "$2")" != "$(printf '%o' "$((8#$3))")" ]]; then
+    [[ ! -f "$2" ]] || backup "$2"
+    install -m "$3" "$1" "$2"; restorecon_if "$2"; changed=1; log "installed ${2}"
+  fi
+}
+bash -n "${REPO_ROOT}/runner/scripts/github-runner-ctl" || die "syntax error in the controller"
+install_if_changed "${REPO_ROOT}/runner/scripts/github-runner-ctl" "$CTL" 0755
+install_if_changed "${REPO_ROOT}/runner/systemd/${UNIT}" "/etc/systemd/system/${UNIT}" 0644
+GHR_CONFIG="$CFG" "$CTL" check-config || die "config.env is invalid (see above); fix it and rerun"
+systemctl daemon-reload
+# ci-job-isolation reads GH_JOB_SUBNET_POOL: it lets the pod networks, and only them, reach the npm cache (docker0 IP, port 4873)
+systemctl reload-or-restart ci-job-isolation.service || die "ci-job-isolation failed: inspect journalctl -u ci-job-isolation.service before enabling the runner"
+
+if (( DO_PULL )); then
+  log "pulling the pinned images (the runner image is large)"
+  docker pull -q "$GHR_RUNNER_IMAGE" >/dev/null
+  if [[ "$(existing GH_BUILDKIT)" == 1 ]]; then docker pull -q "$GHR_BUILDKIT_IMAGE" >/dev/null; fi
+fi
+
+# ---- self-test, then enable --------------------------------------------------------------------------------------------------------
+if (( DO_SELFTEST )); then
+  log "self-test against GitHub (starts nothing)"
+  if ! run_selftest; then
+    log "self-test FAILED: service activation is unchanged (an existing service may still be running). Fix the App, then rerun ${0} to self-test and apply activation/restart."
+    exit 1
+  fi
+fi
+systemctl enable "$UNIT" >/dev/null 2>&1
+if (( DO_START )); then
+  if systemctl is-active --quiet "$UNIT"; then
+    if (( changed )); then systemctl restart "$UNIT"; log "${UNIT} restarted (running pods keep running)"; fi
+  else
+    systemctl start "$UNIT"
+  fi
+  sleep 3
+  systemctl is-active --quiet "$UNIT" || { journalctl -u github-runner-ctl -n 20 --no-pager || true; die "${UNIT} is not running"; }
+  rm -f -- "$KEY_RESTART"
+  log "OK: ${UNIT} running. Use it with runs-on: [self-hosted, hetzner] in a private repository; logs: journalctl -u github-runner-ctl -f; health shows the status"
+else
+  log "OK: ${UNIT} enabled, not started (--no-start): systemctl start github-runner-ctl"
+fi
+__SIC_EOF__
+chmod 755 "$R/runner/install/github-runner.sh"
+
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/github-runner-ctl" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# github-runner-ctl: controller of the opt-in ephemeral GitHub Actions runner (runner/install/github-runner.sh installs it).
+#
+# It authenticates as a GitHub App (private key on this host), finds the PRIVATE repositories of the App installation, watches
+# them for queued jobs that ask for this runner's labels and, for each such job, starts one "pod" on this host:
+#   - a just-in-time (JIT) runner: GitHub creates a one-job runner (POST .../actions/runners/generate-jitconfig), nothing long-lived
+#     is registered and no registration token is stored;
+#   - the pod is a per-job Docker network, an optional rootless BuildKit sidecar (TLS with an ephemeral CA) and the runner container.
+# The runner container has no Docker socket, no capabilities, no sudo and runs inside ci-jobs.slice with CPU/memory/pid limits.
+# Public, archived, internal and excluded repositories are never served; no pod is started for a fork pull request or for labels that are not
+# ours, and a pod that is given such a job anyway (an idle runner takes ANY queued job of its repository) is killed. Max GH_MAX_JOBS pods.
+#
+# Usage: github-runner-ctl [run | once | self-test | check-config | --help]
+#   run        poll forever (what github-runner-ctl.service runs)
+#   once       one poll, then exit (for tests and debugging)
+#   self-test  mint a JWT, get an installation token, list the repositories and print which would be served; starts nothing
+#   check-config  validate the config file only (exit 2 and the problems when it is invalid)
+# Config: /etc/github-runner/config.env (GHR_CONFIG overrides; no secrets), key: GH_KEY_FILE (default /etc/github-runner/app.pem).
+# State: GHR_STATE_DIR (default /run/github-runner): status.json (read by health), jobs/<pod>/ (per-pod secrets, mode 0700 parent), cache/.
+# Log: one "level=... event=..." line per decision to stderr (the journal); tokens, the JIT config and the key are never logged.
+# Exit codes: 0 ok, 1 runtime error, 2 usage or invalid config.
+set -Eeuo pipefail
+
+CONFIG="${GHR_CONFIG:-/etc/github-runner/config.env}"
+STATE_DIR="${GHR_STATE_DIR:-/run/github-runner}"
+LABEL_JOB=io.server-init.github-runner       # value "job" on every container of a pod (the idle gates and health look for it)
+LABEL_ROLE=io.server-init.github-runner.role
+LABEL_POD=io.server-init.github-runner.pod
+LABEL_REPO=io.server-init.github-runner.repo
+LABEL_RID=io.server-init.github-runner.runner-id
+LABEL_STARTED=io.server-init.github-runner.started
+LABEL_RUN=io.server-init.github-runner.run-id
+LABEL_SUBNET=io.server-init.github-runner.subnet
+POD_PREFIX_LEN=28                            # every pod network is a /28 (14 addresses) carved from GH_JOB_SUBNET_POOL
+POD_RE='^[0-9]{10}-[0-9a-f]{6}$'
+# Labels GitHub adds by itself: a job that asks only for these is not ours; our own label is a custom one.
+SYSTEM_LABELS="self-hosted linux windows macos x64 arm arm64 x86"
+# Rate limit: below this many requests left the poll only manages pods; JIT creation needs a few requests.
+RATE_LOW=500
+RATE_STOP=100
+
+# ---- logging --------------------------------------------------------------------------------------------------------------------
+INST_TOKEN="" JWT="" JWT_AT=0
+declare -A REPO_TOK=() REPO_TOK_EXP=()
+scrub() {
+  local t=$1 k
+  if [[ -n "$INST_TOKEN" ]]; then t=${t//"$INST_TOKEN"/'[token]'}; fi
+  if [[ -n "$JWT" ]]; then t=${t//"$JWT"/'[jwt]'}; fi
+  for k in "${!REPO_TOK[@]}"; do if [[ -n "${REPO_TOK[$k]}" ]]; then t=${t//"${REPO_TOK[$k]}"/'[token]'}; fi; done
+  printf '%s' "$t"
+}
+fmt_val() { local v=${1//$'\n'/ }; v=${v//\"/\'}; if [[ -z "$v" || "$v" =~ [[:space:]=] ]]; then printf '"%s"' "$v"; else printf '%s' "$v"; fi; }
+# say LEVEL EVENT [key=value ...]: <N> is the syslog priority the journal understands.
+say() {
+  local level=$1 event=$2 out="" kv prio=6; shift 2
+  case "$level" in error) prio=3 ;; warn) prio=4 ;; esac
+  for kv in "$@"; do out+=" ${kv%%=*}=$(fmt_val "${kv#*=}")"; done
+  scrub "<${prio}>level=${level} event=${event}${out}" >&2; printf '\n' >&2
+}
+die_cfg() { say error config_invalid "problem=$*"; exit 2; }
+
+usage() {
+  sed -n '2,/^set -E/{/^set -E/!p}' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ---- configuration --------------------------------------------------------------------------------------------------------------
+GH_OWNER="" GH_APP_CLIENT_ID="" GH_INSTALLATION_ID="" GH_LABELS="" GH_RUNNER_GROUP_ID=1 GH_MAX_JOBS=1 GH_POLL_INTERVAL=30
+GH_IDLE_TIMEOUT=300 GH_MAX_RUNTIME=21900 GH_EXCLUDE_REPOS="" GH_ALLOW_FORK_RUNS=0 GH_RUNNER_IMAGE="" GH_BUILDKIT_IMAGE="" GH_BUILDKIT=1
+GH_JOB_CPUS=1.5 GH_JOB_MEMORY=1536m GH_JOB_SHM=268435456 GH_JOB_PIDS=2048 GH_BUILDKIT_CPUS=1 GH_BUILDKIT_MEMORY=768m GH_BUILDKIT_PIDS=2048
+GH_JIT_PASS=env GH_KEY_FILE=/etc/github-runner/app.pem GH_API_URL=https://api.github.com GH_JOB_SUBNET_POOL=10.213.0.0/20
+CONFIG_KEYS="GH_OWNER GH_APP_CLIENT_ID GH_INSTALLATION_ID GH_LABELS GH_RUNNER_GROUP_ID GH_MAX_JOBS GH_POLL_INTERVAL GH_IDLE_TIMEOUT GH_MAX_RUNTIME GH_EXCLUDE_REPOS GH_ALLOW_FORK_RUNS GH_RUNNER_IMAGE GH_BUILDKIT_IMAGE GH_BUILDKIT GH_JOB_CPUS GH_JOB_MEMORY GH_JOB_SHM GH_JOB_PIDS GH_BUILDKIT_CPUS GH_BUILDKIT_MEMORY GH_BUILDKIT_PIDS GH_JIT_PASS GH_KEY_FILE GH_API_URL GH_JOB_SUBNET_POOL"
+
+# KEY=VALUE lines only (optionally "double quoted"), never executed.
+load_config() {
+  local line key val
+  [[ -r "$CONFIG" ]] || die_cfg "cannot read ${CONFIG}"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" =~ ^(GH_[A-Z0-9_]+)=(.*)$ ]] || die_cfg "unparsable line in ${CONFIG}: expected KEY=VALUE"
+    key=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+    if [[ "$val" == \"*\" && ${#val} -ge 2 ]]; then val=${val#\"}; val=${val%\"}; fi
+    if [[ " ${CONFIG_KEYS} " == *" ${key} "* ]]; then printf -v "$key" '%s' "$val"; else say warn config_unknown_key "key=${key}"; fi
+  done < "$CONFIG"
+}
+
+ip2int() { local IFS=.; local -a o; read -ra o <<<"$1"; echo $(( (o[0] << 24) + (o[1] << 16) + (o[2] << 8) + o[3] )); }
+int2ip() { echo "$(( ($1 >> 24) & 255 )).$(( ($1 >> 16) & 255 )).$(( ($1 >> 8) & 255 )).$(( $1 & 255 ))"; }
+# pool_check CIDR: a private IPv4 block /16 to /27, aligned; adds to CFG_ERRORS otherwise.
+pool_check() {
+  local c=$1 ip len a b o n mask
+  if [[ ! "$c" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then bad "invalid GH_JOB_SUBNET_POOL: '${c}' (expected a CIDR such as 10.213.0.0/20)"; return 0; fi
+  ip=${c%/*}; len=$((10#${c#*/}))
+  for o in ${ip//./ }; do (( 10#$o <= 255 )) || { bad "invalid GH_JOB_SUBNET_POOL: octet ${o} out of range"; return 0; }; done
+  (( len >= 16 && len <= POD_PREFIX_LEN - 1 )) || { bad "invalid GH_JOB_SUBNET_POOL: prefix /${len} must be between /16 and /$((POD_PREFIX_LEN - 1)) (each pod gets a /${POD_PREFIX_LEN})"; return 0; }
+  n=$(ip2int "$ip"); mask=$(( (0xFFFFFFFF << (32 - len)) & 0xFFFFFFFF ))
+  (( (n & mask) == n )) || { bad "invalid GH_JOB_SUBNET_POOL: ${c} is not aligned (network address would be $(int2ip $((n & mask))))"; return 0; }
+  a=$(( n >> 24 )); b=$(( (n >> 16) & 255 ))
+  if (( a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168) )); then :; else bad "invalid GH_JOB_SUBNET_POOL: ${c} is not a private (RFC 1918) block"; fi
+}
+
+CFG_ERRORS=()
+bad() { CFG_ERRORS+=("$*"); }
+rx() { [[ "$2" =~ $3 ]] || bad "invalid $1: '$2' (expected $4)"; }
+
+validate_config() {
+  local l e image_re='^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$' have_custom=0 have_self=0
+  CFG_ERRORS=()
+  rx GH_OWNER "$GH_OWNER" '^[A-Za-z0-9]([A-Za-z0-9-]{0,38})$' "a GitHub user or organization name"
+  rx GH_APP_CLIENT_ID "$GH_APP_CLIENT_ID" '^[A-Za-z0-9_.-]{4,64}$' "the App client ID (Iv1.... or Iv23...) or numeric App ID"
+  rx GH_INSTALLATION_ID "$GH_INSTALLATION_ID" '^([0-9]{1,15})?$' "empty (auto-discovered) or digits"
+  rx GH_RUNNER_GROUP_ID "$GH_RUNNER_GROUP_ID" '^[0-9]{1,9}$' "digits (1 is the default group)"
+  rx GH_MAX_JOBS "$GH_MAX_JOBS" '^[1-9][0-9]?$' "1 to 99"
+  rx GH_POLL_INTERVAL "$GH_POLL_INTERVAL" '^[0-9]{2,4}$' "seconds, 10 to 3600"
+  rx GH_IDLE_TIMEOUT "$GH_IDLE_TIMEOUT" '^[0-9]{2,5}$' "seconds, 60 to 86400"
+  rx GH_MAX_RUNTIME "$GH_MAX_RUNTIME" '^[0-9]{3,6}$' "seconds, 600 to 172800"
+  rx GH_ALLOW_FORK_RUNS "$GH_ALLOW_FORK_RUNS" '^[01]$' "0 or 1"
+  rx GH_BUILDKIT "$GH_BUILDKIT" '^[01]$' "0 or 1"
+  rx GH_JIT_PASS "$GH_JIT_PASS" '^(env|arg)$' "env or arg"
+  rx GH_RUNNER_IMAGE "$GH_RUNNER_IMAGE" "$image_re" "name:tag@sha256:<64 hex>"
+  if [[ "$GH_BUILDKIT" == 1 ]]; then rx GH_BUILDKIT_IMAGE "$GH_BUILDKIT_IMAGE" "$image_re" "name:tag@sha256:<64 hex>"; fi
+  rx GH_JOB_CPUS "$GH_JOB_CPUS" '^[0-9]+(\.[0-9]+)?$' "for example 1.5"
+  rx GH_BUILDKIT_CPUS "$GH_BUILDKIT_CPUS" '^[0-9]+(\.[0-9]+)?$' "for example 1"
+  rx GH_JOB_MEMORY "$GH_JOB_MEMORY" '^[0-9]+[kmg]$' "for example 1536m"
+  rx GH_BUILDKIT_MEMORY "$GH_BUILDKIT_MEMORY" '^[0-9]+[kmg]$' "for example 768m"
+  rx GH_JOB_SHM "$GH_JOB_SHM" '^[0-9]+$' "bytes"
+  rx GH_JOB_PIDS "$GH_JOB_PIDS" '^[0-9]+$' "a number"
+  rx GH_BUILDKIT_PIDS "$GH_BUILDKIT_PIDS" '^[0-9]+$' "a number"
+  rx GH_KEY_FILE "$GH_KEY_FILE" '^/[A-Za-z0-9._/-]+$' "an absolute path"
+  rx GH_API_URL "$GH_API_URL" '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._/-]*)?$' "an https:// URL without trailing slash"
+  [[ "$GH_API_URL" != */ ]] || bad "invalid GH_API_URL: no trailing slash"
+  pool_check "$GH_JOB_SUBNET_POOL"
+  # numeric ranges (only when the shape is right)
+  if [[ "$GH_POLL_INTERVAL" =~ ^[0-9]+$ ]] && (( 10#$GH_POLL_INTERVAL < 10 || 10#$GH_POLL_INTERVAL > 3600 )); then bad "GH_POLL_INTERVAL out of range: ${GH_POLL_INTERVAL} (10 to 3600)"; fi
+  if [[ "$GH_IDLE_TIMEOUT" =~ ^[0-9]+$ ]] && (( 10#$GH_IDLE_TIMEOUT < 60 || 10#$GH_IDLE_TIMEOUT > 86400 )); then bad "GH_IDLE_TIMEOUT out of range: ${GH_IDLE_TIMEOUT} (60 to 86400)"; fi
+  if [[ "$GH_MAX_RUNTIME" =~ ^[0-9]+$ ]] && (( 10#$GH_MAX_RUNTIME < 600 || 10#$GH_MAX_RUNTIME > 172800 )); then bad "GH_MAX_RUNTIME out of range: ${GH_MAX_RUNTIME} (600 to 172800)"; fi
+  # labels: comma separated; must contain self-hosted and at least one custom label (so a plain "runs-on: self-hosted" job is never taken)
+  if [[ -z "$GH_LABELS" ]]; then
+    bad "GH_LABELS is empty"
+  else
+    local -a labels; IFS=, read -ra labels <<<"$GH_LABELS"
+    for l in "${labels[@]}"; do
+      [[ "$l" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { bad "invalid label in GH_LABELS: '${l}'"; continue; }
+      l=${l,,}
+      [[ "$l" == self-hosted ]] && have_self=1
+      [[ " ${SYSTEM_LABELS} " == *" ${l} "* ]] || have_custom=1
+    done
+    (( have_self )) || bad "GH_LABELS must contain self-hosted"
+    (( have_custom )) || bad "GH_LABELS needs at least one custom label (for example hetzner): jobs that only ask for self-hosted, linux or the architecture are not taken"
+  fi
+  local -a excl; IFS=, read -ra excl <<<"$GH_EXCLUDE_REPOS"
+  for e in "${excl[@]}"; do
+    [[ "$e" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$ ]] || bad "invalid entry in GH_EXCLUDE_REPOS: '${e}' (owner/name or name)"
+  done
+  (( ${#CFG_ERRORS[@]} == 0 ))
+}
+
+# Derived values, after validation.
+derive_config() {
+  local h
+  API_URL=${GH_API_URL}
+  h=$(hostname -s 2>/dev/null || echo host); h=${h//[^A-Za-z0-9-]/-}
+  NAME_PREFIX="ghr-${h:0:30}-"
+  LABELS_JSON=$(printf '%s' "$GH_LABELS" | tr ',' '\n' | jq -R . | jq -sc .)
+  LABELS_LC=$(jq -c 'map(ascii_downcase)' <<<"$LABELS_JSON")
+  CUSTOM_LC=$(jq -c --arg sys "$SYSTEM_LABELS" '[.[] | select(. as $x | ($sys | split(" ")) | index($x) | not)]' <<<"$LABELS_LC")
+  local e ex=() excl
+  IFS=, read -ra excl <<<"$GH_EXCLUDE_REPOS"
+  for e in "${excl[@]}"; do
+    [[ "$e" == */* ]] || e="${GH_OWNER}/${e}"
+    ex+=("${e,,}")
+  done
+  if (( ${#ex[@]} )); then EXCL_JSON=$(printf '%s\n' "${ex[@]}" | jq -R . | jq -sc .); else EXCL_JSON='[]'; fi
+  MAX_JOBS=$((10#$GH_MAX_JOBS)); POLL=$((10#$GH_POLL_INTERVAL)); IDLE_TIMEOUT=$((10#$GH_IDLE_TIMEOUT)); MAX_RUNTIME=$((10#$GH_MAX_RUNTIME))
+}
+
+# ---- GitHub API -----------------------------------------------------------------------------------------------------------------
+TMP="" CACHE="" JOBS="" INSTALL_ID="" INST_EXP=0
+RATE_REMAINING="" RATE_LIMIT="" RATE_RESET=""
+API_CODE="" API_OUT="" API_HDR=""
+
+hdr_get() { awk -v want="$2" 'BEGIN { FS = ": *" } { sub(/\r$/, "") } tolower($1) == want { sub(/^[^:]*: */, ""); print; exit }' "$1"; }
+
+# api METHOD PATH AUTH(jwt|inst|repo:OWNER/NAME|none) [BODYFILE] [extra curl args...]: sets API_CODE (000 on a network error or while
+# API_OFF=1), API_OUT (body), API_HDR. "inst" is the installation token (Actions: read, all repositories); "repo:" is a token of one repository
+# with Administration: write (runners), minted on first use. The token goes to curl through "-K -" (stdin), never through argv.
+API_OFF=0
+api() {
+  local method=$1 path=$2 auth=$3 body=${4:-} tok="" n=$#; shift $(( n < 4 ? n : 4 ))
+  if (( API_OFF )); then API_CODE=000; : > "$API_OUT"; : > "$API_HDR"; return 0; fi
+  case "$auth" in
+    jwt) tok=$JWT ;;
+    inst) tok=$INST_TOKEN ;;
+    repo:*) if ensure_repo_token "${auth#repo:}"; then tok=${REPO_TOK[${auth#repo:}]}; else API_CODE=000; : > "$API_OUT"; : > "$API_HDR"; return 0; fi ;;
+  esac
+  local -a args=(-sS -m 30 --connect-timeout 10 -X "$method" -D "$API_HDR" -o "$API_OUT" -w '%{http_code}'
+                 -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -H 'User-Agent: github-runner-ctl')
+  if [[ -n "$body" ]]; then args+=(-H 'Content-Type: application/json' --data-binary "@${body}"); fi
+  args+=("$@")
+  : > "$API_OUT"; : > "$API_HDR"
+  API_CODE=000
+  if [[ -n "$tok" ]]; then
+    API_CODE=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl "${args[@]}" -K - "${API_URL}${path}" 2>/dev/null) || API_CODE=000
+  else
+    API_CODE=$(curl "${args[@]}" "${API_URL}${path}" 2>/dev/null) || API_CODE=000
+  fi
+  if [[ "$auth" == inst || "$auth" == repo:* ]]; then
+    local v
+    v=$(hdr_get "$API_HDR" x-ratelimit-remaining); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_REMAINING=$v; fi
+    v=$(hdr_get "$API_HDR" x-ratelimit-limit); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_LIMIT=$v; fi
+    v=$(hdr_get "$API_HDR" x-ratelimit-reset); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_RESET=$v; fi
+  fi
+  [[ "$API_CODE" =~ ^[0-9]{3}$ ]] || API_CODE=000
+}
+
+# A short, secret-free description of the last failed call.
+api_msg() {
+  local msg=""
+  if [[ -s "$API_OUT" ]]; then msg=$(jq -r '.message // empty' "$API_OUT" 2>/dev/null | head -c 200 || true); fi
+  if [[ "$API_CODE" == 000 ]]; then msg="no answer (network error or timeout)"; fi
+  printf '%s' "${msg:-none}"
+}
+api_err() { printf 'http=%s message=%s' "$API_CODE" "$(api_msg)"; }
+
+LAST_ERROR=""
+PAUSE_UNTIL=0
+# fail_api EVENT [key=value...]: log the last call as an error, remember it for the status file, honor Retry-After. Always returns 1.
+fail_api() {
+  local ev=$1 ra; shift
+  LAST_ERROR="${ev}: http ${API_CODE} $(api_msg)"
+  say error "$ev" "http=${API_CODE}" "message=$(api_msg)" "$@"
+  if [[ "$API_CODE" == 401 ]]; then INST_TOKEN=""; INST_EXP=0; REPO_TOK=(); REPO_TOK_EXP=(); fi
+  ra=$(hdr_get "$API_HDR" retry-after)
+  if [[ "$ra" =~ ^[0-9]+$ ]]; then PAUSE_UNTIL=$(( $(date +%s) + (ra > 900 ? 900 : ra) )); say warn rate_limited "retry_after=${ra}"; fi
+  if [[ "$API_CODE" == 403 || "$API_CODE" == 429 ]] && [[ "$RATE_REMAINING" == 0 && "$RATE_RESET" =~ ^[0-9]+$ ]]; then
+    PAUSE_UNTIL=$(( RATE_RESET + 5 )); say warn rate_limit_exhausted "until=${RATE_RESET}"
+  fi
+  return 1
+}
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# make_jwt: RS256, iat = now-60 (clock drift), exp = now+540 (< 10 min), iss = App client ID.
+make_jwt() {
+  local now header payload si sig
+  now=$(date +%s)
+  header='{"alg":"RS256","typ":"JWT"}'
+  payload=$(jq -cn --argjson iat $((now - 60)) --argjson exp $((now + 540)) --arg iss "$GH_APP_CLIENT_ID" '{iat: $iat, exp: $exp, iss: $iss}')
+  si="$(printf '%s' "$header" | b64url).$(printf '%s' "$payload" | b64url)"
+  sig=$(printf '%s' "$si" | openssl dgst -sha256 -sign "$GH_KEY_FILE" 2>/dev/null | b64url) || sig=""
+  if [[ -z "$sig" ]]; then
+    LAST_ERROR="cannot sign the JWT with ${GH_KEY_FILE}"
+    say error jwt_failed "problem=cannot sign with the key (missing, unreadable or not an RSA key)" "key=${GH_KEY_FILE}"
+    return 1
+  fi
+  JWT="${si}.${sig}"; JWT_AT=$now
+}
+
+LAST_TOKEN_OK=0
+# ensure_token: installation token, cached until 5 minutes before it expires.
+ensure_token() {
+  local now exp body
+  now=$(date +%s)
+  if [[ -n "$INST_TOKEN" ]] && (( INST_EXP > now + 300 )); then return 0; fi
+  make_jwt || return 1
+  if [[ -z "$INSTALL_ID" ]]; then
+    INSTALL_ID=${GH_INSTALLATION_ID}
+  fi
+  if [[ -z "$INSTALL_ID" ]]; then
+    api GET "/users/${GH_OWNER}/installation" jwt
+    if [[ "$API_CODE" != 200 ]]; then fail_api installation_discovery_failed "owner=${GH_OWNER}" "hint=install the App on this account and check GH_OWNER and GH_APP_CLIENT_ID"; return 1; fi
+    INSTALL_ID=$(jq -r '.id // empty' "$API_OUT")
+    [[ "$INSTALL_ID" =~ ^[0-9]+$ ]] || { INSTALL_ID=""; LAST_ERROR="installation id missing in the answer"; say error installation_discovery_failed "problem=no id in the answer"; return 1; }
+    say info installation_discovered "installation=${INSTALL_ID}"
+  fi
+  body="${TMP}/token-request.json"
+  # Least privilege: this token only reads runs and jobs (Actions: read; Metadata is implied). Whatever needs Administration: write
+  # (creating and deleting runners) uses a token of the one repository concerned, see ensure_repo_token.
+  printf '%s' '{"permissions":{"actions":"read"}}' > "$body"
+  api POST "/app/installations/${INSTALL_ID}/access_tokens" jwt "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then fail_api token_failed "installation=${INSTALL_ID}" "hint=the App needs Administration: write and Actions: read (repository permissions)"; return 1; fi
+  INST_TOKEN=$(jq -r '.token // empty' "$API_OUT")
+  exp=$(jq -r '.expires_at // empty' "$API_OUT")
+  : > "$API_OUT"
+  [[ -n "$INST_TOKEN" ]] || { LAST_ERROR="no token in the answer"; say error token_failed "problem=no token in the answer"; return 1; }
+  INST_EXP=$(date -u -d "$exp" +%s 2>/dev/null || echo $((now + 3000)))
+  LAST_TOKEN_OK=$now
+  say info token_minted "installation=${INSTALL_ID}" "valid_for=$((INST_EXP - now))s"
+}
+
+# ensure_repo_token OWNER/NAME: a token for that one repository with Administration: write only, cached until 5 minutes before it expires.
+ensure_repo_token() {
+  local repo=$1 now exp body
+  now=$(date +%s)
+  if [[ -n "${REPO_TOK[$repo]:-}" ]] && (( ${REPO_TOK_EXP[$repo]:-0} > now + 300 )); then return 0; fi
+  [[ -n "$INSTALL_ID" ]] || return 1
+  if [[ -z "$JWT" ]] || (( now - JWT_AT > 480 )); then make_jwt || return 1; fi
+  body="${TMP}/repo-token-request.json"
+  jq -n --arg r "${repo#*/}" '{repositories: [$r], permissions: {administration: "write"}}' > "$body" || return 1
+  api POST "/app/installations/${INSTALL_ID}/access_tokens" jwt "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then fail_api token_failed "installation=${INSTALL_ID}" "repo=${repo}" "scope=administration" "hint=the App needs Administration: Read and write and access to this repository"; return 1; fi
+  REPO_TOK[$repo]=$(jq -r '.token // empty' "$API_OUT")
+  exp=$(jq -r '.expires_at // empty' "$API_OUT")
+  : > "$API_OUT"
+  if [[ -z "${REPO_TOK[$repo]}" ]]; then LAST_ERROR="no token in the answer"; return 1; fi
+  REPO_TOK_EXP[$repo]=$(date -u -d "$exp" +%s 2>/dev/null || echo $((now + 3000)))
+}
+
+# api_get_cached PATH [AUTH]: conditional GET (If-None-Match); 304 costs no quota. Sets API_BODY to the cached body, CACHE_FRESH=1 when it changed.
+API_BODY="" CACHE_FRESH=0
+api_get_cached() {
+  local path=$1 auth=${2:-inst} key etag="" extra=()
+  key=$(printf '%s' "$path" | sha1sum | cut -c1-20)
+  if [[ -s "${CACHE}/${key}.etag" && -s "${CACHE}/${key}.json" ]]; then etag=$(<"${CACHE}/${key}.etag"); extra=(-H "If-None-Match: ${etag}"); fi
+  api GET "$path" "$auth" "" "${extra[@]}"
+  API_BODY="${CACHE}/${key}.json"
+  case "$API_CODE" in
+    200)
+      cp "$API_OUT" "$API_BODY"
+      etag=$(hdr_get "$API_HDR" etag)
+      if [[ -n "$etag" ]]; then printf '%s' "$etag" > "${CACHE}/${key}.etag"; else rm -f "${CACHE}/${key}.etag"; fi
+      CACHE_FRESH=1 ;;
+    304) CACHE_FRESH=0; touch "$API_BODY" "${CACHE}/${key}.etag" 2>/dev/null || true ;;   # a hit keeps the entry from being pruned
+    *) return 1 ;;
+  esac
+}
+
+# ---- repositories ---------------------------------------------------------------------------------------------------------------
+# get_paged PATH FIELD PER_PAGE MAXPAGES [AUTH]: GETs PATH?...&page=N (conditional, cached) until the last page and merges the arrays named
+# FIELD of all pages into PAGED_FILE as {FIELD: [...]}. PAGED_TRUNCATED=1 when MAXPAGES was not enough. Returns 1 when a page fails.
+PAGED_FILE="" PAGED_TRUNCATED=0
+get_paged() {
+  local base=$1 field=$2 per=$3 max=$4 auth=${5:-inst} page=1 more sep='&'
+  [[ "$base" == *\? ]] && sep=''; [[ "$base" == *\?* ]] || sep='?'
+  PAGED_FILE="${TMP}/paged.json"; PAGED_TRUNCATED=0
+  : > "${TMP}/paged.pages"
+  while :; do
+    api_get_cached "${base}${sep}per_page=${per}&page=${page}" "$auth" || return 1
+    printf '%s\n' "$API_BODY" >> "${TMP}/paged.pages"
+    more=0
+    # Link: rel="next" on a fresh answer; a 304 may come without headers, then a full page means there may be more
+    if grep -qi 'rel="next"' "$API_HDR" 2>/dev/null || { (( CACHE_FRESH == 0 )) && [[ "$(jq --arg f "$field" '.[$f] | length' "$API_BODY")" == "$per" ]]; }; then more=1; fi
+    (( more )) || break
+    if (( page >= max )); then PAGED_TRUNCATED=1; break; fi
+    page=$((page + 1))
+  done
+  # shellcheck disable=SC2046
+  jq -s --arg f "$field" '{($f): [.[] | .[$f][]?]}' $(cat "${TMP}/paged.pages") > "$PAGED_FILE"
+}
+
+SERVED=() SKIPPED=() ALL_REPOS=()
+REPOS_CHANGED=0
+# list_repos: fills SERVED (repo full names to serve) and SKIPPED ("name reason"), ALL_REPOS (everything the installation sees).
+list_repos() {
+  local merged tsv name why sum
+  get_paged "/installation/repositories?" repositories 100 50 || { fail_api repo_list_failed; return 1; }
+  merged=$PAGED_FILE
+  if (( PAGED_TRUNCATED )); then say warn repo_list_truncated "pages=50" "hint=more than 5000 repositories; the rest are not served"; fi
+  sum=$(sha1sum < "$merged" | cut -c1-40)
+  REPOS_CHANGED=0
+  if [[ "$sum" != "$(cat "${STATE_DIR}/repos.sha" 2>/dev/null || true)" ]]; then REPOS_CHANGED=1; printf '%s' "$sum" > "${STATE_DIR}/repos.sha"; fi
+  # Fail closed: a repository is served only when every flag says private. An absent field counts as "not private".
+  tsv=$(jq -r --arg owner "${GH_OWNER,,}" --argjson excl "$EXCL_JSON" '
+    .repositories[] | . as $r | ($r.full_name // "") as $n |
+    (if $n == "" then "unnamed"
+     elif ((($r.owner.login // "") | ascii_downcase) != $owner) then "other-owner"
+     elif $r.private != true then "public"
+     elif $r.visibility != "private" then "visibility-" + (($r.visibility // "unknown") | tostring)
+     elif $r.archived != false then "archived"
+     elif $r.disabled == true then "disabled"
+     elif ($excl | index($n | ascii_downcase)) != null then "excluded"
+     else "" end) as $why | [$n, $why] | @tsv' "$merged")
+  SERVED=() SKIPPED=() ALL_REPOS=()
+  while IFS=$'\t' read -r name why; do
+    [[ -n "$name" ]] || continue
+    [[ "$name" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { say warn repo_ignored "reason=unexpected-name"; continue; }
+    ALL_REPOS+=("$name")
+    if [[ -z "$why" ]]; then SERVED+=("$name"); else SKIPPED+=("${name} ${why}"); fi
+  done <<<"$tsv"
+}
+
+# ---- pods (docker) --------------------------------------------------------------------------------------------------------------
+PS_FORMAT="{{.Names}}|{{.State}}|{{.Label \"${LABEL_ROLE}\"}}|{{.Label \"${LABEL_POD}\"}}|{{.Label \"${LABEL_REPO}\"}}|{{.Label \"${LABEL_RID}\"}}|{{.Label \"${LABEL_STARTED}\"}}"
+declare -A POD_STATE=() POD_REPO=() POD_RID=() POD_STARTED=() POD_BK=() IDLE_BY_REPO=() WARNED=()
+ACTIVE=0 IDLE=0
+CONSEC_FAIL=0 BACKOFF_UNTIL=0 UPDATE_REQUIRED=0 IMAGE_CREATED=""
+
+save_state() { printf 'CONSEC_FAIL=%s\nBACKOFF_UNTIL=%s\nUPDATE_REQUIRED=%s\nIMAGE_CREATED=%s\n' "$CONSEC_FAIL" "$BACKOFF_UNTIL" "$UPDATE_REQUIRED" "$IMAGE_CREATED" > "${STATE_DIR}/ctl.state"; }
+load_state() {
+  local k v
+  [[ -f "${STATE_DIR}/ctl.state" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ "$v" =~ ^[0-9]*$ ]] || continue
+    case "$k" in CONSEC_FAIL|BACKOFF_UNTIL|UPDATE_REQUIRED|IMAGE_CREATED) printf -v "$k" '%s' "$v" ;; esac
+  done < "${STATE_DIR}/ctl.state"
+}
+
+# scan_pods: fills POD_* from the labels of the containers; the labels are the persistent state, so a restarted controller adopts running pods.
+# Returns 1 when docker does not answer: that is not "no pods" and the caller must not clean up or start anything on it.
+scan_pods() {
+  local name state role pod repo rid started out
+  out=$(docker ps -a --filter "label=${LABEL_JOB}=job" --format "$PS_FORMAT" 2>/dev/null) || return 1
+  POD_STATE=() POD_REPO=() POD_RID=() POD_STARTED=() POD_BK=()
+  while IFS='|' read -r name state role pod repo rid started; do
+    [[ "$pod" =~ $POD_RE ]] || continue
+    case "$role" in
+      runner) POD_STATE[$pod]=$state; POD_REPO[$pod]=$repo; POD_RID[$pod]=$rid; POD_STARTED[$pod]=$started ;;
+      buildkit) POD_BK[$pod]=$state ;;
+    esac
+  done <<<"$out"
+}
+
+# all_pod_ids: every pod id that has any trace: container, network (scan_nets) or directory.
+all_pod_ids() {
+  {
+    printf '%s\n' "${!POD_STATE[@]}" "${!POD_BK[@]}" "${NET_PODS[@]}"
+    ls -1 "$JOBS" 2>/dev/null || true
+  } | grep -E "$POD_RE" | sort -u || true
+}
+
+pod_dir() { printf '%s/%s' "$JOBS" "$1"; }
+
+delete_runner() { # delete_runner REPO ID REASON   (with the repository's own token)
+  local repo=$1 id=$2 why=$3
+  [[ "$id" =~ ^[0-9]+$ ]] || return 0
+  if (( API_OFF )); then return 0; fi   # JIT runners that never got a job are removed by GitHub itself; the sweep catches the rest
+  api DELETE "/repos/${repo}/actions/runners/${id}" "repo:${repo}"
+  case "$API_CODE" in
+    204) say info runner_deleted "repo=${repo}" "runner=${id}" "reason=${why}" ;;
+    404) ;;
+    *) say warn runner_delete_failed "repo=${repo}" "runner=${id}" "reason=${why}" "$(api_err)" ;;
+  esac
+}
+
+# cleanup_pod POD: remove containers, network and the secrets directory of a pod. Safe to repeat.
+cleanup_pod() {
+  local pod=$1
+  [[ "$pod" =~ $POD_RE ]] || return 0
+  docker rm -f "ghr-${pod}-runner" "ghr-${pod}-buildkitd" >/dev/null 2>&1 || true
+  docker network rm "ghr-${pod}" >/dev/null 2>&1 || true
+  rm -rf -- "$(pod_dir "$pod")"
+}
+
+kill_pod() { # kill_pod POD REPO RID REASON
+  local pod=$1
+  mkdir -p "$(pod_dir "$pod")" && : > "$(pod_dir "$pod")/killed"
+  say warn pod_killed "pod=${pod}" "repo=$2" "reason=$4"
+  docker kill "ghr-${pod}-runner" >/dev/null 2>&1 || true
+  delete_runner "$2" "$3" "$4"
+}
+
+# backoff_for N: seconds to wait after the N-th failure in a row: 30, 60, 120, ... at most 900.
+backoff_for() { local n=$1 d; (( n < 1 )) && n=1; d=$((30 * (1 << (n > 5 ? 5 : n - 1)))); (( d > 900 )) && d=900; echo "$d"; }
+
+# finish_pod POD: the runner container has exited; log why, keep the failure count, clean up.
+# The entry runs Runner.Listener directly (not run.sh, which swallows its exit code), so the code is the Listener's: 0 done, 1 error,
+# 2 retryable error, 3 or 4 it staged a self-update (the pinned image is too old). A runner that ends within 120 s without having taken
+# a job is a failure whatever the code says.
+finish_pod() {
+  local pod=$1 repo=${POD_REPO[$1]:-} rid=${POD_RID[$1]:-} started=${POD_STARTED[$1]:-0} info code oom now ran killed=0 ran_job=0 logs fail=0 why="" l
+  now=$(date +%s)
+  info=$(docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' "ghr-${pod}-runner" 2>/dev/null || echo "? false")
+  code=${info% *}; oom=${info#* }
+  [[ "$started" =~ ^[0-9]+$ ]] || started=$now
+  ran=$((now - started))
+  [[ -e "$(pod_dir "$pod")/killed" ]] && killed=1
+  logs=$(docker logs --tail 200 "ghr-${pod}-runner" 2>&1 || true)
+  # a job was taken if the poll saw the runner busy, or the runner itself says so (jobs shorter than a poll)
+  if [[ -e "$(pod_dir "$pod")/busy" ]] || grep -q 'Running job:' <<<"$logs"; then ran_job=1; fi
+  case "$code" in
+    0)
+      if (( ! ran_job && ! killed && ran < 120 )); then fail=1; why="exited after ${ran}s without taking a job"
+      else say info job_finished "pod=${pod}" "repo=${repo}" "seconds=${ran}"; CONSEC_FAIL=0; UPDATE_REQUIRED=0; fi ;;
+    3|4)
+      UPDATE_REQUIRED=1; fail=1; why="the runner staged a self-update"
+      say error runner_update_required "pod=${pod}" "repo=${repo}" "exit=${code}" \
+        "hint=the runner wanted to update itself: the pinned image is too old. Bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh" ;;
+    *)
+      if (( killed )); then say info pod_ended_after_kill "pod=${pod}" "repo=${repo}" "exit=${code}"
+      else fail=1; why="runner exit code ${code}"; fi ;;
+  esac
+  if (( fail )); then
+    CONSEC_FAIL=$((CONSEC_FAIL + 1))
+    say warn runner_failed "pod=${pod}" "repo=${repo}" "exit=${code}" "oom_killed=${oom}" "seconds=${ran}" "job_taken=${ran_job}" "why=${why}"
+    # the runner's own log shows why; the runner masks secrets in it
+    tail -n 15 <<<"$logs" | while IFS= read -r l; do say warn runner_log "pod=${pod}" "line=${l:0:300}"; done || true
+    if (( ran < 120 )); then
+      local d; d=$(backoff_for "$CONSEC_FAIL")
+      BACKOFF_UNTIL=$((now + d)); say warn pod_start_paused "seconds=${d}" "after_failures=${CONSEC_FAIL}"
+    fi
+  fi
+  delete_runner "$repo" "$rid" job_over
+  cleanup_pod "$pod"
+  save_state
+}
+
+is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
+
+# check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
+# it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
+# ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
+# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
+check_assigned_job() {
+  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
+  if (( tries >= 20 )); then
+    # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    : > "$(pod_dir "$pod")/verified"
+    kill_pod "$pod" "$repo" "$rid" job_unverified
+    return 0
+  fi
+  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  cp "$PAGED_FILE" "$runs_file"
+  for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
+    [[ "$run" =~ ^[0-9]+$ ]] || continue
+    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
+      [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
+      if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
+    [[ -n "$verdict" ]] || continue
+    if [[ "$verdict" == ok && "$GH_ALLOW_FORK_RUNS" != 1 ]]; then
+      verdict=$(jq -r --argjson run "$run" '.workflow_runs[] | select(.id == $run) |
+        if ((.event // "") | startswith("pull_request")) and ((.head_repository.full_name // "") != (.repository.full_name // "x")) then "fork" else "ok" end' "$runs_file")
+    fi
+    : > "$(pod_dir "$pod")/verified"
+    if [[ "$verdict" == ok ]]; then
+      say info job_accepted "pod=${pod}" "repo=${repo}" "run=${run}"
+    else
+      say warn job_rejected "pod=${pod}" "repo=${repo}" "run=${run}" "reason=${verdict}" "hint=an idle runner takes any queued job of its repository; the repository setting for fork pull requests is the real control"
+      kill_pod "$pod" "$repo" "$rid" "job_rejected_${verdict}"
+    fi
+    return 0
+  done
+  return 1
+}
+
+# manage_pods [api]: adopt running pods, finish exited ones, remove leftovers, enforce the idle and runtime limits. With api=0 (rate-limit
+# pause) it only does what needs Docker. Returns 1 when docker does not answer: nothing is touched then.
+manage_pods() {
+  local api_on=${1:-1} pod now busy started repo rid st
+  now=$(date +%s)
+  scan_pods && scan_nets || return 1
+  ACTIVE=0 IDLE=0; IDLE_BY_REPO=()
+  for pod in $(all_pod_ids); do
+    st=${POD_STATE[$pod]:-}
+    if [[ -z "$st" ]]; then
+      # no runner container: a pod that failed to start or whose controller died halfway
+      say warn pod_leftover "pod=${pod}" "action=removed"
+      cleanup_pod "$pod"
+      continue
+    fi
+    repo=${POD_REPO[$pod]:-} rid=${POD_RID[$pod]:-} started=${POD_STARTED[$pod]:-}
+    [[ "$started" =~ ^[0-9]+$ ]] || started=$now
+    if [[ "$st" != running ]]; then finish_pod "$pod"; continue; fi
+    if [[ "${GH_BUILDKIT}" == 1 && -z "${POD_BK[$pod]:-}" && -z "${WARNED[bk-$pod]:-}" ]]; then
+      WARNED[bk-$pod]=1; say warn buildkit_missing "pod=${pod}" "hint=image builds in this job will fail; check user.max_user_namespaces and docker logs of the sidecar at the next start"
+    fi
+    if (( now - started > MAX_RUNTIME )); then kill_pod "$pod" "$repo" "$rid" max_runtime; ACTIVE=$((ACTIVE + 1)); continue; fi
+    if (( api_on )) && [[ "$rid" =~ ^[0-9]+$ && "$repo" == */* ]]; then
+      if [[ ! -e "$(pod_dir "$pod")/busy" ]]; then
+        # not seen busy yet: ask GitHub (one request); the idle timeout only counts when GitHub answered "not busy"
+        api GET "/repos/${repo}/actions/runners/${rid}" "repo:${repo}"
+        busy=unknown
+        if [[ "$API_CODE" == 200 ]]; then busy=$(jq -r '.busy // false' "$API_OUT"); fi
+        if [[ "$busy" == true ]]; then
+          mkdir -p "$(pod_dir "$pod")" && printf '%s' "$now" > "$(pod_dir "$pod")/busy"
+          say info job_started "pod=${pod}" "repo=${repo}" "waited=$((now - started))s"
+        elif [[ "$busy" == false ]] && (( now - started > IDLE_TIMEOUT )); then
+          kill_pod "$pod" "$repo" "$rid" idle_timeout
+        elif [[ "$busy" == false ]] && ! is_served "$repo"; then
+          kill_pod "$pod" "$repo" "$rid" repo_not_served
+        else
+          IDLE=$((IDLE + 1)); IDLE_BY_REPO[$repo]=$(( ${IDLE_BY_REPO[$repo]:-0} + 1 ))
+        fi
+      fi
+      if [[ -e "$(pod_dir "$pod")/busy" && ! -e "$(pod_dir "$pod")/verified" && ! -e "$(pod_dir "$pod")/killed" ]]; then
+        check_assigned_job "$pod" "$repo" "$rid" || true
+      fi
+    elif (( api_on )); then
+      IDLE=$((IDLE + 1))   # a container without a usable runner id label: counted, never killed by the idle rule
+    fi
+    ACTIVE=$((ACTIVE + 1))
+  done
+}
+
+# sweep_runners: delete our runners (name prefix) where they must not exist. For repositories that are not served (public, archived,
+# excluded) every runner of ours goes; for served ones only runners without a pod on this host that are offline or idle.
+sweep_runners() {
+  local repo served rows id name status busy pod
+  declare -A have=()
+  for pod in "${!POD_RID[@]}"; do if [[ -n "${POD_RID[$pod]}" ]]; then have[${POD_RID[$pod]}]=1; fi; done
+  find "$CACHE" -type f -mtime +1 -delete 2>/dev/null || true   # cache entries that no answer has touched for a day
+  for repo in "${ALL_REPOS[@]}"; do
+    served=0; is_served "$repo" && served=1
+    if ! api_get_cached "/repos/${repo}/actions/runners?per_page=100" "repo:${repo}"; then
+      if [[ "$API_CODE" == 404 || "$API_CODE" == 403 ]]; then
+        say warn runner_list_denied "repo=${repo}" "hint=the App needs Administration: read or write on this repository"
+      else
+        fail_api runner_list_failed "repo=${repo}" || true
+      fi
+      continue
+    fi
+    rows=$(jq -r --arg p "$NAME_PREFIX" '.runners[]? | select(.name | startswith($p)) | [.id, .name, .status, .busy] | @tsv' "$API_BODY")
+    while IFS=$'\t' read -r id name status busy; do
+      [[ "$id" =~ ^[0-9]+$ ]] || continue
+      if (( ! served )); then
+        delete_runner "$repo" "$id" repo_not_served
+      elif [[ -z "${have[$id]:-}" && ( "$status" == offline || "$busy" == false ) ]]; then
+        delete_runner "$repo" "$id" container_gone
+      fi
+    done <<<"$rows"
+  done
+}
+
+# ---- starting a pod -------------------------------------------------------------------------------------------------------------
+ensure_image() {
+  local img=$1 created
+  if ! docker image inspect "$img" >/dev/null 2>&1; then
+    say info image_pull "image=${img%%@*}"
+    timeout 900 docker pull -q "$img" >/dev/null || { LAST_ERROR="cannot pull ${img%%@*}"; say error image_pull_failed "image=${img%%@*}"; return 1; }
+  fi
+  if [[ "$img" == "$GH_RUNNER_IMAGE" ]]; then
+    created=$(docker image inspect -f '{{.Created}}' "$img" 2>/dev/null || true)
+    if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); [[ "$created" =~ ^[0-9]+$ ]] && IMAGE_CREATED=$created; fi
+  fi
+  return 0
+}
+
+# gen_tls DIR: an ephemeral CA, a server certificate for the BuildKit daemon and a client certificate for the runner.
+# DIR/tls-srv (ca, cert, key) goes to the daemon only, DIR/tls-cli to the runner only; the CA key is deleted before the pod starts.
+# Files are mode 0644 inside a directory tree whose parent (jobs/) is 0700: the containers run as other uids (1000 and 1001) and
+# must read their own mount, which no other user of the host can reach.
+gen_tls() {
+  local d=$1 ca="$1/ca" days=2 who out
+  install -d -m 0700 "$ca" && install -d -m 0755 "$d/tls-srv" "$d/tls-cli" || return 1
+  openssl ecparam -name prime256v1 -genkey -noout -out "$ca/ca.key" 2>/dev/null || return 1
+  openssl req -x509 -new -key "$ca/ca.key" -sha256 -days "$days" -subj "/CN=ghr-ephemeral-ca" \
+    -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" -out "$ca/ca.pem" 2>/dev/null || return 1
+  printf 'subjectAltName=DNS:buildkitd,DNS:localhost\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' > "$ca/srv.ext" || return 1
+  printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' > "$ca/cli.ext" || return 1
+  for who in srv cli; do
+    out="$d/tls-${who}"
+    openssl ecparam -name prime256v1 -genkey -noout -out "$out/key.pem" 2>/dev/null || return 1
+    openssl req -new -key "$out/key.pem" -subj "/CN=ghr-${who}" -out "$ca/${who}.csr" 2>/dev/null || return 1
+    openssl x509 -req -in "$ca/${who}.csr" -CA "$ca/ca.pem" -CAkey "$ca/ca.key" -CAcreateserial -days "$days" -sha256 \
+      -extfile "$ca/${who}.ext" -out "$out/cert.pem" 2>/dev/null || return 1
+    cp "$ca/ca.pem" "$out/ca.pem" || return 1
+    chmod 0644 "$out/key.pem" "$out/cert.pem" "$out/ca.pem" || return 1
+  done
+  rm -rf -- "$ca"
+}
+
+# scan_nets: NET_PODS (pod ids that have a network) and NET_USED (subnets of pod networks that exist; the label is the state).
+declare -A NET_USED=()
+NET_PODS=()
+scan_nets() {
+  local pod sub out
+  out=$(docker network ls --filter "label=${LABEL_JOB}=job" --format "{{.Label \"${LABEL_POD}\"}}|{{.Label \"${LABEL_SUBNET}\"}}" 2>/dev/null) || return 1
+  NET_PODS=(); NET_USED=()
+  while IFS='|' read -r pod sub; do
+    [[ "$pod" =~ $POD_RE ]] && NET_PODS+=("$pod")
+    if [[ "$sub" =~ ^[0-9.]+/[0-9]+$ ]]; then NET_USED[$sub]=1; fi
+  done <<<"$out"
+}
+
+# create_pod_network POD LABELS...: creates the per-job network with the lowest free /28 of the pool (released when the network is
+# removed). Docker's default bridge naming (br-<id>) is kept so ci-job-isolation's br-+ rules cover it. Returns 2 when the pool is full.
+POD_SUBNET=""
+create_pod_network() {
+  local pod=$1 base len slots i cand err free=0; shift
+  base=$(ip2int "${GH_JOB_SUBNET_POOL%/*}"); len=${GH_JOB_SUBNET_POOL#*/}
+  slots=$(( 1 << (POD_PREFIX_LEN - len) ))
+  scan_nets || { say error network_create_failed "pod=${pod}" "problem=docker does not answer"; return 1; }
+  for (( i = 0; i < slots; i++ )); do
+    cand="$(int2ip $(( base + (i << (32 - POD_PREFIX_LEN)) )))/${POD_PREFIX_LEN}"
+    [[ -z "${NET_USED[$cand]:-}" ]] || continue
+    free=$((free + 1))
+    if err=$(docker network create --subnet "$cand" --label "${LABEL_SUBNET}=${cand}" "$@" "ghr-${pod}" 2>&1); then POD_SUBNET=$cand; return 0; fi
+    # an address range that Docker or the host already uses: take the next one; anything else is a real failure
+    if ! grep -qiE 'overlap|already in use|pool' <<<"$err"; then say error network_create_failed "pod=${pod}" "subnet=${cand}" "docker=${err:0:200}"; return 1; fi
+    say warn subnet_taken "subnet=${cand}" "hint=another network uses this range; GH_JOB_SUBNET_POOL should be a block nothing else uses"
+  done
+  if (( free == 0 )); then
+    say error subnet_pool_exhausted "pool=${GH_JOB_SUBNET_POOL}" "slots=${slots}" "hint=the job stays queued until a pod ends; a bigger pool allows more pods but GH_MAX_JOBS is the real limit"
+  else
+    say error subnet_pool_unusable "pool=${GH_JOB_SUBNET_POOL}" "hint=every free range overlaps another Docker network"
+  fi
+  return 2
+}
+
+START_FAIL=0
+# start_failed POD REPO RID STEP [DETAIL]: log, delete the JIT runner (if there is one), remove the pod and count the failure for the start
+# back-off (30 s, doubling, at most 15 min; any successful start resets it). Returns 1.
+start_failed() {
+  local pod=$1 repo=$2 rid=$3 step=$4 detail=${5:-} d now
+  say error pod_start_failed "pod=${pod}" "repo=${repo}" "step=${step}" "detail=${detail:0:200}"
+  if [[ -n "$rid" ]]; then delete_runner "$repo" "$rid" start_failed; fi
+  cleanup_pod "$pod"
+  START_FAIL=$((START_FAIL + 1)); now=$(date +%s); d=$(backoff_for "$START_FAIL")
+  if (( now + d > BACKOFF_UNTIL )); then BACKOFF_UNTIL=$((now + d)); fi
+  say warn pod_start_paused "seconds=${d}" "after_start_failures=${START_FAIL}"
+  save_state
+  return 1
+}
+
+# docker0 address without netlink (the unit's RestrictAddressFamilies has none): the gateway of the default bridge network.
+bridge_ip() { docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null | head -n1 || true; }
+
+# start_pod REPO RUN_ID JOB_ID: network + JIT runner + sidecar + runner container. Any failure removes everything it created and backs off.
+# Returns 2 when the pod network pool is full (nothing was created on GitHub's side).
+start_pod() {
+  local repo=$1 run_id=$2 job_id=$3 pod name dir body rid="" now bk_args=() sec_apparmor=() sec_label=() jit_file zopt="" rc npm_args=() err ip_cache
+  now=$(date +%s)
+  if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then zopt=",Z"; fi   # private label for this pod's own directory
+  pod="${now}-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  name="${NAME_PREFIX}${pod}"; dir=$(pod_dir "$pod")
+  ensure_image "$GH_RUNNER_IMAGE" || { start_failed "" "$repo" "" image "$LAST_ERROR"; return 1; }
+  if [[ "$GH_BUILDKIT" == 1 ]]; then ensure_image "$GH_BUILDKIT_IMAGE" || { start_failed "" "$repo" "" image "$LAST_ERROR"; return 1; }; fi
+  install -d -m 0700 "$dir" && install -d -m 0755 "$dir/jit" && [[ "$(stat -c %a "$dir")" == 700 ]] || { start_failed "$pod" "$repo" "" directory; return 1; }
+  local -a lab=(--label "${LABEL_JOB}=job" --label "${LABEL_POD}=${pod}" --label "${LABEL_REPO}=${repo}" --label "${LABEL_RUN}=${run_id}"
+                --label "${LABEL_STARTED}=${now}" --label "io.server-init.github-runner.job-id=${job_id}")
+  # The network comes first: with no free range nothing is created on GitHub's side and the job stays queued.
+  rc=0; create_pod_network "$pod" "${lab[@]}" || rc=$?
+  if (( rc == 2 )); then cleanup_pod "$pod"; return 2; fi
+  if (( rc )); then start_failed "$pod" "$repo" "" network; return 1; fi
+  if [[ "$GH_BUILDKIT" == 1 ]] && ! gen_tls "$dir"; then start_failed "$pod" "$repo" "" tls; return 1; fi
+  body="${TMP}/jit-request.json"
+  jq -n --arg name "$name" --argjson group "$((10#$GH_RUNNER_GROUP_ID))" --argjson labels "$LABELS_JSON" \
+    '{name: $name, runner_group_id: $group, labels: $labels, work_folder: "_work"}' > "$body" || { start_failed "$pod" "$repo" "" request; return 1; }
+  api POST "/repos/${repo}/actions/runners/generate-jitconfig" "repo:${repo}" "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then
+    if [[ "$API_CODE" == 422 ]]; then
+      fail_api jit_failed "repo=${repo}" "hint=422: check GH_RUNNER_GROUP_ID (now ${GH_RUNNER_GROUP_ID}; 1 is assumed for repositories of a personal account) and GH_LABELS" || true
+    else
+      fail_api jit_failed "repo=${repo}" || true
+    fi
+    err="$(api_err)"; : > "$API_OUT"
+    start_failed "$pod" "$repo" "" jit "$err"; return 1
+  fi
+  rid=$(jq -r '.runner.id // empty' "$API_OUT")
+  jit_file="${dir}/jit/config"
+  ( umask 077; jq -r '.encoded_jit_config // empty' "$API_OUT" > "$jit_file" )
+  : > "$API_OUT"
+  if [[ ! "$rid" =~ ^[0-9]+$ || ! -s "$jit_file" ]]; then
+    start_failed "$pod" "$repo" "$rid" jit "answer without runner id or config"; return 1
+  fi
+  chmod 0644 "$jit_file"   # readable by the runner uid (and by the job itself, same uid); the 0700 parent keeps every other host user out
+
+  if [[ "$GH_BUILDKIT" == 1 ]]; then
+    # Rootless BuildKit (docs/rootless.md of moby/buildkit): seccomp and systempaths must be unconfined so runc can create user namespaces and
+    # a /proc of its own; AppArmor only where it is active. SELinux (Rocky): container_t may not mount inside a user namespace, so the label is
+    # disabled for this one container only. Not added, because they would break rootless BuildKit: --cap-drop ALL (the bounding set also
+    # limits the capabilities in the new user namespace), no-new-privileges (newuidmap is setuid) and --read-only (it needs a writable
+    # state volume). Limits that do not: CPU, memory without swap, process limit.
+    if [[ -r /sys/module/apparmor/parameters/enabled && "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" == Y ]]; then sec_apparmor=(--security-opt apparmor=unconfined); fi
+    if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then sec_label=(--security-opt label=disable); fi
+    if ! err=$(docker run -d --rm --name "ghr-${pod}-buildkitd" --network "ghr-${pod}" --network-alias buildkitd "${lab[@]}" --label "${LABEL_ROLE}=buildkit" \
+        --cgroup-parent ci-jobs.slice --cpus "$GH_BUILDKIT_CPUS" --memory "$GH_BUILDKIT_MEMORY" --memory-swap "$GH_BUILDKIT_MEMORY" --pids-limit "$GH_BUILDKIT_PIDS" \
+        --security-opt seccomp=unconfined --security-opt systempaths=unconfined "${sec_apparmor[@]}" "${sec_label[@]}" \
+        -v "${dir}/tls-srv:/certs:ro" "$GH_BUILDKIT_IMAGE" \
+        --addr tcp://0.0.0.0:1234 --tlscacert /certs/ca.pem --tlscert /certs/cert.pem --tlskey /certs/key.pem 2>&1 >/dev/null); then
+      start_failed "$pod" "$repo" "$rid" buildkit "$err"; return 1
+    fi
+    bk_args=(-v "${dir}/tls-cli:/etc/buildkit-tls:ro${zopt}" -e "BUILDKIT_HOST=tcp://buildkitd:1234")
+  fi
+  # The npm cache (runner/install/npm-cache.sh) listens on the docker0 IP; ci-job-isolation lets this pool, and only this pool of the br-
+  # networks, reach that one port. Same values the GitLab jobs get from config.toml.
+  if [[ -f "${GHR_NPM_DIR:-/opt/npm-cache}/docker-compose.yml" ]]; then
+    ip_cache=$(bridge_ip)
+    if [[ "$ip_cache" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      npm_args=(-e "NPM_CONFIG_REGISTRY=http://${ip_cache}:4873/" -e "YARN_NPM_REGISTRY_SERVER=http://${ip_cache}:4873/" -e "YARN_UNSAFE_HTTP_WHITELIST=${ip_cache}")
+    else
+      say warn npm_cache_unavailable "hint=/opt/npm-cache exists but the docker0 address is unknown; jobs use the public registry"
+    fi
+  fi
+  # The entry reads the JIT config from the read-only file and hands it to the Listener as an environment variable of that process only
+  # (not in docker inspect, not in the host's process list). It runs Runner.Listener itself instead of run.sh: run.sh restarts the Listener
+  # on exit codes 2, 3 and 4 inside the container and turns every other code into 0, so Docker would never see why a runner ended.
+  # GH_JIT_PASS=arg is a debugging fallback: --jitconfig on the command line shows the config in /proc/<pid>/cmdline.
+  local entry='set -eu; J=$(cat /run/ghr-jit/config); [ -n "$J" ] || exit 1; [ ! -f ./.env ] || { set -a; . ./.env; set +a; }; if [ "${GHR_JIT_PASS:-env}" = arg ]; then exec ./bin/Runner.Listener run --jitconfig "$J"; fi; ACTIONS_RUNNER_INPUT_JITCONFIG=$J; export ACTIONS_RUNNER_INPUT_JITCONFIG; unset J; exec ./bin/Runner.Listener run'
+  # Not --rm: the exit code of the Listener is read from the stopped container, which the controller removes.
+  if ! err=$(docker run -d --init --name "ghr-${pod}-runner" --network "ghr-${pod}" "${lab[@]}" --label "${LABEL_ROLE}=runner" --label "${LABEL_RID}=${rid}" \
+      --cgroup-parent ci-jobs.slice --cpus "$GH_JOB_CPUS" --memory "$GH_JOB_MEMORY" --memory-swap "$GH_JOB_MEMORY" --pids-limit "$GH_JOB_PIDS" --shm-size "$GH_JOB_SHM" \
+      --user 1001:1001 --security-opt no-new-privileges --cap-drop ALL \
+      -v "${dir}/jit:/run/ghr-jit:ro${zopt}" "${bk_args[@]}" -w /home/runner \
+      -e "GHR_JIT_PASS=${GH_JIT_PASS}" -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 "${npm_args[@]}" \
+      "$GH_RUNNER_IMAGE" sh -c "$entry" ghr-entry 2>&1 >/dev/null); then
+    start_failed "$pod" "$repo" "$rid" runner "$err"; return 1
+  fi
+  START_FAIL=0
+  say info pod_started "pod=${pod}" "repo=${repo}" "run=${run_id}" "job=${job_id}" "runner=${rid}" "subnet=${POD_SUBNET}" "buildkit=${GH_BUILDKIT}" "npm_cache=$([[ ${#npm_args[@]} -gt 0 ]] && echo 1 || echo 0)" "cpus=${GH_JOB_CPUS}" "memory=${GH_JOB_MEMORY}"
+}
+
+# ---- discovery ------------------------------------------------------------------------------------------------------------------
+# queued_jobs REPO: fills FOUND with "run_id job_id" for each queued job that asks only for our labels, including a custom one.
+# This only decides whether a pod is started: an idle runner takes any queued job of its repository (see check_assigned_job).
+FOUND=()
+queued_jobs() {
+  local repo=$1 st run runs line
+  FOUND=()
+  for st in queued in_progress; do
+    if ! get_paged "/repos/${repo}/actions/runs?status=${st}" workflow_runs 50 6; then
+      if [[ "$API_CODE" == 403 || "$API_CODE" == 404 ]]; then say warn runs_denied "repo=${repo}" "hint=the App needs Actions: read on this repository"; return 0; fi
+      fail_api run_list_failed "repo=${repo}" || true; continue
+    fi
+    if (( PAGED_TRUNCATED )); then say warn runs_truncated "repo=${repo}" "status=${st}" "hint=more than 300 runs; the oldest are looked at first on the next polls only if these finish"; fi
+    # A fork pull request would run code of someone else on this host: no pod is started for it unless GH_ALLOW_FORK_RUNS=1.
+    runs=$(jq -r --argjson fork "$GH_ALLOW_FORK_RUNS" '.workflow_runs[]? |
+      select($fork == 1 or ((.event // "") | startswith("pull_request") | not) or ((.head_repository.full_name // "") == (.repository.full_name // "x"))) | .id' "$PAGED_FILE")
+    for run in $runs; do
+      [[ "$run" =~ ^[0-9]+$ ]] || continue
+      if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then
+        if [[ "$API_CODE" != 403 && "$API_CODE" != 404 ]]; then fail_api job_list_failed "repo=${repo}" "run=${run}" || true; fi
+        continue
+      fi
+      if (( PAGED_TRUNCATED )); then say warn jobs_truncated "repo=${repo}" "run=${run}" "hint=more than 500 jobs in one run"; fi
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && FOUND+=("$line")
+      done < <(jq -r --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" --arg run "$run" '.jobs[]? |
+        select(.status == "queued" and .runner_id == null) |
+        ([.labels[]? | ascii_downcase]) as $l |
+        select(($l | length) > 0 and (($l - $ours) | length) == 0 and (($l | map(select(. as $x | $custom | index($x))) | length) > 0)) |
+        "\($run) \(.id)"' "$PAGED_FILE")
+    done
+  done
+}
+
+discover() {
+  local repo run job n need rc
+  if (( ACTIVE >= MAX_JOBS )); then return 0; fi
+  if (( $(date +%s) < BACKOFF_UNTIL )); then say info discovery_paused "reason=backoff" "until=${BACKOFF_UNTIL}"; return 0; fi
+  if [[ "$RATE_REMAINING" =~ ^[0-9]+$ ]] && (( RATE_REMAINING < RATE_STOP )); then
+    LAST_ERROR="GitHub API quota nearly used up (${RATE_REMAINING} left)"; say error discovery_paused "reason=rate_limit" "remaining=${RATE_REMAINING}"; return 0
+  fi
+  for repo in "${SERVED[@]}"; do
+    (( ACTIVE < MAX_JOBS )) || break
+    queued_jobs "$repo"
+    n=${#FOUND[@]}; need=$(( n - ${IDLE_BY_REPO[$repo]:-0} ))
+    if (( n > 0 )); then say info jobs_queued "repo=${repo}" "queued=${n}" "idle_runners=${IDLE_BY_REPO[$repo]:-0}"; fi
+    for job in "${FOUND[@]}"; do
+      (( need > 0 && ACTIVE < MAX_JOBS )) || break
+      run=${job% *}; job=${job#* }
+      rc=0; start_pod "$repo" "$run" "$job" || rc=$?
+      if (( rc == 0 )); then
+        ACTIVE=$((ACTIVE + 1)); IDLE=$((IDLE + 1)); IDLE_BY_REPO[$repo]=$(( ${IDLE_BY_REPO[$repo]:-0} + 1 )); need=$((need - 1))
+      elif (( rc == 2 )); then
+        return 0   # no free pod network: the jobs stay queued, the next poll retries
+      else
+        return 0   # a failed start backs off for all repositories; the next poll after the pause retries
+      fi
+    done
+  done
+}
+
+# ---- status for health ----------------------------------------------------------------------------------------------------------
+LAST_POLL_OK=0 STARTED_AT=0
+write_status() {
+  local tmp="${STATE_DIR}/status.json.new"
+  jq -n --argjson updated "$(date +%s)" --argjson started "$STARTED_AT" --argjson poll "$LAST_POLL_OK" --argjson tok "$LAST_TOKEN_OK" \
+    --arg err "$LAST_ERROR" --arg rem "$RATE_REMAINING" --arg lim "$RATE_LIMIT" --arg rst "$RATE_RESET" \
+    --argjson served "${#SERVED[@]}" --argjson skipped "${#SKIPPED[@]}" --argjson active "$ACTIVE" --argjson idle "$IDLE" --argjson max "$MAX_JOBS" \
+    --argjson upd "$UPDATE_REQUIRED" --argjson fails "$CONSEC_FAIL" --argjson backoff "$BACKOFF_UNTIL" --arg img "$IMAGE_CREATED" --arg inst "$INSTALL_ID" \
+    '{version: 1, updated: $updated, started: $started, last_poll_ok: $poll, last_token_ok: $tok,
+      last_error: (if $err == "" then null else $err end),
+      rate_remaining: ($rem | tonumber? // null), rate_limit: ($lim | tonumber? // null), rate_reset: ($rst | tonumber? // null),
+      served: $served, skipped: $skipped, active_pods: $active, idle_pods: $idle, max_jobs: $max,
+      update_required: ($upd == 1), consecutive_failures: $fails, backoff_until: $backoff,
+      runner_image_created: ($img | tonumber? // null), installation: $inst}' > "$tmp"
+  chmod 0644 "$tmp"; mv -f "$tmp" "${STATE_DIR}/status.json"
+}
+
+TICK=0
+SWEEP_EVERY=10
+tick() {
+  local now ok=1
+  TICK=$((TICK + 1)); now=$(date +%s)
+  LAST_ERROR=""
+  if (( now < PAUSE_UNTIL )); then
+    # GitHub asked us to wait: no request, but pods are still finished, cleaned up and limited by their runtime (Docker only)
+    say warn poll_paused "seconds=$((PAUSE_UNTIL - now))" "reason=rate_limit"
+    API_OFF=1; manage_pods 0 || say error docker_unreachable "hint=docker ps or docker network ls failed"; API_OFF=0
+    LAST_ERROR="paused by GitHub's rate limit"; save_state; write_status; return 0
+  fi
+  if ensure_token && list_repos; then
+    if [[ "$RATE_REMAINING" =~ ^[0-9]+$ ]] && (( RATE_REMAINING < RATE_LOW )) && (( TICK % 20 == 1 || RATE_REMAINING < RATE_STOP )); then
+      say warn rate_limit_low "remaining=${RATE_REMAINING}" "limit=${RATE_LIMIT:-?}"
+    fi
+  else
+    ok=0
+  fi
+  # Finish and clean up pods first (this needs only Docker, so it runs even when GitHub does not answer); then, every SWEEP_EVERY polls,
+  # at the start and whenever the repository list changed, delete runners that must not exist; then look for work.
+  if ! manage_pods; then
+    # not "no pods": nothing is cleaned up, swept or started on a poll where docker does not answer
+    LAST_ERROR="docker does not answer (docker ps or docker network ls failed)"; say error docker_unreachable "hint=is docker running and is ${USER:-this user} in the docker group?"; ok=0
+  fi
+  if (( ok )); then
+    if (( TICK == 1 || REPOS_CHANGED || TICK % SWEEP_EVERY == 0 )); then sweep_runners; fi
+    say info poll "served=${#SERVED[@]}" "skipped=${#SKIPPED[@]}" "active=${ACTIVE}" "remaining=${RATE_REMAINING:-?}"
+    discover
+    [[ -z "$LAST_ERROR" ]] || ok=0
+  fi
+  if (( ok )); then LAST_POLL_OK=$(date +%s); fi
+  save_state; write_status
+  (( ok ))
+}
+
+# ---- modes ----------------------------------------------------------------------------------------------------------------------
+# init_dirs: the state directory, its private parts (jobs/ holds the per-pod secrets, so it must be 0700 and ours) and the lock that
+# keeps the service and a manual run from working on the same pods at once.
+init_dirs() {
+  install -d -m 0755 "$STATE_DIR"
+  JOBS="${STATE_DIR}/jobs"; CACHE="${STATE_DIR}/cache"; TMP="${STATE_DIR}/tmp"
+  install -d -m 0700 "$JOBS" "$CACHE"
+  if [[ "$(stat -c '%a:%u' "$JOBS")" != "700:$(id -u)" ]]; then
+    say error jobs_dir_unsafe "dir=${JOBS}" "found=$(stat -c '%a:%U' "$JOBS")" "hint=it holds the secrets of the pods: it must be mode 700 and owned by the user that runs the controller"; exit 1
+  fi
+  exec 8>"${STATE_DIR}/ctl.lock"
+  flock -n 8 || { say error already_running "lock=${STATE_DIR}/ctl.lock" "hint=github-runner-ctl is already running (the service?); stop it before a manual run"; exit 1; }
+  rm -rf -- "$TMP"; install -d -m 0700 "$TMP"
+  API_OUT="${TMP}/api.body"; API_HDR="${TMP}/api.hdr"
+}
+
+preflight() {
+  local t
+  for t in curl jq openssl docker sha1sum flock; do command -v "$t" >/dev/null 2>&1 || { say error missing_tool "tool=${t}"; return 1; }; done
+  docker info >/dev/null 2>&1 || { say error docker_unreachable "hint=is the service user in the docker group and is docker running?"; return 1; }
+  [[ -r "$GH_KEY_FILE" ]] || { say error key_missing "key=${GH_KEY_FILE}"; return 1; }
+}
+
+common_start() {
+  load_config
+  validate_config || { local e; for e in "${CFG_ERRORS[@]}"; do say error config_invalid "problem=${e}"; done; exit 2; }
+  derive_config
+}
+
+run_loop() {
+  local stop=0 sleeper=0 rc
+  common_start
+  init_dirs
+  preflight || exit 1
+  STARTED_AT=$(date +%s)
+  load_state
+  trap 'stop=1; [[ $sleeper -gt 0 ]] && kill "$sleeper" 2>/dev/null; true' TERM INT
+  say info started "owner=${GH_OWNER}" "labels=${GH_LABELS}" "max_jobs=${MAX_JOBS}" "poll=${POLL}s" "buildkit=${GH_BUILDKIT}" "name_prefix=${NAME_PREFIX}"
+  ensure_image "$GH_RUNNER_IMAGE" || true
+  while (( ! stop )); do
+    rc=0; tick || rc=$?
+    (( rc == 0 )) || say warn poll_failed "error=${LAST_ERROR:-unknown}"
+    (( stop )) && break
+    sleep "$(( POLL + RANDOM % 4 ))" 8>&- & sleeper=$!
+    wait "$sleeper" 2>/dev/null || true
+    sleeper=0
+  done
+  say info stopping "note=running pods keep running; the next start adopts them"
+}
+
+once() {
+  common_start
+  init_dirs
+  preflight || exit 1
+  STARTED_AT=$(date +%s)
+  load_state
+  tick
+}
+
+# self_test: read-only against GitHub (no runner is created, no container started).
+self_test() {
+  local rc=0 perms name slug k want have
+  common_start
+  STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ghr-selftest.XXXXXX"); trap 'rm -rf -- "$STATE_DIR"' EXIT
+  JOBS="${STATE_DIR}/jobs"; CACHE="${STATE_DIR}/cache"; TMP="${STATE_DIR}/tmp"; install -d -m 0700 "$JOBS" "$CACHE" "$TMP"
+  API_OUT="${TMP}/api.body"; API_HDR="${TMP}/api.hdr"
+  for k in curl jq openssl; do command -v "$k" >/dev/null 2>&1 || { echo "FAIL  ${k} is not installed"; return 1; }; done
+  echo "config:  ${CONFIG}: valid (owner ${GH_OWNER}, labels ${GH_LABELS}, max ${MAX_JOBS} job(s), runner group ${GH_RUNNER_GROUP_ID})"
+  if openssl pkey -in "$GH_KEY_FILE" -noout >/dev/null 2>&1; then echo "OK    key ${GH_KEY_FILE} parses"; else echo "FAIL  key ${GH_KEY_FILE} is missing, unreadable or not a private key"; return 1; fi
+  make_jwt || { echo "FAIL  cannot sign a JWT with the key"; return 1; }
+  echo "OK    JWT signed (RS256, iss ${GH_APP_CLIENT_ID})"
+  api GET /app jwt
+  if [[ "$API_CODE" == 200 ]]; then
+    name=$(jq -r '.name // "?"' "$API_OUT"); slug=$(jq -r '.slug // "?"' "$API_OUT")
+    echo "OK    GitHub App: ${name} (${slug})"
+    for k in administration:write actions:read metadata:read; do
+      want=${k#*:}; have=$(jq -r --arg p "${k%%:*}" '.permissions[$p] // "none"' "$API_OUT")
+      if [[ "$have" == write || "$have" == "$want" ]]; then echo "OK    permission ${k%%:*}: ${have}"; else echo "FAIL  permission ${k%%:*}: ${have} (needs ${want})"; rc=1; fi
+    done
+    perms=$(jq -r '(.events // []) | join(",")' "$API_OUT"); echo "info  subscribed webhook events: ${perms:-none} (none is right: this controller polls)"
+  else
+    echo "FAIL  GET /app: $(api_err) (wrong GH_APP_CLIENT_ID or key?)"; return 1
+  fi
+  ensure_token || { echo "FAIL  no installation token: ${LAST_ERROR}"; return 1; }
+  echo "OK    installation ${INSTALL_ID}: token minted"
+  list_repos || { echo "FAIL  cannot list repositories: ${LAST_ERROR}"; return 1; }
+  echo "repositories of the installation (${#ALL_REPOS[@]}):"
+  local r
+  for r in "${SERVED[@]}"; do echo "  SERVE  ${r} (private)"; done
+  for r in "${SKIPPED[@]}"; do echo "  SKIP   ${r%% *} (${r#* })"; done
+  (( ${#SERVED[@]} > 0 )) || { echo "WARN  no private repository would be served (is the App installed on All repositories?)"; rc=1; }
+  if (( ${#SERVED[@]} > 0 )); then
+    # the permission that creates and deletes runners, with a token of one repository only (what the controller uses)
+    if ensure_repo_token "${SERVED[0]}"; then
+      api GET "/repos/${SERVED[0]}/actions/runners?per_page=100" "repo:${SERVED[0]}"
+      if [[ "$API_CODE" == 200 ]]; then echo "OK    Administration token for ${SERVED[0]} alone can list its runners"
+      else echo "FAIL  listing runners of ${SERVED[0]}: $(api_err)"; rc=1; fi
+    else
+      echo "FAIL  no Administration token for ${SERVED[0]}: ${LAST_ERROR}"; rc=1
+    fi
+  fi
+  echo "info  API quota: ${RATE_REMAINING:-?} of ${RATE_LIMIT:-?} left"
+  echo "info  not tested here: runner group ${GH_RUNNER_GROUP_ID} for JIT runners (checked on the first job; a 422 names GH_RUNNER_GROUP_ID in the log)"
+  return "$rc"
+}
+
+main() {
+  case "${1:-run}" in
+    -h|--help) usage; exit 0 ;;
+    run) run_loop ;;
+    once) once ;;
+    check-config) common_start; echo "config OK: ${CONFIG}" ;;
+    self-test|--self-test) self_test ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
+__SIC_EOF__
+chmod 644 "$R/runner/scripts/github-runner-ctl"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/github-runner-ctl.service" <<'__SIC_EOF__'
+[Unit]
+Description=Ephemeral GitHub Actions runner controller (private repositories)
+After=docker.service network-online.target ci-job-isolation.service
+Wants=network-online.target
+Requires=docker.service ci-job-isolation.service
+ConditionPathExists=/etc/github-runner/config.env
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=github-runner
+Group=github-runner
+# docker group = root on this host; the controller only runs the fixed docker commands of runner/scripts/github-runner-ctl
+SupplementaryGroups=docker
+ExecStart=/usr/local/bin/github-runner-ctl run
+SyslogIdentifier=github-runner-ctl
+# Pods are independent Docker containers: stopping or restarting the controller does not end a running job, the next start adopts it.
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=300
+# invalid config (exit 2) is not fixed by a restart
+RestartPreventExitStatus=2
+RuntimeDirectory=github-runner
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+MemoryMax=256M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/github-runner-ctl.service"
+
+echo "files written to $R: 4"
+INSTALL
+sudo bash /root/server-init-config/runner/install/github-runner.sh
 ````
 
 <a id="prewarm"></a>
@@ -8595,7 +10437,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -8730,6 +10577,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -9011,7 +10868,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -9146,6 +11008,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -9394,7 +11266,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -9529,6 +11406,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -9675,7 +11562,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -9810,6 +11702,16 @@ own_stack_dir() {
 # what runs as root next to the data. Bump tag and digest here only; every copy must carry the same string (tools/ci/check-pins.sh enforces it): runner/README.md (restore command), runner/ci/smoke.yml,
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
 
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
@@ -10268,7 +12170,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -10404,6 +12311,16 @@ own_stack_dir() {
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -10419,6 +12336,262 @@ chown_volumes() {
 }
 __SIC_EOF__
 chmod 755 "$R/common/lib.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/github-runner.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Opt-in ephemeral GitHub Actions runner for the PRIVATE repositories of one GitHub App installation (a personal account), on this host
+# next to the GitLab Runner. Installs the controller (runner/scripts/github-runner-ctl) and its systemd unit, the service user
+# github-runner, /etc/github-runner/config.env (no secrets) and the GitHub App private key /etc/github-runner/app.pem (mode 0600,
+# owner github-runner), pulls the pinned images (common/lib.sh), runs a self-test against GitHub and only then enables the service.
+# Each job gets a just-in-time runner in its own pod (network, rootless BuildKit sidecar, runner container); no Docker socket in jobs.
+# Needs: Docker, runner/install/job-limits.sh (ci-jobs.slice), a GitHub App (see runner/README.md). Safe to rerun: values already in
+# config.env are kept unless you pass them in the environment, a changed file gets a backup.
+#
+# Asks (read -rp) for what is missing: GH_OWNER (GitHub user), GH_APP_CLIENT_ID (the App's client ID) and the path of the downloaded
+# private key (.pem; copied, never printed; delete the download afterwards). Without a terminal pass them in the environment: GH_OWNER,
+# GH_APP_CLIENT_ID, GH_KEY_SRC.
+# Env (all optional, kept from config.env on a rerun): GH_INSTALLATION_ID (found by itself), GH_LABELS (default
+# self-hosted,linux,<arm64|x64>,hetzner), GH_RUNNER_GROUP_ID (1), GH_MAX_JOBS (1), GH_POLL_INTERVAL (30), GH_IDLE_TIMEOUT (300),
+# GH_EXCLUDE_REPOS, GH_BUILDKIT (1), GH_JOB_CPUS / GH_JOB_MEMORY (the GitLab per-job values from config.toml, else 1.5 / 1536m),
+# GH_BUILDKIT_CPUS (1), GH_BUILDKIT_MEMORY (768m), GH_JOB_SUBNET_POOL (10.213.0.0/20), GH_MAX_RUNTIME. See runner/README.md.
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
+
+ETC=/etc/github-runner
+CFG="${ETC}/config.env"
+KEY="${ETC}/app.pem"
+KEY_RESTART="${ETC}/key-restart-required"
+SVC_USER=github-runner
+UNIT=github-runner-ctl.service
+CTL=/usr/local/bin/github-runner-ctl
+SLICE=/etc/systemd/system/ci-jobs.slice
+USERNS_DROPIN=/etc/sysctl.d/91-github-runner-userns.conf
+GITLAB_CFG=/etc/gitlab-runner/config.toml
+DO_PULL=1 DO_SELFTEST=1 DO_START=1 ONLY_SELFTEST=0
+
+usage() {
+  sed -n '2,/^set -E/{/^set -E/!p}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  cat <<USAGE
+
+Usage: $0 [--self-test] [--no-self-test] [--no-start] [--no-pull]
+  --self-test     only run the self-test with the installed config: mint a JWT, get an installation token, list the repositories and
+                  print which would be served (names and visibility); starts and changes nothing
+  --no-self-test  install and enable without the live check against GitHub (offline)
+  --no-start      enable the service but do not start it
+  --no-pull       do not pull the images now (the controller pulls a missing image before its first job)
+Removal: see runner/docs/github-runner.md (Remove it). Stop the controller, review and remove only containers and networks labelled
+  io.server-init.github-runner=job; never prune unrelated networks. Running pods survive a controller stop.
+USAGE
+}
+
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) ONLY_SELFTEST=1 ;;
+    --no-self-test) DO_SELFTEST=0 ;;
+    --no-start) DO_START=0 ;;
+    --no-pull) DO_PULL=0 ;;
+    *) usage >&2; die "unknown option: $1" ;;
+  esac
+  shift
+done
+require_root
+
+run_selftest() {
+  runuser -u "$SVC_USER" -- env GHR_CONFIG="$CFG" "$CTL" self-test
+}
+
+if (( ONLY_SELFTEST )); then
+  [[ -x "$CTL" && -f "$CFG" ]] || die "not installed yet: run $0 first"
+  run_selftest
+  exit $?
+fi
+
+# ---- preflight ---------------------------------------------------------------------------------------------------------------
+command -v docker >/dev/null || die "docker is not installed"
+systemctl is-active --quiet docker || die "docker is not running"
+systemctl cat ci-job-isolation.service >/dev/null 2>&1 || die "ci-job-isolation.service missing: install the runner host tools first"
+getent group docker >/dev/null || die "no docker group"
+[[ -f "$SLICE" ]] || die "${SLICE} missing: run runner/setup.sh --job-limits first (the pods run inside ci-jobs.slice, which caps all CI jobs together)"
+read -r cgdrv cgver < <(docker info --format '{{.CgroupDriver}} {{.CgroupVersion}}' 2>/dev/null || echo "? ?")
+[[ "$cgdrv" == systemd && "$cgver" == 2 ]] || die "Docker must use cgroup v2 with the systemd cgroup driver (found: ${cgdrv} v${cgver}); --cgroup-parent ci-jobs.slice needs it"
+for t in curl jq openssl; do command -v "$t" >/dev/null || pkg_install "$t"; done
+command -v runuser >/dev/null || die "runuser (util-linux) is missing"
+[[ -f "${REPO_ROOT}/runner/scripts/github-runner-ctl" && -f "${REPO_ROOT}/runner/systemd/${UNIT}" ]] || die "incomplete copy of the repository"
+
+existing() { # existing KEY: the value in config.env, quotes removed
+  [[ -f "$CFG" ]] || return 0
+  { grep -m1 "^$1=" "$CFG" || true; } | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/'
+}
+# pick KEY DEFAULT: environment, else config.env, else DEFAULT
+pick() {
+  local v=${!1:-}
+  [[ -n "$v" ]] || v=$(existing "$1")
+  printf '%s' "${v:-$2}"
+}
+
+# Rootless BuildKit needs user namespaces for non-root (kernel: user.max_user_namespaces > 0). Only written when it is 0.
+buildkit_wanted=$(pick GH_BUILDKIT 1)
+if [[ "$buildkit_wanted" == 1 ]]; then
+  maxns=$(sysctl -n user.max_user_namespaces 2>/dev/null || echo 0)
+  if [[ "$maxns" =~ ^[0-9]+$ ]] && (( maxns == 0 )); then
+    printf '# Written by runner/install/github-runner.sh: rootless BuildKit needs user namespaces.\nuser.max_user_namespaces = 28633\n' > "${USERNS_DROPIN}.new"
+    if ! cmp -s "${USERNS_DROPIN}.new" "$USERNS_DROPIN" 2>/dev/null; then mv "${USERNS_DROPIN}.new" "$USERNS_DROPIN"; else rm -f "${USERNS_DROPIN}.new"; fi
+    sysctl -q -w user.max_user_namespaces=28633 || log "WARN: could not set user.max_user_namespaces now; it applies after a reboot"
+    log "user.max_user_namespaces was 0: set to 28633 (${USERNS_DROPIN}); rootless BuildKit needs it"
+  else
+    log "user.max_user_namespaces = ${maxns}: ok for rootless BuildKit"
+  fi
+  if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" == 1 ]]; then
+    log "WARN: kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu): rootless BuildKit will fail; set it to 0 in /etc/sysctl.d or use GH_BUILDKIT=0"
+  fi
+fi
+
+# ---- service user ----------------------------------------------------------------------------------------------------------------
+NOLOGIN=$(command -v nologin || echo /sbin/nologin)
+if ! id "$SVC_USER" >/dev/null 2>&1; then
+  useradd -r -U -M -d /nonexistent -s "$NOLOGIN" -c "GitHub Actions runner controller" "$SVC_USER"
+  log "created service user ${SVC_USER}"
+fi
+usermod -s "$NOLOGIN" "$SVC_USER" >/dev/null 2>&1 || true
+usermod -L "$SVC_USER" 2>/dev/null || true
+usermod -aG docker "$SVC_USER"   # root-equivalent: it is what the controller needs to start the pods
+install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
+
+# ---- the key ---------------------------------------------------------------------------------------------------------------------
+changed=0
+src=${GH_KEY_SRC:-}
+if [[ -z "$src" && ! -f "$KEY" ]]; then
+  [[ -t 0 ]] || die "no private key yet: pass its path in GH_KEY_SRC (the .pem downloaded from the GitHub App page)"
+  read -rp "Path of the downloaded GitHub App private key (.pem): " src
+fi
+if [[ -n "$src" ]]; then
+  [[ -f "$src" && -r "$src" ]] || die "cannot read ${src}"
+  openssl rsa -in "$src" -passin pass: -noout >/dev/null 2>&1 || die "${src} is not an RSA private key (download it from the GitHub App page, Generate a private key)"
+  if ! cmp -s "$src" "$KEY" 2>/dev/null; then
+    [[ ! -f "$KEY" ]] || backup "$KEY"
+    install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$src" "$KEY"
+    ( umask 077; : > "$KEY_RESTART" )
+    changed=1   # clear cached credentials after a successful self-test, even when config and code are unchanged
+    log "private key installed: ${KEY} (mode 0600, owner ${SVC_USER})"
+  fi
+  if [[ "$(realpath "$src")" != "$(realpath "$KEY")" ]]; then
+    log "REMINDER: the downloaded copy ${src} is still on disk: delete it once the self-test passes (shred -u '${src}')"
+  fi
+fi
+[[ -f "$KEY" ]] || die "no ${KEY}"
+openssl rsa -in "$KEY" -passin pass: -noout >/dev/null 2>&1 || die "${KEY} is not an RSA private key"
+chown "${SVC_USER}:${SVC_USER}" "$KEY"; chmod 0600 "$KEY"
+[[ ! -f "$KEY_RESTART" ]] || changed=1   # retry a rotation whose self-test or activation previously failed
+
+# ---- config ----------------------------------------------------------------------------------------------------------------------
+GH_OWNER=$(pick GH_OWNER "")
+if [[ -z "$GH_OWNER" ]]; then
+  [[ -t 0 ]] || die "GH_OWNER is not set: pass the GitHub user name in the environment"
+  read -rp "GitHub user (owner of the private repositories): " GH_OWNER
+fi
+GH_APP_CLIENT_ID=$(pick GH_APP_CLIENT_ID "")
+if [[ -z "$GH_APP_CLIENT_ID" ]]; then
+  [[ -t 0 ]] || die "GH_APP_CLIENT_ID is not set: pass the App's client ID in the environment"
+  read -rp "Client ID of the GitHub App (Iv...): " GH_APP_CLIENT_ID
+fi
+case "$(uname -m)" in aarch64|arm64) arch=arm64 ;; *) arch=x64 ;; esac
+# the per-job limits of the GitLab jobs (same numbers): from config.toml when job-limits.sh wrote them
+gl() { [[ -f "$GITLAB_CFG" ]] && sed -nE "s/^[[:space:]]+$1 = \"([^\"]+)\".*/\1/p" "$GITLAB_CFG" | head -n1 || true; }
+job_mem_default=$(gl memory); job_cpu_default=$(gl cpus)
+
+# only plain characters: the value goes through sed (env_set) and into a file the controller parses
+set_cfg() {
+  [[ "$2" =~ ^[A-Za-z0-9_.,@:/+-]*$ ]] || die "$1: unexpected characters in '$2'"
+  [[ -n "${CFG_DRY:-}" ]] || env_set "${CFG_TARGET:-$CFG}" "$1" "$2"
+}
+write_config() {
+  set_cfg GH_OWNER "$GH_OWNER"
+  set_cfg GH_APP_CLIENT_ID "$GH_APP_CLIENT_ID"
+  set_cfg GH_INSTALLATION_ID "$(pick GH_INSTALLATION_ID "")"
+  set_cfg GH_LABELS "$(pick GH_LABELS "self-hosted,linux,${arch},hetzner")"
+  set_cfg GH_RUNNER_GROUP_ID "$(pick GH_RUNNER_GROUP_ID 1)"
+  set_cfg GH_MAX_JOBS "$(pick GH_MAX_JOBS 1)"
+  set_cfg GH_POLL_INTERVAL "$(pick GH_POLL_INTERVAL 30)"
+  set_cfg GH_IDLE_TIMEOUT "$(pick GH_IDLE_TIMEOUT 300)"
+  set_cfg GH_MAX_RUNTIME "$(pick GH_MAX_RUNTIME 21900)"
+  set_cfg GH_EXCLUDE_REPOS "$(pick GH_EXCLUDE_REPOS "")"
+  set_cfg GH_BUILDKIT "$buildkit_wanted"
+  set_cfg GH_JOB_CPUS "$(pick GH_JOB_CPUS "${job_cpu_default:-1.5}")"
+  set_cfg GH_JOB_MEMORY "$(pick GH_JOB_MEMORY "${job_mem_default:-1536m}")"
+  set_cfg GH_BUILDKIT_CPUS "$(pick GH_BUILDKIT_CPUS 1)"
+  set_cfg GH_BUILDKIT_MEMORY "$(pick GH_BUILDKIT_MEMORY 768m)"
+  set_cfg GH_JOB_SUBNET_POOL "$(pick GH_JOB_SUBNET_POOL 10.213.0.0/20)"
+  set_cfg GH_KEY_FILE "$KEY"
+  # the images are pinned in common/lib.sh and follow the repository (a bump reaches the host with this script or update.sh)
+  set_cfg GH_RUNNER_IMAGE "$GHR_RUNNER_IMAGE"
+  set_cfg GH_BUILDKIT_IMAGE "$GHR_BUILDKIT_IMAGE"
+}
+CFG_DRY=1 write_config   # checks every value first: a bad one must not leave a half-written file
+cfg_candidate=$(mktemp)
+trap 'rm -f -- "$cfg_candidate"' EXIT
+if [[ -f "$CFG" ]]; then cp "$CFG" "$cfg_candidate"; fi
+CFG_TARGET="$cfg_candidate" write_config
+GHR_CONFIG="$cfg_candidate" bash "${REPO_ROOT}/runner/scripts/github-runner-ctl" check-config \
+  || die "candidate config is invalid; installed config was not changed"
+apply_config() { cat "$cfg_candidate" > "$CFG"; }
+if [[ ! -f "$CFG" ]]; then
+  printf '# Written by runner/install/github-runner.sh. No secrets here: the private key is %s.\n# Documentation: runner/README.md (GitHub Actions runner).\n' "$KEY" > "$CFG"
+  write_config   # a new file: nothing to back up
+else
+  cfg_before=$(sha256sum < "$CFG")
+  edit_with_backup "$CFG" apply_config
+  [[ "$cfg_before" == "$(sha256sum < "$CFG")" ]] || changed=1   # restart below so the controller reads the new values
+fi
+chown "root:${SVC_USER}" "$CFG"; chmod 0640 "$CFG"
+
+# ---- files, unit, images -----------------------------------------------------------------------------------------------------------
+install_if_changed() { # SRC DST MODE
+  if ! cmp -s "$1" "$2" 2>/dev/null || [[ "$(stat -c %a "$2")" != "$(printf '%o' "$((8#$3))")" ]]; then
+    [[ ! -f "$2" ]] || backup "$2"
+    install -m "$3" "$1" "$2"; restorecon_if "$2"; changed=1; log "installed ${2}"
+  fi
+}
+bash -n "${REPO_ROOT}/runner/scripts/github-runner-ctl" || die "syntax error in the controller"
+install_if_changed "${REPO_ROOT}/runner/scripts/github-runner-ctl" "$CTL" 0755
+install_if_changed "${REPO_ROOT}/runner/systemd/${UNIT}" "/etc/systemd/system/${UNIT}" 0644
+GHR_CONFIG="$CFG" "$CTL" check-config || die "config.env is invalid (see above); fix it and rerun"
+systemctl daemon-reload
+# ci-job-isolation reads GH_JOB_SUBNET_POOL: it lets the pod networks, and only them, reach the npm cache (docker0 IP, port 4873)
+systemctl reload-or-restart ci-job-isolation.service || die "ci-job-isolation failed: inspect journalctl -u ci-job-isolation.service before enabling the runner"
+
+if (( DO_PULL )); then
+  log "pulling the pinned images (the runner image is large)"
+  docker pull -q "$GHR_RUNNER_IMAGE" >/dev/null
+  if [[ "$(existing GH_BUILDKIT)" == 1 ]]; then docker pull -q "$GHR_BUILDKIT_IMAGE" >/dev/null; fi
+fi
+
+# ---- self-test, then enable --------------------------------------------------------------------------------------------------------
+if (( DO_SELFTEST )); then
+  log "self-test against GitHub (starts nothing)"
+  if ! run_selftest; then
+    log "self-test FAILED: service activation is unchanged (an existing service may still be running). Fix the App, then rerun ${0} to self-test and apply activation/restart."
+    exit 1
+  fi
+fi
+systemctl enable "$UNIT" >/dev/null 2>&1
+if (( DO_START )); then
+  if systemctl is-active --quiet "$UNIT"; then
+    if (( changed )); then systemctl restart "$UNIT"; log "${UNIT} restarted (running pods keep running)"; fi
+  else
+    systemctl start "$UNIT"
+  fi
+  sleep 3
+  systemctl is-active --quiet "$UNIT" || { journalctl -u github-runner-ctl -n 20 --no-pager || true; die "${UNIT} is not running"; }
+  rm -f -- "$KEY_RESTART"
+  log "OK: ${UNIT} running. Use it with runs-on: [self-hosted, hetzner] in a private repository; logs: journalctl -u github-runner-ctl -f; health shows the status"
+else
+  log "OK: ${UNIT} enabled, not started (--no-start): systemctl start github-runner-ctl"
+fi
+__SIC_EOF__
+chmod 755 "$R/runner/install/github-runner.sh"
 
 install -d "$R/runner/install"
 cat > "$R/runner/install/grafana-domain.sh" <<'__SIC_EOF__'
@@ -10882,7 +13055,9 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
 # JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
-# out-of-memory kill (exit 137) instead of freezing the host.
+# out-of-memory kill (exit 137) instead of freezing the host. The opt-in GitHub Actions runner (runner/install/github-runner.sh) shares
+# this slice: its pod is a runner container with the same JOB_CPUS/JOB_MEMORY plus a BuildKit sidecar (768m), one pod at a time, so with it
+# installed keep concurrent = 1 (or raise JOBS_MEMORY_MAX on a bigger host) or a busy host hits the ceiling and kills a job.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
@@ -10896,7 +13071,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root
@@ -11662,6 +13837,7 @@ Updates what is installed on this server to the state of this repo checkout:
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
   npm-cache      /opt/npm-cache
+  github-runner  controller, unit and the two pinned images (common/lib.sh) in /etc/github-runner/config.env; pulls the images
 Components that are not installed are skipped.
 
   -n, --dry-run  show what would change, change nothing
@@ -12189,6 +14365,52 @@ update_npm_cache() {
   stack_sync npm-cache "$dir" "$cfg" config.yaml "$compose" "http://${bridge}:4873/-/ping"
 }
 
+# The opt-in GitHub Actions runner: controller script, unit and the image pins of this repo checkout. Never touches the key or the
+# rest of config.env. A new runner image must reach the host within 30 days of its release (GitHub stops queuing jobs to an older
+# runner), so a bump of GHR_RUNNER_IMAGE in common/lib.sh lands here. The controller is restarted at once: it keeps no job in
+# memory and a running pod is adopted again from its Docker labels (a restart deferred until idle would be lost, the next run sees no change).
+update_github_runner() {
+  local cfg=/etc/github-runner/config.env ctl=/usr/local/bin/github-runner-ctl unit=github-runner-ctl.service changed=0 cfg_changed=0 k want have
+  if [[ ! -f "$cfg" ]]; then
+    log "github-runner: not installed, skipping"
+    return 0
+  fi
+  bash -n "${REPO_ROOT}/runner/scripts/github-runner-ctl" || die "syntax error in runner/scripts/github-runner-ctl, nothing changed"
+  if sync_file "${REPO_ROOT}/runner/scripts/github-runner-ctl" "$ctl" 0755; then changed=1; CHANGED+=("scripts/github-runner-ctl"); fi
+  if sync_file "${REPO_ROOT}/runner/systemd/${unit}" "/etc/systemd/system/${unit}" 0644; then changed=1; CHANGED+=("systemd/${unit}"); run systemctl daemon-reload; fi
+  for k in GHR_RUNNER_IMAGE:GH_RUNNER_IMAGE GHR_BUILDKIT_IMAGE:GH_BUILDKIT_IMAGE; do
+    want=$(sed -n "s/^${k%%:*}=\"\(.*\)\"\$/\1/p" "${REPO_ROOT}/common/lib.sh")
+    [[ "$want" =~ @sha256:[0-9a-f]{64}$ ]] || die "no pinned ${k%%:*} in common/lib.sh"
+    have=$({ grep -m1 "^${k#*:}=" "$cfg" || true; } | cut -d= -f2-)
+    if [[ "$have" != "$want" ]]; then
+      cfg_changed=1; changed=1; CHANGED+=("github-runner/${k#*:}")
+      if (( DRYRUN )); then
+        log "[dry-run] would set ${k#*:}=${want}"
+      else
+        backup_to_run "$cfg"
+        env_set "$cfg" "${k#*:}" "$want"
+        chown root:github-runner "$cfg"; chmod 0640 "$cfg"
+        log "updated ${k#*:} in ${cfg}"
+      fi
+    fi
+  done
+  if (( DRYRUN )); then return 0; fi
+  if ! GHR_CONFIG="$cfg" "$ctl" check-config >/dev/null; then
+    restore_files
+    die "github-runner: config.env invalid after the update, files restored"
+  fi
+  if (( cfg_changed )) && command -v docker >/dev/null 2>&1; then
+    log "github-runner: pulling the pinned images"
+    docker pull -q "$(sed -n 's/^GH_RUNNER_IMAGE=//p' "$cfg")" >/dev/null || die "github-runner: cannot pull the runner image"
+    if [[ "$(sed -n 's/^GH_BUILDKIT=//p' "$cfg")" == 1 ]]; then docker pull -q "$(sed -n 's/^GH_BUILDKIT_IMAGE=//p' "$cfg")" >/dev/null || die "github-runner: cannot pull the BuildKit image"; fi
+  fi
+  if (( changed )) && systemctl is-active --quiet "$unit" 2>/dev/null; then
+    systemctl restart "$unit"
+    log "github-runner: controller restarted (running pods keep running and are adopted)"
+  fi
+  log "github-runner: done"
+}
+
 do_rollback() {
   local latest
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
@@ -12284,6 +14506,7 @@ main() {
     update_logging
     update_registry_cache
     update_npm_cache
+    update_github_runner
   else
     log "docker not installed, skipping container stacks"
   fi
@@ -12693,53 +14916,38 @@ chmod 755 "$R/runner/scripts/ci-image-prewarm.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/ci-job-isolation.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Keep CI job containers away from the cloud metadata service and from services on the host.
-# Run at boot and after every Docker start by ci-job-isolation.service; safe to rerun any time.
-#
-#   DOCKER-USER   drops traffic to 169.254.169.254 (Hetzner metadata: server data, user-data, tokens).
-#   INPUT         traffic from docker0 and the br-* bridges to the host itself goes through the chain CI-JOBS-IN:
-#                 only replies, ping and the npm cache (docker0 IP, port 4873) are let in, the rest is dropped.
-#
-# Not affected: internet access of jobs, the Docker Hub cache (Docker pulls through the mirror on 127.0.0.1:5000,
-# jobs do not), traffic between containers of one job, and the host-network stacks (monitoring, logging, caches).
-# Only IPv4 is handled. Remove the rules: systemctl disable --now ci-job-isolation; then iptables -F CI-JOBS-IN
-# and delete the two "ci-job-isolation" rules shown by iptables -S.
+# Keeps CI jobs away from the cloud metadata service (DOCKER-USER drops 169.254.169.254) and from host services (INPUT from docker0
+# and br-* goes through CI-JOBS-IN: replies, ping and the npm cache, docker0 IP port 4873, pass; br-* only from GH_JOB_SUBNET_POOL).
+# Run by ci-job-isolation.service at boot and after every Docker start; IPv4 only. Remove: disable the unit, iptables -F CI-JOBS-IN,
+# delete the two "ci-job-isolation" rules shown by iptables -S.
 set -Eeuo pipefail
-
 META_IP="${META_IP:-169.254.169.254}"
 NPM_PORT="${NPM_PORT:-4873}"
 TAG=ci-job-isolation
-
 log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$*"; }
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0   blocks CI jobs from ${META_IP} and from host services (except the npm cache on the docker0 IP, port ${NPM_PORT})"
   exit 0
 fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 command -v iptables >/dev/null 2>&1 || { log "iptables not found, nothing applied"; exit 1; }
-
 # Docker creates DOCKER-USER when it starts; wait for it after a boot.
 for _ in $(seq 1 30); do
   if iptables -n -L DOCKER-USER >/dev/null 2>&1; then break; fi
   sleep 1
 done
 iptables -n -L DOCKER-USER >/dev/null 2>&1 || { log "chain DOCKER-USER does not exist (is Docker running?), nothing applied"; exit 1; }
-
 # Insert a rule at the top of a chain unless it is there already.
 ensure() {
   local chain="$1"
   shift
   iptables -C "$chain" "$@" 2>/dev/null || iptables -I "$chain" 1 "$@"
 }
-
 ensure DOCKER-USER -d "$META_IP" -m comment --comment "$TAG" -j DROP
-
 BRIDGE_IP="${BRIDGE_IP:-}"
 if [[ -z "$BRIDGE_IP" ]] && command -v ip >/dev/null 2>&1; then
   BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
 fi
-
 iptables -N CI-JOBS-IN 2>/dev/null || true
 iptables -F CI-JOBS-IN
 iptables -A CI-JOBS-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
@@ -12747,27 +14955,1071 @@ iptables -A CI-JOBS-IN -p icmp --icmp-type echo-request -j ACCEPT
 if [[ -n "$BRIDGE_IP" ]]; then
   iptables -A CI-JOBS-IN -i docker0 -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT
 fi
+POOL=$(sed -n 's/^GH_JOB_SUBNET_POOL=//p' "${GHR_CONFIG:-/etc/github-runner/config.env}" 2>/dev/null | tr -d '"' | head -1 || true)
+if [[ -n "$POOL" && -n "$BRIDGE_IP" ]]; then
+  # only a private /16 to /27 block with zero host bits (as the controller checks it); a failing rule must not skip the DROP
+  IFS=. read -r o1 o2 o3 o4 <<<"${POOL%/*}"
+  if [[ "$POOL" =~ ^(10(\.[0-9]{1,3}){3}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2}|192\.168(\.[0-9]{1,3}){2})/(1[6-9]|2[0-7])$ ]] \
+     && (( ((10#$o1 << 24 | 10#$o2 << 16 | 10#$o3 << 8 | 10#$o4) & ((1 << (32 - ${POOL#*/})) - 1)) == 0 )); then
+    iptables -A CI-JOBS-IN -i 'br-+' -s "$POOL" -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT || { log "WARN: pool rule failed"; POOL=""; }
+  else
+    log "WARN: GH_JOB_SUBNET_POOL '${POOL}' is not an aligned private /16-/27 block, ignored"; POOL=""
+  fi
+fi
 iptables -A CI-JOBS-IN -j DROP
 ensure INPUT -i docker0 -m comment --comment "$TAG" -j CI-JOBS-IN
 ensure INPUT -i 'br-+' -m comment --comment "$TAG" -j CI-JOBS-IN
-
-log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT})"
+log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT}${POOL:+, also for ${POOL}})"
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/ci-job-isolation.sh"
+
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/github-runner-ctl" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# github-runner-ctl: controller of the opt-in ephemeral GitHub Actions runner (runner/install/github-runner.sh installs it).
+#
+# It authenticates as a GitHub App (private key on this host), finds the PRIVATE repositories of the App installation, watches
+# them for queued jobs that ask for this runner's labels and, for each such job, starts one "pod" on this host:
+#   - a just-in-time (JIT) runner: GitHub creates a one-job runner (POST .../actions/runners/generate-jitconfig), nothing long-lived
+#     is registered and no registration token is stored;
+#   - the pod is a per-job Docker network, an optional rootless BuildKit sidecar (TLS with an ephemeral CA) and the runner container.
+# The runner container has no Docker socket, no capabilities, no sudo and runs inside ci-jobs.slice with CPU/memory/pid limits.
+# Public, archived, internal and excluded repositories are never served; no pod is started for a fork pull request or for labels that are not
+# ours, and a pod that is given such a job anyway (an idle runner takes ANY queued job of its repository) is killed. Max GH_MAX_JOBS pods.
+#
+# Usage: github-runner-ctl [run | once | self-test | check-config | --help]
+#   run        poll forever (what github-runner-ctl.service runs)
+#   once       one poll, then exit (for tests and debugging)
+#   self-test  mint a JWT, get an installation token, list the repositories and print which would be served; starts nothing
+#   check-config  validate the config file only (exit 2 and the problems when it is invalid)
+# Config: /etc/github-runner/config.env (GHR_CONFIG overrides; no secrets), key: GH_KEY_FILE (default /etc/github-runner/app.pem).
+# State: GHR_STATE_DIR (default /run/github-runner): status.json (read by health), jobs/<pod>/ (per-pod secrets, mode 0700 parent), cache/.
+# Log: one "level=... event=..." line per decision to stderr (the journal); tokens, the JIT config and the key are never logged.
+# Exit codes: 0 ok, 1 runtime error, 2 usage or invalid config.
+set -Eeuo pipefail
+
+CONFIG="${GHR_CONFIG:-/etc/github-runner/config.env}"
+STATE_DIR="${GHR_STATE_DIR:-/run/github-runner}"
+LABEL_JOB=io.server-init.github-runner       # value "job" on every container of a pod (the idle gates and health look for it)
+LABEL_ROLE=io.server-init.github-runner.role
+LABEL_POD=io.server-init.github-runner.pod
+LABEL_REPO=io.server-init.github-runner.repo
+LABEL_RID=io.server-init.github-runner.runner-id
+LABEL_STARTED=io.server-init.github-runner.started
+LABEL_RUN=io.server-init.github-runner.run-id
+LABEL_SUBNET=io.server-init.github-runner.subnet
+POD_PREFIX_LEN=28                            # every pod network is a /28 (14 addresses) carved from GH_JOB_SUBNET_POOL
+POD_RE='^[0-9]{10}-[0-9a-f]{6}$'
+# Labels GitHub adds by itself: a job that asks only for these is not ours; our own label is a custom one.
+SYSTEM_LABELS="self-hosted linux windows macos x64 arm arm64 x86"
+# Rate limit: below this many requests left the poll only manages pods; JIT creation needs a few requests.
+RATE_LOW=500
+RATE_STOP=100
+
+# ---- logging --------------------------------------------------------------------------------------------------------------------
+INST_TOKEN="" JWT="" JWT_AT=0
+declare -A REPO_TOK=() REPO_TOK_EXP=()
+scrub() {
+  local t=$1 k
+  if [[ -n "$INST_TOKEN" ]]; then t=${t//"$INST_TOKEN"/'[token]'}; fi
+  if [[ -n "$JWT" ]]; then t=${t//"$JWT"/'[jwt]'}; fi
+  for k in "${!REPO_TOK[@]}"; do if [[ -n "${REPO_TOK[$k]}" ]]; then t=${t//"${REPO_TOK[$k]}"/'[token]'}; fi; done
+  printf '%s' "$t"
+}
+fmt_val() { local v=${1//$'\n'/ }; v=${v//\"/\'}; if [[ -z "$v" || "$v" =~ [[:space:]=] ]]; then printf '"%s"' "$v"; else printf '%s' "$v"; fi; }
+# say LEVEL EVENT [key=value ...]: <N> is the syslog priority the journal understands.
+say() {
+  local level=$1 event=$2 out="" kv prio=6; shift 2
+  case "$level" in error) prio=3 ;; warn) prio=4 ;; esac
+  for kv in "$@"; do out+=" ${kv%%=*}=$(fmt_val "${kv#*=}")"; done
+  scrub "<${prio}>level=${level} event=${event}${out}" >&2; printf '\n' >&2
+}
+die_cfg() { say error config_invalid "problem=$*"; exit 2; }
+
+usage() {
+  sed -n '2,/^set -E/{/^set -E/!p}' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ---- configuration --------------------------------------------------------------------------------------------------------------
+GH_OWNER="" GH_APP_CLIENT_ID="" GH_INSTALLATION_ID="" GH_LABELS="" GH_RUNNER_GROUP_ID=1 GH_MAX_JOBS=1 GH_POLL_INTERVAL=30
+GH_IDLE_TIMEOUT=300 GH_MAX_RUNTIME=21900 GH_EXCLUDE_REPOS="" GH_ALLOW_FORK_RUNS=0 GH_RUNNER_IMAGE="" GH_BUILDKIT_IMAGE="" GH_BUILDKIT=1
+GH_JOB_CPUS=1.5 GH_JOB_MEMORY=1536m GH_JOB_SHM=268435456 GH_JOB_PIDS=2048 GH_BUILDKIT_CPUS=1 GH_BUILDKIT_MEMORY=768m GH_BUILDKIT_PIDS=2048
+GH_JIT_PASS=env GH_KEY_FILE=/etc/github-runner/app.pem GH_API_URL=https://api.github.com GH_JOB_SUBNET_POOL=10.213.0.0/20
+CONFIG_KEYS="GH_OWNER GH_APP_CLIENT_ID GH_INSTALLATION_ID GH_LABELS GH_RUNNER_GROUP_ID GH_MAX_JOBS GH_POLL_INTERVAL GH_IDLE_TIMEOUT GH_MAX_RUNTIME GH_EXCLUDE_REPOS GH_ALLOW_FORK_RUNS GH_RUNNER_IMAGE GH_BUILDKIT_IMAGE GH_BUILDKIT GH_JOB_CPUS GH_JOB_MEMORY GH_JOB_SHM GH_JOB_PIDS GH_BUILDKIT_CPUS GH_BUILDKIT_MEMORY GH_BUILDKIT_PIDS GH_JIT_PASS GH_KEY_FILE GH_API_URL GH_JOB_SUBNET_POOL"
+
+# KEY=VALUE lines only (optionally "double quoted"), never executed.
+load_config() {
+  local line key val
+  [[ -r "$CONFIG" ]] || die_cfg "cannot read ${CONFIG}"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" =~ ^(GH_[A-Z0-9_]+)=(.*)$ ]] || die_cfg "unparsable line in ${CONFIG}: expected KEY=VALUE"
+    key=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+    if [[ "$val" == \"*\" && ${#val} -ge 2 ]]; then val=${val#\"}; val=${val%\"}; fi
+    if [[ " ${CONFIG_KEYS} " == *" ${key} "* ]]; then printf -v "$key" '%s' "$val"; else say warn config_unknown_key "key=${key}"; fi
+  done < "$CONFIG"
+}
+
+ip2int() { local IFS=.; local -a o; read -ra o <<<"$1"; echo $(( (o[0] << 24) + (o[1] << 16) + (o[2] << 8) + o[3] )); }
+int2ip() { echo "$(( ($1 >> 24) & 255 )).$(( ($1 >> 16) & 255 )).$(( ($1 >> 8) & 255 )).$(( $1 & 255 ))"; }
+# pool_check CIDR: a private IPv4 block /16 to /27, aligned; adds to CFG_ERRORS otherwise.
+pool_check() {
+  local c=$1 ip len a b o n mask
+  if [[ ! "$c" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then bad "invalid GH_JOB_SUBNET_POOL: '${c}' (expected a CIDR such as 10.213.0.0/20)"; return 0; fi
+  ip=${c%/*}; len=$((10#${c#*/}))
+  for o in ${ip//./ }; do (( 10#$o <= 255 )) || { bad "invalid GH_JOB_SUBNET_POOL: octet ${o} out of range"; return 0; }; done
+  (( len >= 16 && len <= POD_PREFIX_LEN - 1 )) || { bad "invalid GH_JOB_SUBNET_POOL: prefix /${len} must be between /16 and /$((POD_PREFIX_LEN - 1)) (each pod gets a /${POD_PREFIX_LEN})"; return 0; }
+  n=$(ip2int "$ip"); mask=$(( (0xFFFFFFFF << (32 - len)) & 0xFFFFFFFF ))
+  (( (n & mask) == n )) || { bad "invalid GH_JOB_SUBNET_POOL: ${c} is not aligned (network address would be $(int2ip $((n & mask))))"; return 0; }
+  a=$(( n >> 24 )); b=$(( (n >> 16) & 255 ))
+  if (( a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168) )); then :; else bad "invalid GH_JOB_SUBNET_POOL: ${c} is not a private (RFC 1918) block"; fi
+}
+
+CFG_ERRORS=()
+bad() { CFG_ERRORS+=("$*"); }
+rx() { [[ "$2" =~ $3 ]] || bad "invalid $1: '$2' (expected $4)"; }
+
+validate_config() {
+  local l e image_re='^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$' have_custom=0 have_self=0
+  CFG_ERRORS=()
+  rx GH_OWNER "$GH_OWNER" '^[A-Za-z0-9]([A-Za-z0-9-]{0,38})$' "a GitHub user or organization name"
+  rx GH_APP_CLIENT_ID "$GH_APP_CLIENT_ID" '^[A-Za-z0-9_.-]{4,64}$' "the App client ID (Iv1.... or Iv23...) or numeric App ID"
+  rx GH_INSTALLATION_ID "$GH_INSTALLATION_ID" '^([0-9]{1,15})?$' "empty (auto-discovered) or digits"
+  rx GH_RUNNER_GROUP_ID "$GH_RUNNER_GROUP_ID" '^[0-9]{1,9}$' "digits (1 is the default group)"
+  rx GH_MAX_JOBS "$GH_MAX_JOBS" '^[1-9][0-9]?$' "1 to 99"
+  rx GH_POLL_INTERVAL "$GH_POLL_INTERVAL" '^[0-9]{2,4}$' "seconds, 10 to 3600"
+  rx GH_IDLE_TIMEOUT "$GH_IDLE_TIMEOUT" '^[0-9]{2,5}$' "seconds, 60 to 86400"
+  rx GH_MAX_RUNTIME "$GH_MAX_RUNTIME" '^[0-9]{3,6}$' "seconds, 600 to 172800"
+  rx GH_ALLOW_FORK_RUNS "$GH_ALLOW_FORK_RUNS" '^[01]$' "0 or 1"
+  rx GH_BUILDKIT "$GH_BUILDKIT" '^[01]$' "0 or 1"
+  rx GH_JIT_PASS "$GH_JIT_PASS" '^(env|arg)$' "env or arg"
+  rx GH_RUNNER_IMAGE "$GH_RUNNER_IMAGE" "$image_re" "name:tag@sha256:<64 hex>"
+  if [[ "$GH_BUILDKIT" == 1 ]]; then rx GH_BUILDKIT_IMAGE "$GH_BUILDKIT_IMAGE" "$image_re" "name:tag@sha256:<64 hex>"; fi
+  rx GH_JOB_CPUS "$GH_JOB_CPUS" '^[0-9]+(\.[0-9]+)?$' "for example 1.5"
+  rx GH_BUILDKIT_CPUS "$GH_BUILDKIT_CPUS" '^[0-9]+(\.[0-9]+)?$' "for example 1"
+  rx GH_JOB_MEMORY "$GH_JOB_MEMORY" '^[0-9]+[kmg]$' "for example 1536m"
+  rx GH_BUILDKIT_MEMORY "$GH_BUILDKIT_MEMORY" '^[0-9]+[kmg]$' "for example 768m"
+  rx GH_JOB_SHM "$GH_JOB_SHM" '^[0-9]+$' "bytes"
+  rx GH_JOB_PIDS "$GH_JOB_PIDS" '^[0-9]+$' "a number"
+  rx GH_BUILDKIT_PIDS "$GH_BUILDKIT_PIDS" '^[0-9]+$' "a number"
+  rx GH_KEY_FILE "$GH_KEY_FILE" '^/[A-Za-z0-9._/-]+$' "an absolute path"
+  rx GH_API_URL "$GH_API_URL" '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._/-]*)?$' "an https:// URL without trailing slash"
+  [[ "$GH_API_URL" != */ ]] || bad "invalid GH_API_URL: no trailing slash"
+  pool_check "$GH_JOB_SUBNET_POOL"
+  # numeric ranges (only when the shape is right)
+  if [[ "$GH_POLL_INTERVAL" =~ ^[0-9]+$ ]] && (( 10#$GH_POLL_INTERVAL < 10 || 10#$GH_POLL_INTERVAL > 3600 )); then bad "GH_POLL_INTERVAL out of range: ${GH_POLL_INTERVAL} (10 to 3600)"; fi
+  if [[ "$GH_IDLE_TIMEOUT" =~ ^[0-9]+$ ]] && (( 10#$GH_IDLE_TIMEOUT < 60 || 10#$GH_IDLE_TIMEOUT > 86400 )); then bad "GH_IDLE_TIMEOUT out of range: ${GH_IDLE_TIMEOUT} (60 to 86400)"; fi
+  if [[ "$GH_MAX_RUNTIME" =~ ^[0-9]+$ ]] && (( 10#$GH_MAX_RUNTIME < 600 || 10#$GH_MAX_RUNTIME > 172800 )); then bad "GH_MAX_RUNTIME out of range: ${GH_MAX_RUNTIME} (600 to 172800)"; fi
+  # labels: comma separated; must contain self-hosted and at least one custom label (so a plain "runs-on: self-hosted" job is never taken)
+  if [[ -z "$GH_LABELS" ]]; then
+    bad "GH_LABELS is empty"
+  else
+    local -a labels; IFS=, read -ra labels <<<"$GH_LABELS"
+    for l in "${labels[@]}"; do
+      [[ "$l" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { bad "invalid label in GH_LABELS: '${l}'"; continue; }
+      l=${l,,}
+      [[ "$l" == self-hosted ]] && have_self=1
+      [[ " ${SYSTEM_LABELS} " == *" ${l} "* ]] || have_custom=1
+    done
+    (( have_self )) || bad "GH_LABELS must contain self-hosted"
+    (( have_custom )) || bad "GH_LABELS needs at least one custom label (for example hetzner): jobs that only ask for self-hosted, linux or the architecture are not taken"
+  fi
+  local -a excl; IFS=, read -ra excl <<<"$GH_EXCLUDE_REPOS"
+  for e in "${excl[@]}"; do
+    [[ "$e" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$ ]] || bad "invalid entry in GH_EXCLUDE_REPOS: '${e}' (owner/name or name)"
+  done
+  (( ${#CFG_ERRORS[@]} == 0 ))
+}
+
+# Derived values, after validation.
+derive_config() {
+  local h
+  API_URL=${GH_API_URL}
+  h=$(hostname -s 2>/dev/null || echo host); h=${h//[^A-Za-z0-9-]/-}
+  NAME_PREFIX="ghr-${h:0:30}-"
+  LABELS_JSON=$(printf '%s' "$GH_LABELS" | tr ',' '\n' | jq -R . | jq -sc .)
+  LABELS_LC=$(jq -c 'map(ascii_downcase)' <<<"$LABELS_JSON")
+  CUSTOM_LC=$(jq -c --arg sys "$SYSTEM_LABELS" '[.[] | select(. as $x | ($sys | split(" ")) | index($x) | not)]' <<<"$LABELS_LC")
+  local e ex=() excl
+  IFS=, read -ra excl <<<"$GH_EXCLUDE_REPOS"
+  for e in "${excl[@]}"; do
+    [[ "$e" == */* ]] || e="${GH_OWNER}/${e}"
+    ex+=("${e,,}")
+  done
+  if (( ${#ex[@]} )); then EXCL_JSON=$(printf '%s\n' "${ex[@]}" | jq -R . | jq -sc .); else EXCL_JSON='[]'; fi
+  MAX_JOBS=$((10#$GH_MAX_JOBS)); POLL=$((10#$GH_POLL_INTERVAL)); IDLE_TIMEOUT=$((10#$GH_IDLE_TIMEOUT)); MAX_RUNTIME=$((10#$GH_MAX_RUNTIME))
+}
+
+# ---- GitHub API -----------------------------------------------------------------------------------------------------------------
+TMP="" CACHE="" JOBS="" INSTALL_ID="" INST_EXP=0
+RATE_REMAINING="" RATE_LIMIT="" RATE_RESET=""
+API_CODE="" API_OUT="" API_HDR=""
+
+hdr_get() { awk -v want="$2" 'BEGIN { FS = ": *" } { sub(/\r$/, "") } tolower($1) == want { sub(/^[^:]*: */, ""); print; exit }' "$1"; }
+
+# api METHOD PATH AUTH(jwt|inst|repo:OWNER/NAME|none) [BODYFILE] [extra curl args...]: sets API_CODE (000 on a network error or while
+# API_OFF=1), API_OUT (body), API_HDR. "inst" is the installation token (Actions: read, all repositories); "repo:" is a token of one repository
+# with Administration: write (runners), minted on first use. The token goes to curl through "-K -" (stdin), never through argv.
+API_OFF=0
+api() {
+  local method=$1 path=$2 auth=$3 body=${4:-} tok="" n=$#; shift $(( n < 4 ? n : 4 ))
+  if (( API_OFF )); then API_CODE=000; : > "$API_OUT"; : > "$API_HDR"; return 0; fi
+  case "$auth" in
+    jwt) tok=$JWT ;;
+    inst) tok=$INST_TOKEN ;;
+    repo:*) if ensure_repo_token "${auth#repo:}"; then tok=${REPO_TOK[${auth#repo:}]}; else API_CODE=000; : > "$API_OUT"; : > "$API_HDR"; return 0; fi ;;
+  esac
+  local -a args=(-sS -m 30 --connect-timeout 10 -X "$method" -D "$API_HDR" -o "$API_OUT" -w '%{http_code}'
+                 -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -H 'User-Agent: github-runner-ctl')
+  if [[ -n "$body" ]]; then args+=(-H 'Content-Type: application/json' --data-binary "@${body}"); fi
+  args+=("$@")
+  : > "$API_OUT"; : > "$API_HDR"
+  API_CODE=000
+  if [[ -n "$tok" ]]; then
+    API_CODE=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl "${args[@]}" -K - "${API_URL}${path}" 2>/dev/null) || API_CODE=000
+  else
+    API_CODE=$(curl "${args[@]}" "${API_URL}${path}" 2>/dev/null) || API_CODE=000
+  fi
+  if [[ "$auth" == inst || "$auth" == repo:* ]]; then
+    local v
+    v=$(hdr_get "$API_HDR" x-ratelimit-remaining); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_REMAINING=$v; fi
+    v=$(hdr_get "$API_HDR" x-ratelimit-limit); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_LIMIT=$v; fi
+    v=$(hdr_get "$API_HDR" x-ratelimit-reset); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_RESET=$v; fi
+  fi
+  [[ "$API_CODE" =~ ^[0-9]{3}$ ]] || API_CODE=000
+}
+
+# A short, secret-free description of the last failed call.
+api_msg() {
+  local msg=""
+  if [[ -s "$API_OUT" ]]; then msg=$(jq -r '.message // empty' "$API_OUT" 2>/dev/null | head -c 200 || true); fi
+  if [[ "$API_CODE" == 000 ]]; then msg="no answer (network error or timeout)"; fi
+  printf '%s' "${msg:-none}"
+}
+api_err() { printf 'http=%s message=%s' "$API_CODE" "$(api_msg)"; }
+
+LAST_ERROR=""
+PAUSE_UNTIL=0
+# fail_api EVENT [key=value...]: log the last call as an error, remember it for the status file, honor Retry-After. Always returns 1.
+fail_api() {
+  local ev=$1 ra; shift
+  LAST_ERROR="${ev}: http ${API_CODE} $(api_msg)"
+  say error "$ev" "http=${API_CODE}" "message=$(api_msg)" "$@"
+  if [[ "$API_CODE" == 401 ]]; then INST_TOKEN=""; INST_EXP=0; REPO_TOK=(); REPO_TOK_EXP=(); fi
+  ra=$(hdr_get "$API_HDR" retry-after)
+  if [[ "$ra" =~ ^[0-9]+$ ]]; then PAUSE_UNTIL=$(( $(date +%s) + (ra > 900 ? 900 : ra) )); say warn rate_limited "retry_after=${ra}"; fi
+  if [[ "$API_CODE" == 403 || "$API_CODE" == 429 ]] && [[ "$RATE_REMAINING" == 0 && "$RATE_RESET" =~ ^[0-9]+$ ]]; then
+    PAUSE_UNTIL=$(( RATE_RESET + 5 )); say warn rate_limit_exhausted "until=${RATE_RESET}"
+  fi
+  return 1
+}
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# make_jwt: RS256, iat = now-60 (clock drift), exp = now+540 (< 10 min), iss = App client ID.
+make_jwt() {
+  local now header payload si sig
+  now=$(date +%s)
+  header='{"alg":"RS256","typ":"JWT"}'
+  payload=$(jq -cn --argjson iat $((now - 60)) --argjson exp $((now + 540)) --arg iss "$GH_APP_CLIENT_ID" '{iat: $iat, exp: $exp, iss: $iss}')
+  si="$(printf '%s' "$header" | b64url).$(printf '%s' "$payload" | b64url)"
+  sig=$(printf '%s' "$si" | openssl dgst -sha256 -sign "$GH_KEY_FILE" 2>/dev/null | b64url) || sig=""
+  if [[ -z "$sig" ]]; then
+    LAST_ERROR="cannot sign the JWT with ${GH_KEY_FILE}"
+    say error jwt_failed "problem=cannot sign with the key (missing, unreadable or not an RSA key)" "key=${GH_KEY_FILE}"
+    return 1
+  fi
+  JWT="${si}.${sig}"; JWT_AT=$now
+}
+
+LAST_TOKEN_OK=0
+# ensure_token: installation token, cached until 5 minutes before it expires.
+ensure_token() {
+  local now exp body
+  now=$(date +%s)
+  if [[ -n "$INST_TOKEN" ]] && (( INST_EXP > now + 300 )); then return 0; fi
+  make_jwt || return 1
+  if [[ -z "$INSTALL_ID" ]]; then
+    INSTALL_ID=${GH_INSTALLATION_ID}
+  fi
+  if [[ -z "$INSTALL_ID" ]]; then
+    api GET "/users/${GH_OWNER}/installation" jwt
+    if [[ "$API_CODE" != 200 ]]; then fail_api installation_discovery_failed "owner=${GH_OWNER}" "hint=install the App on this account and check GH_OWNER and GH_APP_CLIENT_ID"; return 1; fi
+    INSTALL_ID=$(jq -r '.id // empty' "$API_OUT")
+    [[ "$INSTALL_ID" =~ ^[0-9]+$ ]] || { INSTALL_ID=""; LAST_ERROR="installation id missing in the answer"; say error installation_discovery_failed "problem=no id in the answer"; return 1; }
+    say info installation_discovered "installation=${INSTALL_ID}"
+  fi
+  body="${TMP}/token-request.json"
+  # Least privilege: this token only reads runs and jobs (Actions: read; Metadata is implied). Whatever needs Administration: write
+  # (creating and deleting runners) uses a token of the one repository concerned, see ensure_repo_token.
+  printf '%s' '{"permissions":{"actions":"read"}}' > "$body"
+  api POST "/app/installations/${INSTALL_ID}/access_tokens" jwt "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then fail_api token_failed "installation=${INSTALL_ID}" "hint=the App needs Administration: write and Actions: read (repository permissions)"; return 1; fi
+  INST_TOKEN=$(jq -r '.token // empty' "$API_OUT")
+  exp=$(jq -r '.expires_at // empty' "$API_OUT")
+  : > "$API_OUT"
+  [[ -n "$INST_TOKEN" ]] || { LAST_ERROR="no token in the answer"; say error token_failed "problem=no token in the answer"; return 1; }
+  INST_EXP=$(date -u -d "$exp" +%s 2>/dev/null || echo $((now + 3000)))
+  LAST_TOKEN_OK=$now
+  say info token_minted "installation=${INSTALL_ID}" "valid_for=$((INST_EXP - now))s"
+}
+
+# ensure_repo_token OWNER/NAME: a token for that one repository with Administration: write only, cached until 5 minutes before it expires.
+ensure_repo_token() {
+  local repo=$1 now exp body
+  now=$(date +%s)
+  if [[ -n "${REPO_TOK[$repo]:-}" ]] && (( ${REPO_TOK_EXP[$repo]:-0} > now + 300 )); then return 0; fi
+  [[ -n "$INSTALL_ID" ]] || return 1
+  if [[ -z "$JWT" ]] || (( now - JWT_AT > 480 )); then make_jwt || return 1; fi
+  body="${TMP}/repo-token-request.json"
+  jq -n --arg r "${repo#*/}" '{repositories: [$r], permissions: {administration: "write"}}' > "$body" || return 1
+  api POST "/app/installations/${INSTALL_ID}/access_tokens" jwt "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then fail_api token_failed "installation=${INSTALL_ID}" "repo=${repo}" "scope=administration" "hint=the App needs Administration: Read and write and access to this repository"; return 1; fi
+  REPO_TOK[$repo]=$(jq -r '.token // empty' "$API_OUT")
+  exp=$(jq -r '.expires_at // empty' "$API_OUT")
+  : > "$API_OUT"
+  if [[ -z "${REPO_TOK[$repo]}" ]]; then LAST_ERROR="no token in the answer"; return 1; fi
+  REPO_TOK_EXP[$repo]=$(date -u -d "$exp" +%s 2>/dev/null || echo $((now + 3000)))
+}
+
+# api_get_cached PATH [AUTH]: conditional GET (If-None-Match); 304 costs no quota. Sets API_BODY to the cached body, CACHE_FRESH=1 when it changed.
+API_BODY="" CACHE_FRESH=0
+api_get_cached() {
+  local path=$1 auth=${2:-inst} key etag="" extra=()
+  key=$(printf '%s' "$path" | sha1sum | cut -c1-20)
+  if [[ -s "${CACHE}/${key}.etag" && -s "${CACHE}/${key}.json" ]]; then etag=$(<"${CACHE}/${key}.etag"); extra=(-H "If-None-Match: ${etag}"); fi
+  api GET "$path" "$auth" "" "${extra[@]}"
+  API_BODY="${CACHE}/${key}.json"
+  case "$API_CODE" in
+    200)
+      cp "$API_OUT" "$API_BODY"
+      etag=$(hdr_get "$API_HDR" etag)
+      if [[ -n "$etag" ]]; then printf '%s' "$etag" > "${CACHE}/${key}.etag"; else rm -f "${CACHE}/${key}.etag"; fi
+      CACHE_FRESH=1 ;;
+    304) CACHE_FRESH=0; touch "$API_BODY" "${CACHE}/${key}.etag" 2>/dev/null || true ;;   # a hit keeps the entry from being pruned
+    *) return 1 ;;
+  esac
+}
+
+# ---- repositories ---------------------------------------------------------------------------------------------------------------
+# get_paged PATH FIELD PER_PAGE MAXPAGES [AUTH]: GETs PATH?...&page=N (conditional, cached) until the last page and merges the arrays named
+# FIELD of all pages into PAGED_FILE as {FIELD: [...]}. PAGED_TRUNCATED=1 when MAXPAGES was not enough. Returns 1 when a page fails.
+PAGED_FILE="" PAGED_TRUNCATED=0
+get_paged() {
+  local base=$1 field=$2 per=$3 max=$4 auth=${5:-inst} page=1 more sep='&'
+  [[ "$base" == *\? ]] && sep=''; [[ "$base" == *\?* ]] || sep='?'
+  PAGED_FILE="${TMP}/paged.json"; PAGED_TRUNCATED=0
+  : > "${TMP}/paged.pages"
+  while :; do
+    api_get_cached "${base}${sep}per_page=${per}&page=${page}" "$auth" || return 1
+    printf '%s\n' "$API_BODY" >> "${TMP}/paged.pages"
+    more=0
+    # Link: rel="next" on a fresh answer; a 304 may come without headers, then a full page means there may be more
+    if grep -qi 'rel="next"' "$API_HDR" 2>/dev/null || { (( CACHE_FRESH == 0 )) && [[ "$(jq --arg f "$field" '.[$f] | length' "$API_BODY")" == "$per" ]]; }; then more=1; fi
+    (( more )) || break
+    if (( page >= max )); then PAGED_TRUNCATED=1; break; fi
+    page=$((page + 1))
+  done
+  # shellcheck disable=SC2046
+  jq -s --arg f "$field" '{($f): [.[] | .[$f][]?]}' $(cat "${TMP}/paged.pages") > "$PAGED_FILE"
+}
+
+SERVED=() SKIPPED=() ALL_REPOS=()
+REPOS_CHANGED=0
+# list_repos: fills SERVED (repo full names to serve) and SKIPPED ("name reason"), ALL_REPOS (everything the installation sees).
+list_repos() {
+  local merged tsv name why sum
+  get_paged "/installation/repositories?" repositories 100 50 || { fail_api repo_list_failed; return 1; }
+  merged=$PAGED_FILE
+  if (( PAGED_TRUNCATED )); then say warn repo_list_truncated "pages=50" "hint=more than 5000 repositories; the rest are not served"; fi
+  sum=$(sha1sum < "$merged" | cut -c1-40)
+  REPOS_CHANGED=0
+  if [[ "$sum" != "$(cat "${STATE_DIR}/repos.sha" 2>/dev/null || true)" ]]; then REPOS_CHANGED=1; printf '%s' "$sum" > "${STATE_DIR}/repos.sha"; fi
+  # Fail closed: a repository is served only when every flag says private. An absent field counts as "not private".
+  tsv=$(jq -r --arg owner "${GH_OWNER,,}" --argjson excl "$EXCL_JSON" '
+    .repositories[] | . as $r | ($r.full_name // "") as $n |
+    (if $n == "" then "unnamed"
+     elif ((($r.owner.login // "") | ascii_downcase) != $owner) then "other-owner"
+     elif $r.private != true then "public"
+     elif $r.visibility != "private" then "visibility-" + (($r.visibility // "unknown") | tostring)
+     elif $r.archived != false then "archived"
+     elif $r.disabled == true then "disabled"
+     elif ($excl | index($n | ascii_downcase)) != null then "excluded"
+     else "" end) as $why | [$n, $why] | @tsv' "$merged")
+  SERVED=() SKIPPED=() ALL_REPOS=()
+  while IFS=$'\t' read -r name why; do
+    [[ -n "$name" ]] || continue
+    [[ "$name" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { say warn repo_ignored "reason=unexpected-name"; continue; }
+    ALL_REPOS+=("$name")
+    if [[ -z "$why" ]]; then SERVED+=("$name"); else SKIPPED+=("${name} ${why}"); fi
+  done <<<"$tsv"
+}
+
+# ---- pods (docker) --------------------------------------------------------------------------------------------------------------
+PS_FORMAT="{{.Names}}|{{.State}}|{{.Label \"${LABEL_ROLE}\"}}|{{.Label \"${LABEL_POD}\"}}|{{.Label \"${LABEL_REPO}\"}}|{{.Label \"${LABEL_RID}\"}}|{{.Label \"${LABEL_STARTED}\"}}"
+declare -A POD_STATE=() POD_REPO=() POD_RID=() POD_STARTED=() POD_BK=() IDLE_BY_REPO=() WARNED=()
+ACTIVE=0 IDLE=0
+CONSEC_FAIL=0 BACKOFF_UNTIL=0 UPDATE_REQUIRED=0 IMAGE_CREATED=""
+
+save_state() { printf 'CONSEC_FAIL=%s\nBACKOFF_UNTIL=%s\nUPDATE_REQUIRED=%s\nIMAGE_CREATED=%s\n' "$CONSEC_FAIL" "$BACKOFF_UNTIL" "$UPDATE_REQUIRED" "$IMAGE_CREATED" > "${STATE_DIR}/ctl.state"; }
+load_state() {
+  local k v
+  [[ -f "${STATE_DIR}/ctl.state" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ "$v" =~ ^[0-9]*$ ]] || continue
+    case "$k" in CONSEC_FAIL|BACKOFF_UNTIL|UPDATE_REQUIRED|IMAGE_CREATED) printf -v "$k" '%s' "$v" ;; esac
+  done < "${STATE_DIR}/ctl.state"
+}
+
+# scan_pods: fills POD_* from the labels of the containers; the labels are the persistent state, so a restarted controller adopts running pods.
+# Returns 1 when docker does not answer: that is not "no pods" and the caller must not clean up or start anything on it.
+scan_pods() {
+  local name state role pod repo rid started out
+  out=$(docker ps -a --filter "label=${LABEL_JOB}=job" --format "$PS_FORMAT" 2>/dev/null) || return 1
+  POD_STATE=() POD_REPO=() POD_RID=() POD_STARTED=() POD_BK=()
+  while IFS='|' read -r name state role pod repo rid started; do
+    [[ "$pod" =~ $POD_RE ]] || continue
+    case "$role" in
+      runner) POD_STATE[$pod]=$state; POD_REPO[$pod]=$repo; POD_RID[$pod]=$rid; POD_STARTED[$pod]=$started ;;
+      buildkit) POD_BK[$pod]=$state ;;
+    esac
+  done <<<"$out"
+}
+
+# all_pod_ids: every pod id that has any trace: container, network (scan_nets) or directory.
+all_pod_ids() {
+  {
+    printf '%s\n' "${!POD_STATE[@]}" "${!POD_BK[@]}" "${NET_PODS[@]}"
+    ls -1 "$JOBS" 2>/dev/null || true
+  } | grep -E "$POD_RE" | sort -u || true
+}
+
+pod_dir() { printf '%s/%s' "$JOBS" "$1"; }
+
+delete_runner() { # delete_runner REPO ID REASON   (with the repository's own token)
+  local repo=$1 id=$2 why=$3
+  [[ "$id" =~ ^[0-9]+$ ]] || return 0
+  if (( API_OFF )); then return 0; fi   # JIT runners that never got a job are removed by GitHub itself; the sweep catches the rest
+  api DELETE "/repos/${repo}/actions/runners/${id}" "repo:${repo}"
+  case "$API_CODE" in
+    204) say info runner_deleted "repo=${repo}" "runner=${id}" "reason=${why}" ;;
+    404) ;;
+    *) say warn runner_delete_failed "repo=${repo}" "runner=${id}" "reason=${why}" "$(api_err)" ;;
+  esac
+}
+
+# cleanup_pod POD: remove containers, network and the secrets directory of a pod. Safe to repeat.
+cleanup_pod() {
+  local pod=$1
+  [[ "$pod" =~ $POD_RE ]] || return 0
+  docker rm -f "ghr-${pod}-runner" "ghr-${pod}-buildkitd" >/dev/null 2>&1 || true
+  docker network rm "ghr-${pod}" >/dev/null 2>&1 || true
+  rm -rf -- "$(pod_dir "$pod")"
+}
+
+kill_pod() { # kill_pod POD REPO RID REASON
+  local pod=$1
+  mkdir -p "$(pod_dir "$pod")" && : > "$(pod_dir "$pod")/killed"
+  say warn pod_killed "pod=${pod}" "repo=$2" "reason=$4"
+  docker kill "ghr-${pod}-runner" >/dev/null 2>&1 || true
+  delete_runner "$2" "$3" "$4"
+}
+
+# backoff_for N: seconds to wait after the N-th failure in a row: 30, 60, 120, ... at most 900.
+backoff_for() { local n=$1 d; (( n < 1 )) && n=1; d=$((30 * (1 << (n > 5 ? 5 : n - 1)))); (( d > 900 )) && d=900; echo "$d"; }
+
+# finish_pod POD: the runner container has exited; log why, keep the failure count, clean up.
+# The entry runs Runner.Listener directly (not run.sh, which swallows its exit code), so the code is the Listener's: 0 done, 1 error,
+# 2 retryable error, 3 or 4 it staged a self-update (the pinned image is too old). A runner that ends within 120 s without having taken
+# a job is a failure whatever the code says.
+finish_pod() {
+  local pod=$1 repo=${POD_REPO[$1]:-} rid=${POD_RID[$1]:-} started=${POD_STARTED[$1]:-0} info code oom now ran killed=0 ran_job=0 logs fail=0 why="" l
+  now=$(date +%s)
+  info=$(docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' "ghr-${pod}-runner" 2>/dev/null || echo "? false")
+  code=${info% *}; oom=${info#* }
+  [[ "$started" =~ ^[0-9]+$ ]] || started=$now
+  ran=$((now - started))
+  [[ -e "$(pod_dir "$pod")/killed" ]] && killed=1
+  logs=$(docker logs --tail 200 "ghr-${pod}-runner" 2>&1 || true)
+  # a job was taken if the poll saw the runner busy, or the runner itself says so (jobs shorter than a poll)
+  if [[ -e "$(pod_dir "$pod")/busy" ]] || grep -q 'Running job:' <<<"$logs"; then ran_job=1; fi
+  case "$code" in
+    0)
+      if (( ! ran_job && ! killed && ran < 120 )); then fail=1; why="exited after ${ran}s without taking a job"
+      else say info job_finished "pod=${pod}" "repo=${repo}" "seconds=${ran}"; CONSEC_FAIL=0; UPDATE_REQUIRED=0; fi ;;
+    3|4)
+      UPDATE_REQUIRED=1; fail=1; why="the runner staged a self-update"
+      say error runner_update_required "pod=${pod}" "repo=${repo}" "exit=${code}" \
+        "hint=the runner wanted to update itself: the pinned image is too old. Bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh" ;;
+    *)
+      if (( killed )); then say info pod_ended_after_kill "pod=${pod}" "repo=${repo}" "exit=${code}"
+      else fail=1; why="runner exit code ${code}"; fi ;;
+  esac
+  if (( fail )); then
+    CONSEC_FAIL=$((CONSEC_FAIL + 1))
+    say warn runner_failed "pod=${pod}" "repo=${repo}" "exit=${code}" "oom_killed=${oom}" "seconds=${ran}" "job_taken=${ran_job}" "why=${why}"
+    # the runner's own log shows why; the runner masks secrets in it
+    tail -n 15 <<<"$logs" | while IFS= read -r l; do say warn runner_log "pod=${pod}" "line=${l:0:300}"; done || true
+    if (( ran < 120 )); then
+      local d; d=$(backoff_for "$CONSEC_FAIL")
+      BACKOFF_UNTIL=$((now + d)); say warn pod_start_paused "seconds=${d}" "after_failures=${CONSEC_FAIL}"
+    fi
+  fi
+  delete_runner "$repo" "$rid" job_over
+  cleanup_pod "$pod"
+  save_state
+}
+
+is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
+
+# check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
+# it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
+# ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
+# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
+check_assigned_job() {
+  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
+  if (( tries >= 20 )); then
+    # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    : > "$(pod_dir "$pod")/verified"
+    kill_pod "$pod" "$repo" "$rid" job_unverified
+    return 0
+  fi
+  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  cp "$PAGED_FILE" "$runs_file"
+  for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
+    [[ "$run" =~ ^[0-9]+$ ]] || continue
+    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
+      [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
+      if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
+    [[ -n "$verdict" ]] || continue
+    if [[ "$verdict" == ok && "$GH_ALLOW_FORK_RUNS" != 1 ]]; then
+      verdict=$(jq -r --argjson run "$run" '.workflow_runs[] | select(.id == $run) |
+        if ((.event // "") | startswith("pull_request")) and ((.head_repository.full_name // "") != (.repository.full_name // "x")) then "fork" else "ok" end' "$runs_file")
+    fi
+    : > "$(pod_dir "$pod")/verified"
+    if [[ "$verdict" == ok ]]; then
+      say info job_accepted "pod=${pod}" "repo=${repo}" "run=${run}"
+    else
+      say warn job_rejected "pod=${pod}" "repo=${repo}" "run=${run}" "reason=${verdict}" "hint=an idle runner takes any queued job of its repository; the repository setting for fork pull requests is the real control"
+      kill_pod "$pod" "$repo" "$rid" "job_rejected_${verdict}"
+    fi
+    return 0
+  done
+  return 1
+}
+
+# manage_pods [api]: adopt running pods, finish exited ones, remove leftovers, enforce the idle and runtime limits. With api=0 (rate-limit
+# pause) it only does what needs Docker. Returns 1 when docker does not answer: nothing is touched then.
+manage_pods() {
+  local api_on=${1:-1} pod now busy started repo rid st
+  now=$(date +%s)
+  scan_pods && scan_nets || return 1
+  ACTIVE=0 IDLE=0; IDLE_BY_REPO=()
+  for pod in $(all_pod_ids); do
+    st=${POD_STATE[$pod]:-}
+    if [[ -z "$st" ]]; then
+      # no runner container: a pod that failed to start or whose controller died halfway
+      say warn pod_leftover "pod=${pod}" "action=removed"
+      cleanup_pod "$pod"
+      continue
+    fi
+    repo=${POD_REPO[$pod]:-} rid=${POD_RID[$pod]:-} started=${POD_STARTED[$pod]:-}
+    [[ "$started" =~ ^[0-9]+$ ]] || started=$now
+    if [[ "$st" != running ]]; then finish_pod "$pod"; continue; fi
+    if [[ "${GH_BUILDKIT}" == 1 && -z "${POD_BK[$pod]:-}" && -z "${WARNED[bk-$pod]:-}" ]]; then
+      WARNED[bk-$pod]=1; say warn buildkit_missing "pod=${pod}" "hint=image builds in this job will fail; check user.max_user_namespaces and docker logs of the sidecar at the next start"
+    fi
+    if (( now - started > MAX_RUNTIME )); then kill_pod "$pod" "$repo" "$rid" max_runtime; ACTIVE=$((ACTIVE + 1)); continue; fi
+    if (( api_on )) && [[ "$rid" =~ ^[0-9]+$ && "$repo" == */* ]]; then
+      if [[ ! -e "$(pod_dir "$pod")/busy" ]]; then
+        # not seen busy yet: ask GitHub (one request); the idle timeout only counts when GitHub answered "not busy"
+        api GET "/repos/${repo}/actions/runners/${rid}" "repo:${repo}"
+        busy=unknown
+        if [[ "$API_CODE" == 200 ]]; then busy=$(jq -r '.busy // false' "$API_OUT"); fi
+        if [[ "$busy" == true ]]; then
+          mkdir -p "$(pod_dir "$pod")" && printf '%s' "$now" > "$(pod_dir "$pod")/busy"
+          say info job_started "pod=${pod}" "repo=${repo}" "waited=$((now - started))s"
+        elif [[ "$busy" == false ]] && (( now - started > IDLE_TIMEOUT )); then
+          kill_pod "$pod" "$repo" "$rid" idle_timeout
+        elif [[ "$busy" == false ]] && ! is_served "$repo"; then
+          kill_pod "$pod" "$repo" "$rid" repo_not_served
+        else
+          IDLE=$((IDLE + 1)); IDLE_BY_REPO[$repo]=$(( ${IDLE_BY_REPO[$repo]:-0} + 1 ))
+        fi
+      fi
+      if [[ -e "$(pod_dir "$pod")/busy" && ! -e "$(pod_dir "$pod")/verified" && ! -e "$(pod_dir "$pod")/killed" ]]; then
+        check_assigned_job "$pod" "$repo" "$rid" || true
+      fi
+    elif (( api_on )); then
+      IDLE=$((IDLE + 1))   # a container without a usable runner id label: counted, never killed by the idle rule
+    fi
+    ACTIVE=$((ACTIVE + 1))
+  done
+}
+
+# sweep_runners: delete our runners (name prefix) where they must not exist. For repositories that are not served (public, archived,
+# excluded) every runner of ours goes; for served ones only runners without a pod on this host that are offline or idle.
+sweep_runners() {
+  local repo served rows id name status busy pod
+  declare -A have=()
+  for pod in "${!POD_RID[@]}"; do if [[ -n "${POD_RID[$pod]}" ]]; then have[${POD_RID[$pod]}]=1; fi; done
+  find "$CACHE" -type f -mtime +1 -delete 2>/dev/null || true   # cache entries that no answer has touched for a day
+  for repo in "${ALL_REPOS[@]}"; do
+    served=0; is_served "$repo" && served=1
+    if ! api_get_cached "/repos/${repo}/actions/runners?per_page=100" "repo:${repo}"; then
+      if [[ "$API_CODE" == 404 || "$API_CODE" == 403 ]]; then
+        say warn runner_list_denied "repo=${repo}" "hint=the App needs Administration: read or write on this repository"
+      else
+        fail_api runner_list_failed "repo=${repo}" || true
+      fi
+      continue
+    fi
+    rows=$(jq -r --arg p "$NAME_PREFIX" '.runners[]? | select(.name | startswith($p)) | [.id, .name, .status, .busy] | @tsv' "$API_BODY")
+    while IFS=$'\t' read -r id name status busy; do
+      [[ "$id" =~ ^[0-9]+$ ]] || continue
+      if (( ! served )); then
+        delete_runner "$repo" "$id" repo_not_served
+      elif [[ -z "${have[$id]:-}" && ( "$status" == offline || "$busy" == false ) ]]; then
+        delete_runner "$repo" "$id" container_gone
+      fi
+    done <<<"$rows"
+  done
+}
+
+# ---- starting a pod -------------------------------------------------------------------------------------------------------------
+ensure_image() {
+  local img=$1 created
+  if ! docker image inspect "$img" >/dev/null 2>&1; then
+    say info image_pull "image=${img%%@*}"
+    timeout 900 docker pull -q "$img" >/dev/null || { LAST_ERROR="cannot pull ${img%%@*}"; say error image_pull_failed "image=${img%%@*}"; return 1; }
+  fi
+  if [[ "$img" == "$GH_RUNNER_IMAGE" ]]; then
+    created=$(docker image inspect -f '{{.Created}}' "$img" 2>/dev/null || true)
+    if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); [[ "$created" =~ ^[0-9]+$ ]] && IMAGE_CREATED=$created; fi
+  fi
+  return 0
+}
+
+# gen_tls DIR: an ephemeral CA, a server certificate for the BuildKit daemon and a client certificate for the runner.
+# DIR/tls-srv (ca, cert, key) goes to the daemon only, DIR/tls-cli to the runner only; the CA key is deleted before the pod starts.
+# Files are mode 0644 inside a directory tree whose parent (jobs/) is 0700: the containers run as other uids (1000 and 1001) and
+# must read their own mount, which no other user of the host can reach.
+gen_tls() {
+  local d=$1 ca="$1/ca" days=2 who out
+  install -d -m 0700 "$ca" && install -d -m 0755 "$d/tls-srv" "$d/tls-cli" || return 1
+  openssl ecparam -name prime256v1 -genkey -noout -out "$ca/ca.key" 2>/dev/null || return 1
+  openssl req -x509 -new -key "$ca/ca.key" -sha256 -days "$days" -subj "/CN=ghr-ephemeral-ca" \
+    -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" -out "$ca/ca.pem" 2>/dev/null || return 1
+  printf 'subjectAltName=DNS:buildkitd,DNS:localhost\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' > "$ca/srv.ext" || return 1
+  printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' > "$ca/cli.ext" || return 1
+  for who in srv cli; do
+    out="$d/tls-${who}"
+    openssl ecparam -name prime256v1 -genkey -noout -out "$out/key.pem" 2>/dev/null || return 1
+    openssl req -new -key "$out/key.pem" -subj "/CN=ghr-${who}" -out "$ca/${who}.csr" 2>/dev/null || return 1
+    openssl x509 -req -in "$ca/${who}.csr" -CA "$ca/ca.pem" -CAkey "$ca/ca.key" -CAcreateserial -days "$days" -sha256 \
+      -extfile "$ca/${who}.ext" -out "$out/cert.pem" 2>/dev/null || return 1
+    cp "$ca/ca.pem" "$out/ca.pem" || return 1
+    chmod 0644 "$out/key.pem" "$out/cert.pem" "$out/ca.pem" || return 1
+  done
+  rm -rf -- "$ca"
+}
+
+# scan_nets: NET_PODS (pod ids that have a network) and NET_USED (subnets of pod networks that exist; the label is the state).
+declare -A NET_USED=()
+NET_PODS=()
+scan_nets() {
+  local pod sub out
+  out=$(docker network ls --filter "label=${LABEL_JOB}=job" --format "{{.Label \"${LABEL_POD}\"}}|{{.Label \"${LABEL_SUBNET}\"}}" 2>/dev/null) || return 1
+  NET_PODS=(); NET_USED=()
+  while IFS='|' read -r pod sub; do
+    [[ "$pod" =~ $POD_RE ]] && NET_PODS+=("$pod")
+    if [[ "$sub" =~ ^[0-9.]+/[0-9]+$ ]]; then NET_USED[$sub]=1; fi
+  done <<<"$out"
+}
+
+# create_pod_network POD LABELS...: creates the per-job network with the lowest free /28 of the pool (released when the network is
+# removed). Docker's default bridge naming (br-<id>) is kept so ci-job-isolation's br-+ rules cover it. Returns 2 when the pool is full.
+POD_SUBNET=""
+create_pod_network() {
+  local pod=$1 base len slots i cand err free=0; shift
+  base=$(ip2int "${GH_JOB_SUBNET_POOL%/*}"); len=${GH_JOB_SUBNET_POOL#*/}
+  slots=$(( 1 << (POD_PREFIX_LEN - len) ))
+  scan_nets || { say error network_create_failed "pod=${pod}" "problem=docker does not answer"; return 1; }
+  for (( i = 0; i < slots; i++ )); do
+    cand="$(int2ip $(( base + (i << (32 - POD_PREFIX_LEN)) )))/${POD_PREFIX_LEN}"
+    [[ -z "${NET_USED[$cand]:-}" ]] || continue
+    free=$((free + 1))
+    if err=$(docker network create --subnet "$cand" --label "${LABEL_SUBNET}=${cand}" "$@" "ghr-${pod}" 2>&1); then POD_SUBNET=$cand; return 0; fi
+    # an address range that Docker or the host already uses: take the next one; anything else is a real failure
+    if ! grep -qiE 'overlap|already in use|pool' <<<"$err"; then say error network_create_failed "pod=${pod}" "subnet=${cand}" "docker=${err:0:200}"; return 1; fi
+    say warn subnet_taken "subnet=${cand}" "hint=another network uses this range; GH_JOB_SUBNET_POOL should be a block nothing else uses"
+  done
+  if (( free == 0 )); then
+    say error subnet_pool_exhausted "pool=${GH_JOB_SUBNET_POOL}" "slots=${slots}" "hint=the job stays queued until a pod ends; a bigger pool allows more pods but GH_MAX_JOBS is the real limit"
+  else
+    say error subnet_pool_unusable "pool=${GH_JOB_SUBNET_POOL}" "hint=every free range overlaps another Docker network"
+  fi
+  return 2
+}
+
+START_FAIL=0
+# start_failed POD REPO RID STEP [DETAIL]: log, delete the JIT runner (if there is one), remove the pod and count the failure for the start
+# back-off (30 s, doubling, at most 15 min; any successful start resets it). Returns 1.
+start_failed() {
+  local pod=$1 repo=$2 rid=$3 step=$4 detail=${5:-} d now
+  say error pod_start_failed "pod=${pod}" "repo=${repo}" "step=${step}" "detail=${detail:0:200}"
+  if [[ -n "$rid" ]]; then delete_runner "$repo" "$rid" start_failed; fi
+  cleanup_pod "$pod"
+  START_FAIL=$((START_FAIL + 1)); now=$(date +%s); d=$(backoff_for "$START_FAIL")
+  if (( now + d > BACKOFF_UNTIL )); then BACKOFF_UNTIL=$((now + d)); fi
+  say warn pod_start_paused "seconds=${d}" "after_start_failures=${START_FAIL}"
+  save_state
+  return 1
+}
+
+# docker0 address without netlink (the unit's RestrictAddressFamilies has none): the gateway of the default bridge network.
+bridge_ip() { docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null | head -n1 || true; }
+
+# start_pod REPO RUN_ID JOB_ID: network + JIT runner + sidecar + runner container. Any failure removes everything it created and backs off.
+# Returns 2 when the pod network pool is full (nothing was created on GitHub's side).
+start_pod() {
+  local repo=$1 run_id=$2 job_id=$3 pod name dir body rid="" now bk_args=() sec_apparmor=() sec_label=() jit_file zopt="" rc npm_args=() err ip_cache
+  now=$(date +%s)
+  if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then zopt=",Z"; fi   # private label for this pod's own directory
+  pod="${now}-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  name="${NAME_PREFIX}${pod}"; dir=$(pod_dir "$pod")
+  ensure_image "$GH_RUNNER_IMAGE" || { start_failed "" "$repo" "" image "$LAST_ERROR"; return 1; }
+  if [[ "$GH_BUILDKIT" == 1 ]]; then ensure_image "$GH_BUILDKIT_IMAGE" || { start_failed "" "$repo" "" image "$LAST_ERROR"; return 1; }; fi
+  install -d -m 0700 "$dir" && install -d -m 0755 "$dir/jit" && [[ "$(stat -c %a "$dir")" == 700 ]] || { start_failed "$pod" "$repo" "" directory; return 1; }
+  local -a lab=(--label "${LABEL_JOB}=job" --label "${LABEL_POD}=${pod}" --label "${LABEL_REPO}=${repo}" --label "${LABEL_RUN}=${run_id}"
+                --label "${LABEL_STARTED}=${now}" --label "io.server-init.github-runner.job-id=${job_id}")
+  # The network comes first: with no free range nothing is created on GitHub's side and the job stays queued.
+  rc=0; create_pod_network "$pod" "${lab[@]}" || rc=$?
+  if (( rc == 2 )); then cleanup_pod "$pod"; return 2; fi
+  if (( rc )); then start_failed "$pod" "$repo" "" network; return 1; fi
+  if [[ "$GH_BUILDKIT" == 1 ]] && ! gen_tls "$dir"; then start_failed "$pod" "$repo" "" tls; return 1; fi
+  body="${TMP}/jit-request.json"
+  jq -n --arg name "$name" --argjson group "$((10#$GH_RUNNER_GROUP_ID))" --argjson labels "$LABELS_JSON" \
+    '{name: $name, runner_group_id: $group, labels: $labels, work_folder: "_work"}' > "$body" || { start_failed "$pod" "$repo" "" request; return 1; }
+  api POST "/repos/${repo}/actions/runners/generate-jitconfig" "repo:${repo}" "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then
+    if [[ "$API_CODE" == 422 ]]; then
+      fail_api jit_failed "repo=${repo}" "hint=422: check GH_RUNNER_GROUP_ID (now ${GH_RUNNER_GROUP_ID}; 1 is assumed for repositories of a personal account) and GH_LABELS" || true
+    else
+      fail_api jit_failed "repo=${repo}" || true
+    fi
+    err="$(api_err)"; : > "$API_OUT"
+    start_failed "$pod" "$repo" "" jit "$err"; return 1
+  fi
+  rid=$(jq -r '.runner.id // empty' "$API_OUT")
+  jit_file="${dir}/jit/config"
+  ( umask 077; jq -r '.encoded_jit_config // empty' "$API_OUT" > "$jit_file" )
+  : > "$API_OUT"
+  if [[ ! "$rid" =~ ^[0-9]+$ || ! -s "$jit_file" ]]; then
+    start_failed "$pod" "$repo" "$rid" jit "answer without runner id or config"; return 1
+  fi
+  chmod 0644 "$jit_file"   # readable by the runner uid (and by the job itself, same uid); the 0700 parent keeps every other host user out
+
+  if [[ "$GH_BUILDKIT" == 1 ]]; then
+    # Rootless BuildKit (docs/rootless.md of moby/buildkit): seccomp and systempaths must be unconfined so runc can create user namespaces and
+    # a /proc of its own; AppArmor only where it is active. SELinux (Rocky): container_t may not mount inside a user namespace, so the label is
+    # disabled for this one container only. Not added, because they would break rootless BuildKit: --cap-drop ALL (the bounding set also
+    # limits the capabilities in the new user namespace), no-new-privileges (newuidmap is setuid) and --read-only (it needs a writable
+    # state volume). Limits that do not: CPU, memory without swap, process limit.
+    if [[ -r /sys/module/apparmor/parameters/enabled && "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" == Y ]]; then sec_apparmor=(--security-opt apparmor=unconfined); fi
+    if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then sec_label=(--security-opt label=disable); fi
+    if ! err=$(docker run -d --rm --name "ghr-${pod}-buildkitd" --network "ghr-${pod}" --network-alias buildkitd "${lab[@]}" --label "${LABEL_ROLE}=buildkit" \
+        --cgroup-parent ci-jobs.slice --cpus "$GH_BUILDKIT_CPUS" --memory "$GH_BUILDKIT_MEMORY" --memory-swap "$GH_BUILDKIT_MEMORY" --pids-limit "$GH_BUILDKIT_PIDS" \
+        --security-opt seccomp=unconfined --security-opt systempaths=unconfined "${sec_apparmor[@]}" "${sec_label[@]}" \
+        -v "${dir}/tls-srv:/certs:ro" "$GH_BUILDKIT_IMAGE" \
+        --addr tcp://0.0.0.0:1234 --tlscacert /certs/ca.pem --tlscert /certs/cert.pem --tlskey /certs/key.pem 2>&1 >/dev/null); then
+      start_failed "$pod" "$repo" "$rid" buildkit "$err"; return 1
+    fi
+    bk_args=(-v "${dir}/tls-cli:/etc/buildkit-tls:ro${zopt}" -e "BUILDKIT_HOST=tcp://buildkitd:1234")
+  fi
+  # The npm cache (runner/install/npm-cache.sh) listens on the docker0 IP; ci-job-isolation lets this pool, and only this pool of the br-
+  # networks, reach that one port. Same values the GitLab jobs get from config.toml.
+  if [[ -f "${GHR_NPM_DIR:-/opt/npm-cache}/docker-compose.yml" ]]; then
+    ip_cache=$(bridge_ip)
+    if [[ "$ip_cache" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      npm_args=(-e "NPM_CONFIG_REGISTRY=http://${ip_cache}:4873/" -e "YARN_NPM_REGISTRY_SERVER=http://${ip_cache}:4873/" -e "YARN_UNSAFE_HTTP_WHITELIST=${ip_cache}")
+    else
+      say warn npm_cache_unavailable "hint=/opt/npm-cache exists but the docker0 address is unknown; jobs use the public registry"
+    fi
+  fi
+  # The entry reads the JIT config from the read-only file and hands it to the Listener as an environment variable of that process only
+  # (not in docker inspect, not in the host's process list). It runs Runner.Listener itself instead of run.sh: run.sh restarts the Listener
+  # on exit codes 2, 3 and 4 inside the container and turns every other code into 0, so Docker would never see why a runner ended.
+  # GH_JIT_PASS=arg is a debugging fallback: --jitconfig on the command line shows the config in /proc/<pid>/cmdline.
+  local entry='set -eu; J=$(cat /run/ghr-jit/config); [ -n "$J" ] || exit 1; [ ! -f ./.env ] || { set -a; . ./.env; set +a; }; if [ "${GHR_JIT_PASS:-env}" = arg ]; then exec ./bin/Runner.Listener run --jitconfig "$J"; fi; ACTIONS_RUNNER_INPUT_JITCONFIG=$J; export ACTIONS_RUNNER_INPUT_JITCONFIG; unset J; exec ./bin/Runner.Listener run'
+  # Not --rm: the exit code of the Listener is read from the stopped container, which the controller removes.
+  if ! err=$(docker run -d --init --name "ghr-${pod}-runner" --network "ghr-${pod}" "${lab[@]}" --label "${LABEL_ROLE}=runner" --label "${LABEL_RID}=${rid}" \
+      --cgroup-parent ci-jobs.slice --cpus "$GH_JOB_CPUS" --memory "$GH_JOB_MEMORY" --memory-swap "$GH_JOB_MEMORY" --pids-limit "$GH_JOB_PIDS" --shm-size "$GH_JOB_SHM" \
+      --user 1001:1001 --security-opt no-new-privileges --cap-drop ALL \
+      -v "${dir}/jit:/run/ghr-jit:ro${zopt}" "${bk_args[@]}" -w /home/runner \
+      -e "GHR_JIT_PASS=${GH_JIT_PASS}" -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 "${npm_args[@]}" \
+      "$GH_RUNNER_IMAGE" sh -c "$entry" ghr-entry 2>&1 >/dev/null); then
+    start_failed "$pod" "$repo" "$rid" runner "$err"; return 1
+  fi
+  START_FAIL=0
+  say info pod_started "pod=${pod}" "repo=${repo}" "run=${run_id}" "job=${job_id}" "runner=${rid}" "subnet=${POD_SUBNET}" "buildkit=${GH_BUILDKIT}" "npm_cache=$([[ ${#npm_args[@]} -gt 0 ]] && echo 1 || echo 0)" "cpus=${GH_JOB_CPUS}" "memory=${GH_JOB_MEMORY}"
+}
+
+# ---- discovery ------------------------------------------------------------------------------------------------------------------
+# queued_jobs REPO: fills FOUND with "run_id job_id" for each queued job that asks only for our labels, including a custom one.
+# This only decides whether a pod is started: an idle runner takes any queued job of its repository (see check_assigned_job).
+FOUND=()
+queued_jobs() {
+  local repo=$1 st run runs line
+  FOUND=()
+  for st in queued in_progress; do
+    if ! get_paged "/repos/${repo}/actions/runs?status=${st}" workflow_runs 50 6; then
+      if [[ "$API_CODE" == 403 || "$API_CODE" == 404 ]]; then say warn runs_denied "repo=${repo}" "hint=the App needs Actions: read on this repository"; return 0; fi
+      fail_api run_list_failed "repo=${repo}" || true; continue
+    fi
+    if (( PAGED_TRUNCATED )); then say warn runs_truncated "repo=${repo}" "status=${st}" "hint=more than 300 runs; the oldest are looked at first on the next polls only if these finish"; fi
+    # A fork pull request would run code of someone else on this host: no pod is started for it unless GH_ALLOW_FORK_RUNS=1.
+    runs=$(jq -r --argjson fork "$GH_ALLOW_FORK_RUNS" '.workflow_runs[]? |
+      select($fork == 1 or ((.event // "") | startswith("pull_request") | not) or ((.head_repository.full_name // "") == (.repository.full_name // "x"))) | .id' "$PAGED_FILE")
+    for run in $runs; do
+      [[ "$run" =~ ^[0-9]+$ ]] || continue
+      if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then
+        if [[ "$API_CODE" != 403 && "$API_CODE" != 404 ]]; then fail_api job_list_failed "repo=${repo}" "run=${run}" || true; fi
+        continue
+      fi
+      if (( PAGED_TRUNCATED )); then say warn jobs_truncated "repo=${repo}" "run=${run}" "hint=more than 500 jobs in one run"; fi
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && FOUND+=("$line")
+      done < <(jq -r --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" --arg run "$run" '.jobs[]? |
+        select(.status == "queued" and .runner_id == null) |
+        ([.labels[]? | ascii_downcase]) as $l |
+        select(($l | length) > 0 and (($l - $ours) | length) == 0 and (($l | map(select(. as $x | $custom | index($x))) | length) > 0)) |
+        "\($run) \(.id)"' "$PAGED_FILE")
+    done
+  done
+}
+
+discover() {
+  local repo run job n need rc
+  if (( ACTIVE >= MAX_JOBS )); then return 0; fi
+  if (( $(date +%s) < BACKOFF_UNTIL )); then say info discovery_paused "reason=backoff" "until=${BACKOFF_UNTIL}"; return 0; fi
+  if [[ "$RATE_REMAINING" =~ ^[0-9]+$ ]] && (( RATE_REMAINING < RATE_STOP )); then
+    LAST_ERROR="GitHub API quota nearly used up (${RATE_REMAINING} left)"; say error discovery_paused "reason=rate_limit" "remaining=${RATE_REMAINING}"; return 0
+  fi
+  for repo in "${SERVED[@]}"; do
+    (( ACTIVE < MAX_JOBS )) || break
+    queued_jobs "$repo"
+    n=${#FOUND[@]}; need=$(( n - ${IDLE_BY_REPO[$repo]:-0} ))
+    if (( n > 0 )); then say info jobs_queued "repo=${repo}" "queued=${n}" "idle_runners=${IDLE_BY_REPO[$repo]:-0}"; fi
+    for job in "${FOUND[@]}"; do
+      (( need > 0 && ACTIVE < MAX_JOBS )) || break
+      run=${job% *}; job=${job#* }
+      rc=0; start_pod "$repo" "$run" "$job" || rc=$?
+      if (( rc == 0 )); then
+        ACTIVE=$((ACTIVE + 1)); IDLE=$((IDLE + 1)); IDLE_BY_REPO[$repo]=$(( ${IDLE_BY_REPO[$repo]:-0} + 1 )); need=$((need - 1))
+      elif (( rc == 2 )); then
+        return 0   # no free pod network: the jobs stay queued, the next poll retries
+      else
+        return 0   # a failed start backs off for all repositories; the next poll after the pause retries
+      fi
+    done
+  done
+}
+
+# ---- status for health ----------------------------------------------------------------------------------------------------------
+LAST_POLL_OK=0 STARTED_AT=0
+write_status() {
+  local tmp="${STATE_DIR}/status.json.new"
+  jq -n --argjson updated "$(date +%s)" --argjson started "$STARTED_AT" --argjson poll "$LAST_POLL_OK" --argjson tok "$LAST_TOKEN_OK" \
+    --arg err "$LAST_ERROR" --arg rem "$RATE_REMAINING" --arg lim "$RATE_LIMIT" --arg rst "$RATE_RESET" \
+    --argjson served "${#SERVED[@]}" --argjson skipped "${#SKIPPED[@]}" --argjson active "$ACTIVE" --argjson idle "$IDLE" --argjson max "$MAX_JOBS" \
+    --argjson upd "$UPDATE_REQUIRED" --argjson fails "$CONSEC_FAIL" --argjson backoff "$BACKOFF_UNTIL" --arg img "$IMAGE_CREATED" --arg inst "$INSTALL_ID" \
+    '{version: 1, updated: $updated, started: $started, last_poll_ok: $poll, last_token_ok: $tok,
+      last_error: (if $err == "" then null else $err end),
+      rate_remaining: ($rem | tonumber? // null), rate_limit: ($lim | tonumber? // null), rate_reset: ($rst | tonumber? // null),
+      served: $served, skipped: $skipped, active_pods: $active, idle_pods: $idle, max_jobs: $max,
+      update_required: ($upd == 1), consecutive_failures: $fails, backoff_until: $backoff,
+      runner_image_created: ($img | tonumber? // null), installation: $inst}' > "$tmp"
+  chmod 0644 "$tmp"; mv -f "$tmp" "${STATE_DIR}/status.json"
+}
+
+TICK=0
+SWEEP_EVERY=10
+tick() {
+  local now ok=1
+  TICK=$((TICK + 1)); now=$(date +%s)
+  LAST_ERROR=""
+  if (( now < PAUSE_UNTIL )); then
+    # GitHub asked us to wait: no request, but pods are still finished, cleaned up and limited by their runtime (Docker only)
+    say warn poll_paused "seconds=$((PAUSE_UNTIL - now))" "reason=rate_limit"
+    API_OFF=1; manage_pods 0 || say error docker_unreachable "hint=docker ps or docker network ls failed"; API_OFF=0
+    LAST_ERROR="paused by GitHub's rate limit"; save_state; write_status; return 0
+  fi
+  if ensure_token && list_repos; then
+    if [[ "$RATE_REMAINING" =~ ^[0-9]+$ ]] && (( RATE_REMAINING < RATE_LOW )) && (( TICK % 20 == 1 || RATE_REMAINING < RATE_STOP )); then
+      say warn rate_limit_low "remaining=${RATE_REMAINING}" "limit=${RATE_LIMIT:-?}"
+    fi
+  else
+    ok=0
+  fi
+  # Finish and clean up pods first (this needs only Docker, so it runs even when GitHub does not answer); then, every SWEEP_EVERY polls,
+  # at the start and whenever the repository list changed, delete runners that must not exist; then look for work.
+  if ! manage_pods; then
+    # not "no pods": nothing is cleaned up, swept or started on a poll where docker does not answer
+    LAST_ERROR="docker does not answer (docker ps or docker network ls failed)"; say error docker_unreachable "hint=is docker running and is ${USER:-this user} in the docker group?"; ok=0
+  fi
+  if (( ok )); then
+    if (( TICK == 1 || REPOS_CHANGED || TICK % SWEEP_EVERY == 0 )); then sweep_runners; fi
+    say info poll "served=${#SERVED[@]}" "skipped=${#SKIPPED[@]}" "active=${ACTIVE}" "remaining=${RATE_REMAINING:-?}"
+    discover
+    [[ -z "$LAST_ERROR" ]] || ok=0
+  fi
+  if (( ok )); then LAST_POLL_OK=$(date +%s); fi
+  save_state; write_status
+  (( ok ))
+}
+
+# ---- modes ----------------------------------------------------------------------------------------------------------------------
+# init_dirs: the state directory, its private parts (jobs/ holds the per-pod secrets, so it must be 0700 and ours) and the lock that
+# keeps the service and a manual run from working on the same pods at once.
+init_dirs() {
+  install -d -m 0755 "$STATE_DIR"
+  JOBS="${STATE_DIR}/jobs"; CACHE="${STATE_DIR}/cache"; TMP="${STATE_DIR}/tmp"
+  install -d -m 0700 "$JOBS" "$CACHE"
+  if [[ "$(stat -c '%a:%u' "$JOBS")" != "700:$(id -u)" ]]; then
+    say error jobs_dir_unsafe "dir=${JOBS}" "found=$(stat -c '%a:%U' "$JOBS")" "hint=it holds the secrets of the pods: it must be mode 700 and owned by the user that runs the controller"; exit 1
+  fi
+  exec 8>"${STATE_DIR}/ctl.lock"
+  flock -n 8 || { say error already_running "lock=${STATE_DIR}/ctl.lock" "hint=github-runner-ctl is already running (the service?); stop it before a manual run"; exit 1; }
+  rm -rf -- "$TMP"; install -d -m 0700 "$TMP"
+  API_OUT="${TMP}/api.body"; API_HDR="${TMP}/api.hdr"
+}
+
+preflight() {
+  local t
+  for t in curl jq openssl docker sha1sum flock; do command -v "$t" >/dev/null 2>&1 || { say error missing_tool "tool=${t}"; return 1; }; done
+  docker info >/dev/null 2>&1 || { say error docker_unreachable "hint=is the service user in the docker group and is docker running?"; return 1; }
+  [[ -r "$GH_KEY_FILE" ]] || { say error key_missing "key=${GH_KEY_FILE}"; return 1; }
+}
+
+common_start() {
+  load_config
+  validate_config || { local e; for e in "${CFG_ERRORS[@]}"; do say error config_invalid "problem=${e}"; done; exit 2; }
+  derive_config
+}
+
+run_loop() {
+  local stop=0 sleeper=0 rc
+  common_start
+  init_dirs
+  preflight || exit 1
+  STARTED_AT=$(date +%s)
+  load_state
+  trap 'stop=1; [[ $sleeper -gt 0 ]] && kill "$sleeper" 2>/dev/null; true' TERM INT
+  say info started "owner=${GH_OWNER}" "labels=${GH_LABELS}" "max_jobs=${MAX_JOBS}" "poll=${POLL}s" "buildkit=${GH_BUILDKIT}" "name_prefix=${NAME_PREFIX}"
+  ensure_image "$GH_RUNNER_IMAGE" || true
+  while (( ! stop )); do
+    rc=0; tick || rc=$?
+    (( rc == 0 )) || say warn poll_failed "error=${LAST_ERROR:-unknown}"
+    (( stop )) && break
+    sleep "$(( POLL + RANDOM % 4 ))" 8>&- & sleeper=$!
+    wait "$sleeper" 2>/dev/null || true
+    sleeper=0
+  done
+  say info stopping "note=running pods keep running; the next start adopts them"
+}
+
+once() {
+  common_start
+  init_dirs
+  preflight || exit 1
+  STARTED_AT=$(date +%s)
+  load_state
+  tick
+}
+
+# self_test: read-only against GitHub (no runner is created, no container started).
+self_test() {
+  local rc=0 perms name slug k want have
+  common_start
+  STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ghr-selftest.XXXXXX"); trap 'rm -rf -- "$STATE_DIR"' EXIT
+  JOBS="${STATE_DIR}/jobs"; CACHE="${STATE_DIR}/cache"; TMP="${STATE_DIR}/tmp"; install -d -m 0700 "$JOBS" "$CACHE" "$TMP"
+  API_OUT="${TMP}/api.body"; API_HDR="${TMP}/api.hdr"
+  for k in curl jq openssl; do command -v "$k" >/dev/null 2>&1 || { echo "FAIL  ${k} is not installed"; return 1; }; done
+  echo "config:  ${CONFIG}: valid (owner ${GH_OWNER}, labels ${GH_LABELS}, max ${MAX_JOBS} job(s), runner group ${GH_RUNNER_GROUP_ID})"
+  if openssl pkey -in "$GH_KEY_FILE" -noout >/dev/null 2>&1; then echo "OK    key ${GH_KEY_FILE} parses"; else echo "FAIL  key ${GH_KEY_FILE} is missing, unreadable or not a private key"; return 1; fi
+  make_jwt || { echo "FAIL  cannot sign a JWT with the key"; return 1; }
+  echo "OK    JWT signed (RS256, iss ${GH_APP_CLIENT_ID})"
+  api GET /app jwt
+  if [[ "$API_CODE" == 200 ]]; then
+    name=$(jq -r '.name // "?"' "$API_OUT"); slug=$(jq -r '.slug // "?"' "$API_OUT")
+    echo "OK    GitHub App: ${name} (${slug})"
+    for k in administration:write actions:read metadata:read; do
+      want=${k#*:}; have=$(jq -r --arg p "${k%%:*}" '.permissions[$p] // "none"' "$API_OUT")
+      if [[ "$have" == write || "$have" == "$want" ]]; then echo "OK    permission ${k%%:*}: ${have}"; else echo "FAIL  permission ${k%%:*}: ${have} (needs ${want})"; rc=1; fi
+    done
+    perms=$(jq -r '(.events // []) | join(",")' "$API_OUT"); echo "info  subscribed webhook events: ${perms:-none} (none is right: this controller polls)"
+  else
+    echo "FAIL  GET /app: $(api_err) (wrong GH_APP_CLIENT_ID or key?)"; return 1
+  fi
+  ensure_token || { echo "FAIL  no installation token: ${LAST_ERROR}"; return 1; }
+  echo "OK    installation ${INSTALL_ID}: token minted"
+  list_repos || { echo "FAIL  cannot list repositories: ${LAST_ERROR}"; return 1; }
+  echo "repositories of the installation (${#ALL_REPOS[@]}):"
+  local r
+  for r in "${SERVED[@]}"; do echo "  SERVE  ${r} (private)"; done
+  for r in "${SKIPPED[@]}"; do echo "  SKIP   ${r%% *} (${r#* })"; done
+  (( ${#SERVED[@]} > 0 )) || { echo "WARN  no private repository would be served (is the App installed on All repositories?)"; rc=1; }
+  if (( ${#SERVED[@]} > 0 )); then
+    # the permission that creates and deletes runners, with a token of one repository only (what the controller uses)
+    if ensure_repo_token "${SERVED[0]}"; then
+      api GET "/repos/${SERVED[0]}/actions/runners?per_page=100" "repo:${SERVED[0]}"
+      if [[ "$API_CODE" == 200 ]]; then echo "OK    Administration token for ${SERVED[0]} alone can list its runners"
+      else echo "FAIL  listing runners of ${SERVED[0]}: $(api_err)"; rc=1; fi
+    else
+      echo "FAIL  no Administration token for ${SERVED[0]}: ${LAST_ERROR}"; rc=1
+    fi
+  fi
+  echo "info  API quota: ${RATE_REMAINING:-?} of ${RATE_LIMIT:-?} left"
+  echo "info  not tested here: runner group ${GH_RUNNER_GROUP_ID} for JIT runners (checked on the first job; a 422 names GH_RUNNER_GROUP_ID in the log)"
+  return "$rc"
+}
+
+main() {
+  case "${1:-run}" in
+    -h|--help) usage; exit 0 ;;
+    run) run_loop ;;
+    once) once ;;
+    check-config) common_start; echo "config OK: ${CONFIG}" ;;
+    self-test|--self-test) self_test ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
+__SIC_EOF__
+chmod 644 "$R/runner/scripts/github-runner-ctl"
 
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-disk-guard.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Emergency cleanup when the root filesystem crosses HARD_LIMIT percent.
 set -Eeuo pipefail
-
 HARD_LIMIT="${HARD_LIMIT:-85}"
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0  (env: HARD_LIMIT=85) runs runner-weekly-cleanup.sh with RETENTION_DAYS=1 when disk usage >= HARD_LIMIT%"
   exit 0
 fi
-
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
@@ -12779,23 +16031,16 @@ chmod 755 "$R/runner/scripts/runner-disk-guard.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
-# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
-# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
-# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
-# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
-# The result is one line in /var/log/runner-engine-update.log, which health reads.
-# Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
+# Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
+# stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
+# One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
 set -Eeuo pipefail
-
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-
 note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
   exit 0
@@ -12804,9 +16049,9 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>/run/runner-engine-update.lock
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-
-# A docker error is not "no jobs": updating then could kill running jobs.
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
 fi
@@ -12814,7 +16059,6 @@ if [[ -n "$jobs" ]]; then
   note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
   exit 0
 fi
-
 installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
@@ -12829,30 +16073,24 @@ else
   exit 1
 fi
 (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
-
 if ! pending; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
-# Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
 docker_pkgs=(); runner_pkgs=()
 for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
 if [[ "$DRY_RUN" == 1 ]]; then
   note "DRY-RUN would upgrade ${installed[*]}"
   exit 0
 fi
-
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
-
-# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
-# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
-runner_stopped=0
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
+# From here whatever happens: start the runner again.
+runner_stopped=0 ctl_stopped=0
+ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
-
-# `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+# SIGQUIT = graceful stop (jobs finish). Returns 1 when still running after STOP_WAIT.
 stop_runner_wait() {
   local waited=0 st
   systemctl stop --no-block gitlab-runner
@@ -12864,48 +16102,44 @@ stop_runner_wait() {
     waited=$((waited + 5))
   done
 }
-no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
-
-# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
-# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+no_jobs() { local j; j=$(job_ids 2>/dev/null) && [[ -z "$j" ]]; }
+# SIGTERM would end jobs; TimeoutStopSec=infinity: systemd never SIGKILLs the runner.
 if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
   printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
+# no new GitHub pod during the upgrade
+if systemctl is-active --quiet github-runner-ctl 2>/dev/null; then systemctl stop github-runner-ctl && ctl_stopped=1; fi
 if ! stop_runner_wait; then
-  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
-  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
+  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
   exit 0
 fi
 if ! no_jobs; then
-  note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
+  note "SKIP a CI job appeared or docker does not answer after the runner stopped; will retry next week"
   exit 0
 fi
-
-# Docker packages first, runner stopped: their own Docker restart finds no job.
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
-# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
-# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+# a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
+    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
     exit 0
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
+  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
   exit 0
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
   systemctl restart docker
   sleep 5
-  # The isolation rules live in iptables; reapply them after the Docker restart.
+  # reapply the isolation rules
   if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
 fi
 if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
@@ -12914,6 +16148,7 @@ if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
 fi
 systemctl start gitlab-runner || true
 runner_stopped=0
+ctl_back
 sleep 5
 for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
 if [[ -n "$bad" ]]; then
@@ -12929,25 +16164,20 @@ cat > "$R/runner/scripts/runner-weekly-cleanup.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Weekly cleanup of the GitLab Runner host: Docker, runner caches, packages, logs, temp files.
 set -Eeuo pipefail
-
 RETENTION_DAYS="${RETENTION_DAYS:-7}"
 JOURNAL_MAX="${JOURNAL_MAX:-500M}"
 SHARED_CACHE_DIR="${SHARED_CACHE_DIR:-/srv/ci-cache}"
 SHARED_CACHE_MAX_AGE_DAYS="${SHARED_CACHE_MAX_AGE_DAYS:-14}"
 DRY_RUN="${DRY_RUN:-0}"
-
 CACHE_DIRS=(/home/gitlab-runner/cache /home/gitlab-runner/.cache /var/lib/gitlab-runner/cache /root/.cache)
 BUILD_DIRS=(/home/gitlab-runner/builds /var/lib/gitlab-runner/builds)
-
 log()  { logger -t runner-weekly-cleanup -- "$*"; echo "$(date -u +%FT%TZ) $*"; }
 disk() { df --output=used,avail,pcent -h / | tail -1 | xargs; }
-
 run() {
   log "-> $*"
   [[ "$DRY_RUN" == "1" ]] && return 0
   "$@" || log "WARN: failed: $*"
 }
-
 wipe_dir() {
   local dir="$1" age="${2:-}"
   [[ -d "$dir" ]] || return 0
@@ -12961,7 +16191,6 @@ wipe_dir() {
     find "$dir" -mindepth 1 -delete 2>/dev/null || log "WARN: partial wipe of $dir"
   fi
 }
-
 usage() {
   cat <<USAGE
 Usage: $0 [--dry-run] [--help]
@@ -12974,7 +16203,6 @@ Env:
   DRY_RUN=1                   show what would be cleaned without deleting anything
 USAGE
 }
-
 while (( $# )); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -12984,19 +16212,15 @@ while (( $# )); do
   shift
 done
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-
 exec 9>/run/runner-weekly-cleanup.lock
 flock -n 9 || { log "another cleanup is running, exit"; exit 0; }
-
 hours=$(( RETENTION_DAYS * 24 ))
 log "start (dry_run=${DRY_RUN}), disk before: $(disk)"
-
 if command -v docker >/dev/null 2>&1; then
-  # Never guess the job count: if docker does not answer, a default of 0 would wipe the caches under running jobs.
-  # stderr goes to a temp file so a docker WARNING is never counted as a running job.
+  # docker not answering is not "no jobs"; stderr is kept apart so a warning is not counted as a job
   ps_err=$(mktemp)
   trap 'rm -f "$ps_err"' EXIT
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+  if ! job_ids=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; } 2>"$ps_err"); then
     log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
@@ -13012,12 +16236,14 @@ if command -v docker >/dev/null 2>&1; then
   fi
   run docker container prune -f --filter "until=${hours}h"
   run docker image prune -af --filter "until=${hours}h"
+  # the prune takes the pinned GitHub runner images too: fetch them again
+  for img in $(sed -n 's/^GH_\(RUNNER\|BUILDKIT\)_IMAGE=//p' "${GHR_CONFIG:-/etc/github-runner/config.env}" 2>/dev/null); do
+    docker image inspect "$img" >/dev/null 2>&1 || run docker pull -q "$img"
+  done
   run docker builder prune -af --filter "until=${hours}h"
   run docker network prune -f --filter "until=${hours}h"
 fi
-
 for dir in "${BUILD_DIRS[@]}"; do wipe_dir "$dir" "$RETENTION_DAYS"; done
-
 if command -v apt-get >/dev/null 2>&1; then
   run apt-get -o DPkg::Lock::Timeout=600 autoremove --purge -y -q
   run apt-get -o DPkg::Lock::Timeout=600 autoclean -q
@@ -13026,22 +16252,18 @@ elif command -v dnf >/dev/null 2>&1; then
   run dnf -y -q autoremove
   run dnf -q clean all
 fi
-
 run journalctl --vacuum-time="$(( RETENTION_DAYS * 2 ))d" --vacuum-size="$JOURNAL_MAX"
-
 if [[ "$DRY_RUN" != "1" ]]; then
   log "-> removing rotated logs older than 30d"
   find /var/log -type f \( -name '*.gz' -o -name '*-[0-9]*' -o -name '*.[0-9]' -o -name '*.old' \) -mtime +30 -delete 2>/dev/null || true
   find /tmp /var/tmp -xdev -mindepth 1 -type f -atime +"$RETENTION_DAYS" -delete 2>/dev/null || true
 fi
 run systemd-tmpfiles --clean
-
 if [[ -d "$SHARED_CACHE_DIR" && "$DRY_RUN" != "1" ]]; then
   log "-> pruning ${SHARED_CACHE_DIR} files not used for ${SHARED_CACHE_MAX_AGE_DAYS}d"
   find "$SHARED_CACHE_DIR" -xdev -type f -atime +"$SHARED_CACHE_MAX_AGE_DAYS" -delete 2>/dev/null || true
   find "$SHARED_CACHE_DIR" -xdev -mindepth 2 -type d -empty -delete 2>/dev/null || true
 fi
-
 log "done, disk after: $(disk)"
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/runner-weekly-cleanup.sh"
@@ -13094,6 +16316,64 @@ ExecReload=/usr/local/bin/ci-job-isolation.sh
 WantedBy=multi-user.target
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/ci-job-isolation.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/github-runner-ctl.service" <<'__SIC_EOF__'
+[Unit]
+Description=Ephemeral GitHub Actions runner controller (private repositories)
+After=docker.service network-online.target ci-job-isolation.service
+Wants=network-online.target
+Requires=docker.service ci-job-isolation.service
+ConditionPathExists=/etc/github-runner/config.env
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=github-runner
+Group=github-runner
+# docker group = root on this host; the controller only runs the fixed docker commands of runner/scripts/github-runner-ctl
+SupplementaryGroups=docker
+ExecStart=/usr/local/bin/github-runner-ctl run
+SyslogIdentifier=github-runner-ctl
+# Pods are independent Docker containers: stopping or restarting the controller does not end a running job, the next start adopts it.
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=300
+# invalid config (exit 2) is not fixed by a restart
+RestartPreventExitStatus=2
+RuntimeDirectory=github-runner
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+MemoryMax=256M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/github-runner-ctl.service"
 
 install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/runner-disk-guard.service" <<'__SIC_EOF__'
@@ -13220,7 +16500,7 @@ chmod 644 "$R/runner/systemd/server-freshness.timer"
 install -d "$R/runner/stacks/logging"
 cat > "$R/runner/stacks/logging/config.alloy" <<'__SIC_EOF__'
 // Container logs and the systemd journal to the local Loki.
-// CI job containers are skipped: their output is already the job log in GitLab.
+// CI job containers are skipped: their output is already the job log in GitLab (or in GitHub, for the pods of the GitHub Actions runner).
 
 logging {
   level = "warn"
@@ -13243,6 +16523,12 @@ discovery.relabel "containers" {
   rule {
     source_labels = ["__meta_docker_container_label_com_gitlab_gitlab_runner_managed"]
     regex         = "true"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_io_server_init_github_runner"]
+    regex         = "job"
     action        = "drop"
   }
 
@@ -14677,13 +17963,15 @@ check_security() {
   fi
 
   local members u shell pid ru
-  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vx 'gitlab-runner' | grep . | tr '\n' ' ' || true)
+  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vxE 'gitlab-runner|github-runner' | grep . | tr '\n' ' ' || true)
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
+    if is_runner; then
+      if getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -qx 'github-runner'; then ok "docker group: only gitlab-runner and github-runner"; else ok "docker group: only gitlab-runner"; fi
+    else ok "docker group: no members"; fi
   fi
-  for u in gitlab-runner monitoring; do
+  for u in gitlab-runner github-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
     shell=$(getent passwd "$u" | cut -d: -f7)
     case "$shell" in
@@ -15222,8 +18510,8 @@ check_runner() {
   fi
 
   local jobs
-  jobs=$(docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true 2>/dev/null | wc -l || true)
-  info "running job containers: ${jobs:-0}"
+  jobs=$({ docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true; docker ps -q --filter label=io.server-init.github-runner=job; } 2>/dev/null | wc -l || true)
+  info "running job containers (GitLab jobs and GitHub runner pods): ${jobs:-0}"
 
   if grep -q '^listen_address' "$CFG"; then
     if [[ "$(http_code http://127.0.0.1:9252/metrics 3)" == "200" ]]; then
@@ -15239,6 +18527,94 @@ check_runner() {
     warn "${errs} error lines in runner log in the last hour (journalctl -u gitlab-runner --since -1h | grep ERROR)"
   else
     ok "no runner errors in the last hour"
+  fi
+  return 0
+}
+
+# Opt-in GitHub Actions runner (runner/install/github-runner.sh): the controller writes /run/github-runner/status.json every poll,
+# so this check makes no GitHub API call. HEALTH_GHR_STATUS and HEALTH_GHR_CONFIG are for tests.
+check_github_runner() {
+  local unit=github-runner-ctl.service st="${HEALTH_GHR_STATUS:-/run/github-runner/status.json}" gcfg="${HEALTH_GHR_CONFIG:-/etc/github-runner/config.env}"
+  if ! unit_exists "$unit" && [[ ! -f "$gcfg" ]]; then return 0; fi
+  if (( LIMITED )); then
+    skip "github runner: needs root (skipped)"
+    return 0
+  fi
+  section "GitHub Actions runner"
+  if ! have jq; then
+    warn "jq missing: the GitHub runner status cannot be read"
+    return 0
+  fi
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    ok "${unit} active"
+  elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+    fail "${unit} $(systemctl is-active "$unit" 2>/dev/null || true) (journalctl -u github-runner-ctl -n 30)"
+  else
+    warn "${unit} installed but not enabled (systemctl enable --now github-runner-ctl)"
+    return 0
+  fi
+  if [[ ! -s "$st" ]]; then
+    warn "no controller status yet (${st}); the first poll writes it"
+    return 0
+  fi
+  local now age v owner image created img_age
+  now=$(date +%s)
+  owner=$(sed -nE 's/^GH_OWNER="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  info "private repositories of ${owner:-?}: $(jq -r '"\(.served // 0) served, \(.skipped // 0) skipped (public, archived or excluded)"' "$st" 2>/dev/null || echo unknown)"
+  v=$(jq -r '.last_poll_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 300 )); then ok "last successful poll $(human_age "$age") ago"
+    elif (( age <= 900 )); then warn "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"
+    else fail "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"; fi
+  else
+    warn "no successful poll yet ($(jq -r '.last_error // "no error recorded"' "$st" 2>/dev/null))"
+  fi
+  v=$(jq -r '.last_token_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 4200 )); then ok "installation token minted $(human_age "$age") ago"
+    else warn "installation token last minted $(human_age "$age") ago (the GitHub App key or installation may be gone: github-runner-ctl self-test)"; fi
+  else
+    warn "no installation token minted yet"
+  fi
+  v=$(jq -r '.rate_remaining // empty' "$st" 2>/dev/null || true)
+  if [[ -n "$v" ]] && isnum "$v"; then
+    if (( v < 100 )); then fail "GitHub API quota nearly used up: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    elif (( v < 500 )); then warn "GitHub API quota low: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    else ok "GitHub API quota: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"; fi
+  fi
+  info "pods: $(jq -r '"\(.active_pods // 0) active (\(.idle_pods // 0) waiting for a job), limit \(.max_jobs // "?")"' "$st" 2>/dev/null)"
+  if [[ "$(jq -r '.update_required // false' "$st" 2>/dev/null)" == true ]]; then
+    fail "a runner exited with code 3 or 4 (it wanted to update itself): the pinned runner image is too old; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+  fi
+  v=$(jq -r '.backoff_until // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > now )); then
+    warn "pod start paused after repeated runner failures (until $(date -d "@${v}" +%H:%M:%S)); journalctl -u github-runner-ctl"
+  fi
+  # age of the pinned runner image: GitHub stops queuing jobs to a runner that was not updated for 30 days
+  image=$(sed -nE 's/^GH_RUNNER_IMAGE="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  created=""
+  if [[ -n "$image" ]] && have docker; then created=$(docker image inspect -f '{{.Created}}' "$image" 2>/dev/null || true); fi
+  if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); else created=$(jq -r '.runner_image_created // empty' "$st" 2>/dev/null || true); fi
+  if [[ -n "$created" ]] && isnum "$created"; then
+    img_age=$(( (now - created) / 86400 ))
+    # age alone is only a warning (a newer pin may already be waiting for update.sh); a runner that really cannot take jobs shows up as update_required
+    if (( img_age >= 25 )); then warn "runner image is ${img_age} days old (GitHub stops queuing jobs to a runner older than 30 days): bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    else ok "runner image is ${img_age} days old"; fi
+  else
+    info "runner image age unknown (image not on disk and not yet recorded)"
+  fi
+  if have docker && docker info >/dev/null 2>&1; then
+    local stopped nets running
+    stopped=$(docker ps -aq --filter label=io.server-init.github-runner=job --filter status=exited --filter status=dead --filter status=created 2>/dev/null | wc -l || true)
+    nets=$(docker network ls -q --filter label=io.server-init.github-runner=job 2>/dev/null | wc -l || true)
+    running=$(docker ps -q --filter label=io.server-init.github-runner.role=runner 2>/dev/null | wc -l || true)
+    if (( ${stopped:-0} > 0 || ${nets:-0} > ${running:-0} )); then
+      warn "leftover pod parts: ${stopped:-0} stopped container(s), ${nets:-0} network(s) for ${running:-0} running pod(s); the controller removes them on its next poll"
+    else
+      ok "no leftover pod containers or networks"
+    fi
   fi
   return 0
 }
@@ -15308,12 +18684,13 @@ check_containers() {
     s_pids[$name]="$pids"
   done < <(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}' "${ids[@]}" 2>/dev/null || true)
 
-  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}'
-  local state health restarts oom started memlimit job started_s age short details level reasons
+  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}|{{index .Config.Labels "io.server-init.github-runner"}}'
+  local state health restarts oom started memlimit job ghjob started_s age short details level reasons
   local n_total=0 n_jobs=0
 
-  while IFS='|' read -r name state health restarts oom started memlimit job; do
+  while IFS='|' read -r name state health restarts oom started memlimit job ghjob; do
     [[ -z "$name" ]] && continue
+    if [[ "$ghjob" == "job" ]]; then job=true; fi
     name="${name#/}"
     n_total=$((n_total + 1))
     short="$name"
@@ -15745,6 +19122,7 @@ check_securitytools
 check_services
 check_freshness
 check_runner
+check_github_runner
 check_docker
 check_containers
 check_recent_container_oom
@@ -15758,13 +19136,9 @@ chmod 755 "$R/common/health"
 install -d "$R/common"
 cat > "$R/common/pin-repo-key.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Download a package repository signing key and install it only if it has the expected fingerprint.
-# Usage: pin-repo-key URL FINGERPRINT DEST
-# The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
-# keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
-# On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+# Usage: pin-repo-key URL FINGERPRINT DEST. Downloads a repository signing key, checks it with gpg in an empty keyring and writes only
+# the key with that fingerprint (40 hex digits, spaces allowed) to DEST. On a mismatch nothing is written and the exit code is 1.
 set -Eeuo pipefail
-
 if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
   echo "Usage: $0 URL FINGERPRINT DEST" >&2
   exit 2
@@ -15774,7 +19148,6 @@ want=$(printf '%s' "$2" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
 dest="$3"
 [[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
 command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 chmod 0700 "$work"
@@ -15800,7 +19173,6 @@ cat > "$R/common/shell-history.sh" <<'__SIC_EOF__'
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
-
 __shell_history_vars() {
   HISTSIZE=100000
   HISTFILESIZE=200000
@@ -15809,9 +19181,7 @@ __shell_history_vars() {
 }
 __shell_history_vars
 shopt -s histappend cmdhist
-
-# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
-# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
+# Before each prompt: append the last command to the history; the first prompt re-applies the limits (Debian lowers them).
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -15819,9 +19189,8 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
-# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
-# element 0 for /etc/bashrc's title command; the hook stays in element 1.
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. Still empty (Fedora/EL): an array whose element 0 is left
+# empty for /etc/bashrc's title command.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -15840,7 +19209,6 @@ case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
     fi
     ;;
 esac
-
 # Debian and Ubuntu install fd as fdfind.
 if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
   alias fd=fdfind
@@ -15854,7 +19222,6 @@ if [[ -n "${__fd-}" ]]; then
   export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
 fi
 unset __fd
-
 if command -v fzf >/dev/null 2>&1; then
   for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
     if [[ -r "$__f" ]]; then
@@ -15885,7 +19252,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 56"
+echo "files written to $R: 59"
 INSTALL
 sudo bash /root/server-init-config/runner/install/update.sh
 ````
@@ -15981,7 +19348,12 @@ require_compose_min() {
   version_ge "$have" "$want" || die "${what} needs Docker Compose ${want} or newer (inline 'configs: content:'), found ${have}: update the docker-compose-plugin package (or Docker Engine) first, then rerun"
 }
 
-ci_jobs_running() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null | wc -l; }
+# Containers that count as a running CI job: GitLab Runner job/service containers and the pods of the GitHub Actions runner
+# (runner/scripts/github-runner-ctl labels both of its containers io.server-init.github-runner=job).
+CI_JOB_LABELS=(com.gitlab.gitlab-runner.managed=true io.server-init.github-runner=job)
+# Ids of those containers, one per line; fails when docker does not answer (that is not "no jobs").
+ci_job_ids() { local l ids=""; for l in "${CI_JOB_LABELS[@]}"; do ids+="$(docker ps -q --filter "label=${l}")"$'\n' || return; done; sed '/^$/d' <<<"$ids" | sort -u; }
+ci_jobs_running() { ci_job_ids 2>/dev/null | wc -l; }
 
 require_runner_idle() {
   local n
@@ -16117,6 +19489,16 @@ own_stack_dir() {
 # runner/ci/mirror-images.yml, tools/ci/runner-container.sh and the generated runner/COMMANDS.md.
 HELPER_IMAGE="alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 
+# Images of the opt-in GitHub Actions runner (runner/install/github-runner.sh). The single pin of each, both by the digest of the multi-arch
+# index (amd64 and arm64): the runner image from ghcr.io/actions/actions-runner, the rootless BuildKit sidecar from Docker Hub (moby/buildkit).
+# Bump tag and digest here only; the installer and runner/install/update.sh copy them into /etc/github-runner/config.env, and
+# tools/ci/check-pins.sh fails when a tracked file spells either image with another pin. GitHub stops queuing jobs to a runner older than
+# 30 days (the image is the runner version), so bump GHR_RUNNER_IMAGE at least monthly; health warns after ~25 days.
+# shellcheck disable=SC2034  # read by runner/install/github-runner.sh (sourcing this file)
+GHR_RUNNER_IMAGE="ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+# shellcheck disable=SC2034
+GHR_BUILDKIT_IMAGE="moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"
+
 # Create the stack's containers and volumes without starting them, then hand the volumes to the service user.
 chown_volumes() {
   local dir="$1" project v
@@ -16132,6 +19514,262 @@ chown_volumes() {
 }
 __SIC_EOF__
 chmod 755 "$R/common/lib.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/github-runner.sh" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# Opt-in ephemeral GitHub Actions runner for the PRIVATE repositories of one GitHub App installation (a personal account), on this host
+# next to the GitLab Runner. Installs the controller (runner/scripts/github-runner-ctl) and its systemd unit, the service user
+# github-runner, /etc/github-runner/config.env (no secrets) and the GitHub App private key /etc/github-runner/app.pem (mode 0600,
+# owner github-runner), pulls the pinned images (common/lib.sh), runs a self-test against GitHub and only then enables the service.
+# Each job gets a just-in-time runner in its own pod (network, rootless BuildKit sidecar, runner container); no Docker socket in jobs.
+# Needs: Docker, runner/install/job-limits.sh (ci-jobs.slice), a GitHub App (see runner/README.md). Safe to rerun: values already in
+# config.env are kept unless you pass them in the environment, a changed file gets a backup.
+#
+# Asks (read -rp) for what is missing: GH_OWNER (GitHub user), GH_APP_CLIENT_ID (the App's client ID) and the path of the downloaded
+# private key (.pem; copied, never printed; delete the download afterwards). Without a terminal pass them in the environment: GH_OWNER,
+# GH_APP_CLIENT_ID, GH_KEY_SRC.
+# Env (all optional, kept from config.env on a rerun): GH_INSTALLATION_ID (found by itself), GH_LABELS (default
+# self-hosted,linux,<arm64|x64>,hetzner), GH_RUNNER_GROUP_ID (1), GH_MAX_JOBS (1), GH_POLL_INTERVAL (30), GH_IDLE_TIMEOUT (300),
+# GH_EXCLUDE_REPOS, GH_BUILDKIT (1), GH_JOB_CPUS / GH_JOB_MEMORY (the GitLab per-job values from config.toml, else 1.5 / 1536m),
+# GH_BUILDKIT_CPUS (1), GH_BUILDKIT_MEMORY (768m), GH_JOB_SUBNET_POOL (10.213.0.0/20), GH_MAX_RUNTIME. See runner/README.md.
+set -Eeuo pipefail
+# shellcheck source=../../common/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../common/lib.sh"
+
+ETC=/etc/github-runner
+CFG="${ETC}/config.env"
+KEY="${ETC}/app.pem"
+KEY_RESTART="${ETC}/key-restart-required"
+SVC_USER=github-runner
+UNIT=github-runner-ctl.service
+CTL=/usr/local/bin/github-runner-ctl
+SLICE=/etc/systemd/system/ci-jobs.slice
+USERNS_DROPIN=/etc/sysctl.d/91-github-runner-userns.conf
+GITLAB_CFG=/etc/gitlab-runner/config.toml
+DO_PULL=1 DO_SELFTEST=1 DO_START=1 ONLY_SELFTEST=0
+
+usage() {
+  sed -n '2,/^set -E/{/^set -E/!p}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  cat <<USAGE
+
+Usage: $0 [--self-test] [--no-self-test] [--no-start] [--no-pull]
+  --self-test     only run the self-test with the installed config: mint a JWT, get an installation token, list the repositories and
+                  print which would be served (names and visibility); starts and changes nothing
+  --no-self-test  install and enable without the live check against GitHub (offline)
+  --no-start      enable the service but do not start it
+  --no-pull       do not pull the images now (the controller pulls a missing image before its first job)
+Removal: see runner/docs/github-runner.md (Remove it). Stop the controller, review and remove only containers and networks labelled
+  io.server-init.github-runner=job; never prune unrelated networks. Running pods survive a controller stop.
+USAGE
+}
+
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) ONLY_SELFTEST=1 ;;
+    --no-self-test) DO_SELFTEST=0 ;;
+    --no-start) DO_START=0 ;;
+    --no-pull) DO_PULL=0 ;;
+    *) usage >&2; die "unknown option: $1" ;;
+  esac
+  shift
+done
+require_root
+
+run_selftest() {
+  runuser -u "$SVC_USER" -- env GHR_CONFIG="$CFG" "$CTL" self-test
+}
+
+if (( ONLY_SELFTEST )); then
+  [[ -x "$CTL" && -f "$CFG" ]] || die "not installed yet: run $0 first"
+  run_selftest
+  exit $?
+fi
+
+# ---- preflight ---------------------------------------------------------------------------------------------------------------
+command -v docker >/dev/null || die "docker is not installed"
+systemctl is-active --quiet docker || die "docker is not running"
+systemctl cat ci-job-isolation.service >/dev/null 2>&1 || die "ci-job-isolation.service missing: install the runner host tools first"
+getent group docker >/dev/null || die "no docker group"
+[[ -f "$SLICE" ]] || die "${SLICE} missing: run runner/setup.sh --job-limits first (the pods run inside ci-jobs.slice, which caps all CI jobs together)"
+read -r cgdrv cgver < <(docker info --format '{{.CgroupDriver}} {{.CgroupVersion}}' 2>/dev/null || echo "? ?")
+[[ "$cgdrv" == systemd && "$cgver" == 2 ]] || die "Docker must use cgroup v2 with the systemd cgroup driver (found: ${cgdrv} v${cgver}); --cgroup-parent ci-jobs.slice needs it"
+for t in curl jq openssl; do command -v "$t" >/dev/null || pkg_install "$t"; done
+command -v runuser >/dev/null || die "runuser (util-linux) is missing"
+[[ -f "${REPO_ROOT}/runner/scripts/github-runner-ctl" && -f "${REPO_ROOT}/runner/systemd/${UNIT}" ]] || die "incomplete copy of the repository"
+
+existing() { # existing KEY: the value in config.env, quotes removed
+  [[ -f "$CFG" ]] || return 0
+  { grep -m1 "^$1=" "$CFG" || true; } | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/'
+}
+# pick KEY DEFAULT: environment, else config.env, else DEFAULT
+pick() {
+  local v=${!1:-}
+  [[ -n "$v" ]] || v=$(existing "$1")
+  printf '%s' "${v:-$2}"
+}
+
+# Rootless BuildKit needs user namespaces for non-root (kernel: user.max_user_namespaces > 0). Only written when it is 0.
+buildkit_wanted=$(pick GH_BUILDKIT 1)
+if [[ "$buildkit_wanted" == 1 ]]; then
+  maxns=$(sysctl -n user.max_user_namespaces 2>/dev/null || echo 0)
+  if [[ "$maxns" =~ ^[0-9]+$ ]] && (( maxns == 0 )); then
+    printf '# Written by runner/install/github-runner.sh: rootless BuildKit needs user namespaces.\nuser.max_user_namespaces = 28633\n' > "${USERNS_DROPIN}.new"
+    if ! cmp -s "${USERNS_DROPIN}.new" "$USERNS_DROPIN" 2>/dev/null; then mv "${USERNS_DROPIN}.new" "$USERNS_DROPIN"; else rm -f "${USERNS_DROPIN}.new"; fi
+    sysctl -q -w user.max_user_namespaces=28633 || log "WARN: could not set user.max_user_namespaces now; it applies after a reboot"
+    log "user.max_user_namespaces was 0: set to 28633 (${USERNS_DROPIN}); rootless BuildKit needs it"
+  else
+    log "user.max_user_namespaces = ${maxns}: ok for rootless BuildKit"
+  fi
+  if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" == 1 ]]; then
+    log "WARN: kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu): rootless BuildKit will fail; set it to 0 in /etc/sysctl.d or use GH_BUILDKIT=0"
+  fi
+fi
+
+# ---- service user ----------------------------------------------------------------------------------------------------------------
+NOLOGIN=$(command -v nologin || echo /sbin/nologin)
+if ! id "$SVC_USER" >/dev/null 2>&1; then
+  useradd -r -U -M -d /nonexistent -s "$NOLOGIN" -c "GitHub Actions runner controller" "$SVC_USER"
+  log "created service user ${SVC_USER}"
+fi
+usermod -s "$NOLOGIN" "$SVC_USER" >/dev/null 2>&1 || true
+usermod -L "$SVC_USER" 2>/dev/null || true
+usermod -aG docker "$SVC_USER"   # root-equivalent: it is what the controller needs to start the pods
+install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
+
+# ---- the key ---------------------------------------------------------------------------------------------------------------------
+changed=0
+src=${GH_KEY_SRC:-}
+if [[ -z "$src" && ! -f "$KEY" ]]; then
+  [[ -t 0 ]] || die "no private key yet: pass its path in GH_KEY_SRC (the .pem downloaded from the GitHub App page)"
+  read -rp "Path of the downloaded GitHub App private key (.pem): " src
+fi
+if [[ -n "$src" ]]; then
+  [[ -f "$src" && -r "$src" ]] || die "cannot read ${src}"
+  openssl rsa -in "$src" -passin pass: -noout >/dev/null 2>&1 || die "${src} is not an RSA private key (download it from the GitHub App page, Generate a private key)"
+  if ! cmp -s "$src" "$KEY" 2>/dev/null; then
+    [[ ! -f "$KEY" ]] || backup "$KEY"
+    install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$src" "$KEY"
+    ( umask 077; : > "$KEY_RESTART" )
+    changed=1   # clear cached credentials after a successful self-test, even when config and code are unchanged
+    log "private key installed: ${KEY} (mode 0600, owner ${SVC_USER})"
+  fi
+  if [[ "$(realpath "$src")" != "$(realpath "$KEY")" ]]; then
+    log "REMINDER: the downloaded copy ${src} is still on disk: delete it once the self-test passes (shred -u '${src}')"
+  fi
+fi
+[[ -f "$KEY" ]] || die "no ${KEY}"
+openssl rsa -in "$KEY" -passin pass: -noout >/dev/null 2>&1 || die "${KEY} is not an RSA private key"
+chown "${SVC_USER}:${SVC_USER}" "$KEY"; chmod 0600 "$KEY"
+[[ ! -f "$KEY_RESTART" ]] || changed=1   # retry a rotation whose self-test or activation previously failed
+
+# ---- config ----------------------------------------------------------------------------------------------------------------------
+GH_OWNER=$(pick GH_OWNER "")
+if [[ -z "$GH_OWNER" ]]; then
+  [[ -t 0 ]] || die "GH_OWNER is not set: pass the GitHub user name in the environment"
+  read -rp "GitHub user (owner of the private repositories): " GH_OWNER
+fi
+GH_APP_CLIENT_ID=$(pick GH_APP_CLIENT_ID "")
+if [[ -z "$GH_APP_CLIENT_ID" ]]; then
+  [[ -t 0 ]] || die "GH_APP_CLIENT_ID is not set: pass the App's client ID in the environment"
+  read -rp "Client ID of the GitHub App (Iv...): " GH_APP_CLIENT_ID
+fi
+case "$(uname -m)" in aarch64|arm64) arch=arm64 ;; *) arch=x64 ;; esac
+# the per-job limits of the GitLab jobs (same numbers): from config.toml when job-limits.sh wrote them
+gl() { [[ -f "$GITLAB_CFG" ]] && sed -nE "s/^[[:space:]]+$1 = \"([^\"]+)\".*/\1/p" "$GITLAB_CFG" | head -n1 || true; }
+job_mem_default=$(gl memory); job_cpu_default=$(gl cpus)
+
+# only plain characters: the value goes through sed (env_set) and into a file the controller parses
+set_cfg() {
+  [[ "$2" =~ ^[A-Za-z0-9_.,@:/+-]*$ ]] || die "$1: unexpected characters in '$2'"
+  [[ -n "${CFG_DRY:-}" ]] || env_set "${CFG_TARGET:-$CFG}" "$1" "$2"
+}
+write_config() {
+  set_cfg GH_OWNER "$GH_OWNER"
+  set_cfg GH_APP_CLIENT_ID "$GH_APP_CLIENT_ID"
+  set_cfg GH_INSTALLATION_ID "$(pick GH_INSTALLATION_ID "")"
+  set_cfg GH_LABELS "$(pick GH_LABELS "self-hosted,linux,${arch},hetzner")"
+  set_cfg GH_RUNNER_GROUP_ID "$(pick GH_RUNNER_GROUP_ID 1)"
+  set_cfg GH_MAX_JOBS "$(pick GH_MAX_JOBS 1)"
+  set_cfg GH_POLL_INTERVAL "$(pick GH_POLL_INTERVAL 30)"
+  set_cfg GH_IDLE_TIMEOUT "$(pick GH_IDLE_TIMEOUT 300)"
+  set_cfg GH_MAX_RUNTIME "$(pick GH_MAX_RUNTIME 21900)"
+  set_cfg GH_EXCLUDE_REPOS "$(pick GH_EXCLUDE_REPOS "")"
+  set_cfg GH_BUILDKIT "$buildkit_wanted"
+  set_cfg GH_JOB_CPUS "$(pick GH_JOB_CPUS "${job_cpu_default:-1.5}")"
+  set_cfg GH_JOB_MEMORY "$(pick GH_JOB_MEMORY "${job_mem_default:-1536m}")"
+  set_cfg GH_BUILDKIT_CPUS "$(pick GH_BUILDKIT_CPUS 1)"
+  set_cfg GH_BUILDKIT_MEMORY "$(pick GH_BUILDKIT_MEMORY 768m)"
+  set_cfg GH_JOB_SUBNET_POOL "$(pick GH_JOB_SUBNET_POOL 10.213.0.0/20)"
+  set_cfg GH_KEY_FILE "$KEY"
+  # the images are pinned in common/lib.sh and follow the repository (a bump reaches the host with this script or update.sh)
+  set_cfg GH_RUNNER_IMAGE "$GHR_RUNNER_IMAGE"
+  set_cfg GH_BUILDKIT_IMAGE "$GHR_BUILDKIT_IMAGE"
+}
+CFG_DRY=1 write_config   # checks every value first: a bad one must not leave a half-written file
+cfg_candidate=$(mktemp)
+trap 'rm -f -- "$cfg_candidate"' EXIT
+if [[ -f "$CFG" ]]; then cp "$CFG" "$cfg_candidate"; fi
+CFG_TARGET="$cfg_candidate" write_config
+GHR_CONFIG="$cfg_candidate" bash "${REPO_ROOT}/runner/scripts/github-runner-ctl" check-config \
+  || die "candidate config is invalid; installed config was not changed"
+apply_config() { cat "$cfg_candidate" > "$CFG"; }
+if [[ ! -f "$CFG" ]]; then
+  printf '# Written by runner/install/github-runner.sh. No secrets here: the private key is %s.\n# Documentation: runner/README.md (GitHub Actions runner).\n' "$KEY" > "$CFG"
+  write_config   # a new file: nothing to back up
+else
+  cfg_before=$(sha256sum < "$CFG")
+  edit_with_backup "$CFG" apply_config
+  [[ "$cfg_before" == "$(sha256sum < "$CFG")" ]] || changed=1   # restart below so the controller reads the new values
+fi
+chown "root:${SVC_USER}" "$CFG"; chmod 0640 "$CFG"
+
+# ---- files, unit, images -----------------------------------------------------------------------------------------------------------
+install_if_changed() { # SRC DST MODE
+  if ! cmp -s "$1" "$2" 2>/dev/null || [[ "$(stat -c %a "$2")" != "$(printf '%o' "$((8#$3))")" ]]; then
+    [[ ! -f "$2" ]] || backup "$2"
+    install -m "$3" "$1" "$2"; restorecon_if "$2"; changed=1; log "installed ${2}"
+  fi
+}
+bash -n "${REPO_ROOT}/runner/scripts/github-runner-ctl" || die "syntax error in the controller"
+install_if_changed "${REPO_ROOT}/runner/scripts/github-runner-ctl" "$CTL" 0755
+install_if_changed "${REPO_ROOT}/runner/systemd/${UNIT}" "/etc/systemd/system/${UNIT}" 0644
+GHR_CONFIG="$CFG" "$CTL" check-config || die "config.env is invalid (see above); fix it and rerun"
+systemctl daemon-reload
+# ci-job-isolation reads GH_JOB_SUBNET_POOL: it lets the pod networks, and only them, reach the npm cache (docker0 IP, port 4873)
+systemctl reload-or-restart ci-job-isolation.service || die "ci-job-isolation failed: inspect journalctl -u ci-job-isolation.service before enabling the runner"
+
+if (( DO_PULL )); then
+  log "pulling the pinned images (the runner image is large)"
+  docker pull -q "$GHR_RUNNER_IMAGE" >/dev/null
+  if [[ "$(existing GH_BUILDKIT)" == 1 ]]; then docker pull -q "$GHR_BUILDKIT_IMAGE" >/dev/null; fi
+fi
+
+# ---- self-test, then enable --------------------------------------------------------------------------------------------------------
+if (( DO_SELFTEST )); then
+  log "self-test against GitHub (starts nothing)"
+  if ! run_selftest; then
+    log "self-test FAILED: service activation is unchanged (an existing service may still be running). Fix the App, then rerun ${0} to self-test and apply activation/restart."
+    exit 1
+  fi
+fi
+systemctl enable "$UNIT" >/dev/null 2>&1
+if (( DO_START )); then
+  if systemctl is-active --quiet "$UNIT"; then
+    if (( changed )); then systemctl restart "$UNIT"; log "${UNIT} restarted (running pods keep running)"; fi
+  else
+    systemctl start "$UNIT"
+  fi
+  sleep 3
+  systemctl is-active --quiet "$UNIT" || { journalctl -u github-runner-ctl -n 20 --no-pager || true; die "${UNIT} is not running"; }
+  rm -f -- "$KEY_RESTART"
+  log "OK: ${UNIT} running. Use it with runs-on: [self-hosted, hetzner] in a private repository; logs: journalctl -u github-runner-ctl -f; health shows the status"
+else
+  log "OK: ${UNIT} enabled, not started (--no-start): systemctl start github-runner-ctl"
+fi
+__SIC_EOF__
+chmod 755 "$R/runner/install/github-runner.sh"
 
 install -d "$R/runner/install"
 cat > "$R/runner/install/grafana-domain.sh" <<'__SIC_EOF__'
@@ -16595,7 +20233,9 @@ cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
 # Defaults suit a CAX11 (2 vCPU, 4 GB RAM) with concurrent = 2: two jobs at 1.5 CPU and 1.5 GB, services at 384 MB,
 # and a 3 GB ceiling for all of them leave about 1 GB for the host and its stacks. A bigger host: raise JOB_MEMORY,
 # JOB_CPUS and JOBS_MEMORY_MAX and keep concurrent x limit below the hardware. A job that needs more fails with an
-# out-of-memory kill (exit 137) instead of freezing the host.
+# out-of-memory kill (exit 137) instead of freezing the host. The opt-in GitHub Actions runner (runner/install/github-runner.sh) shares
+# this slice: its pod is a runner container with the same JOB_CPUS/JOB_MEMORY plus a BuildKit sidecar (768m), one pod at a time, so with it
+# installed keep concurrent = 1 (or raise JOBS_MEMORY_MAX on a bigger host) or a busy host hits the ceiling and kills a job.
 # gitlab-runner reloads config.toml by itself; running jobs keep their old limits, new jobs get the new ones.
 #
 # Env: JOB_MEMORY (default 1536m), JOB_MEMORY_SWAP (default = JOB_MEMORY, i.e. no swap), JOB_CPUS (default 1.5),
@@ -16609,7 +20249,7 @@ source "$(dirname "$0")/../../common/lib.sh"
 CFG="${RUNNER_CONFIG:-/etc/gitlab-runner/config.toml}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 require_root
@@ -17375,6 +21015,7 @@ Updates what is installed on this server to the state of this repo checkout:
   logging        /opt/logging (Loki, Grafana Alloy)
   registry-cache /opt/registry-cache
   npm-cache      /opt/npm-cache
+  github-runner  controller, unit and the two pinned images (common/lib.sh) in /etc/github-runner/config.env; pulls the images
 Components that are not installed are skipped.
 
   -n, --dry-run  show what would change, change nothing
@@ -17902,6 +21543,52 @@ update_npm_cache() {
   stack_sync npm-cache "$dir" "$cfg" config.yaml "$compose" "http://${bridge}:4873/-/ping"
 }
 
+# The opt-in GitHub Actions runner: controller script, unit and the image pins of this repo checkout. Never touches the key or the
+# rest of config.env. A new runner image must reach the host within 30 days of its release (GitHub stops queuing jobs to an older
+# runner), so a bump of GHR_RUNNER_IMAGE in common/lib.sh lands here. The controller is restarted at once: it keeps no job in
+# memory and a running pod is adopted again from its Docker labels (a restart deferred until idle would be lost, the next run sees no change).
+update_github_runner() {
+  local cfg=/etc/github-runner/config.env ctl=/usr/local/bin/github-runner-ctl unit=github-runner-ctl.service changed=0 cfg_changed=0 k want have
+  if [[ ! -f "$cfg" ]]; then
+    log "github-runner: not installed, skipping"
+    return 0
+  fi
+  bash -n "${REPO_ROOT}/runner/scripts/github-runner-ctl" || die "syntax error in runner/scripts/github-runner-ctl, nothing changed"
+  if sync_file "${REPO_ROOT}/runner/scripts/github-runner-ctl" "$ctl" 0755; then changed=1; CHANGED+=("scripts/github-runner-ctl"); fi
+  if sync_file "${REPO_ROOT}/runner/systemd/${unit}" "/etc/systemd/system/${unit}" 0644; then changed=1; CHANGED+=("systemd/${unit}"); run systemctl daemon-reload; fi
+  for k in GHR_RUNNER_IMAGE:GH_RUNNER_IMAGE GHR_BUILDKIT_IMAGE:GH_BUILDKIT_IMAGE; do
+    want=$(sed -n "s/^${k%%:*}=\"\(.*\)\"\$/\1/p" "${REPO_ROOT}/common/lib.sh")
+    [[ "$want" =~ @sha256:[0-9a-f]{64}$ ]] || die "no pinned ${k%%:*} in common/lib.sh"
+    have=$({ grep -m1 "^${k#*:}=" "$cfg" || true; } | cut -d= -f2-)
+    if [[ "$have" != "$want" ]]; then
+      cfg_changed=1; changed=1; CHANGED+=("github-runner/${k#*:}")
+      if (( DRYRUN )); then
+        log "[dry-run] would set ${k#*:}=${want}"
+      else
+        backup_to_run "$cfg"
+        env_set "$cfg" "${k#*:}" "$want"
+        chown root:github-runner "$cfg"; chmod 0640 "$cfg"
+        log "updated ${k#*:} in ${cfg}"
+      fi
+    fi
+  done
+  if (( DRYRUN )); then return 0; fi
+  if ! GHR_CONFIG="$cfg" "$ctl" check-config >/dev/null; then
+    restore_files
+    die "github-runner: config.env invalid after the update, files restored"
+  fi
+  if (( cfg_changed )) && command -v docker >/dev/null 2>&1; then
+    log "github-runner: pulling the pinned images"
+    docker pull -q "$(sed -n 's/^GH_RUNNER_IMAGE=//p' "$cfg")" >/dev/null || die "github-runner: cannot pull the runner image"
+    if [[ "$(sed -n 's/^GH_BUILDKIT=//p' "$cfg")" == 1 ]]; then docker pull -q "$(sed -n 's/^GH_BUILDKIT_IMAGE=//p' "$cfg")" >/dev/null || die "github-runner: cannot pull the BuildKit image"; fi
+  fi
+  if (( changed )) && systemctl is-active --quiet "$unit" 2>/dev/null; then
+    systemctl restart "$unit"
+    log "github-runner: controller restarted (running pods keep running and are adopted)"
+  fi
+  log "github-runner: done"
+}
+
 do_rollback() {
   local latest
   latest=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)
@@ -17997,6 +21684,7 @@ main() {
     update_logging
     update_registry_cache
     update_npm_cache
+    update_github_runner
   else
     log "docker not installed, skipping container stacks"
   fi
@@ -18406,53 +22094,38 @@ chmod 755 "$R/runner/scripts/ci-image-prewarm.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/ci-job-isolation.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Keep CI job containers away from the cloud metadata service and from services on the host.
-# Run at boot and after every Docker start by ci-job-isolation.service; safe to rerun any time.
-#
-#   DOCKER-USER   drops traffic to 169.254.169.254 (Hetzner metadata: server data, user-data, tokens).
-#   INPUT         traffic from docker0 and the br-* bridges to the host itself goes through the chain CI-JOBS-IN:
-#                 only replies, ping and the npm cache (docker0 IP, port 4873) are let in, the rest is dropped.
-#
-# Not affected: internet access of jobs, the Docker Hub cache (Docker pulls through the mirror on 127.0.0.1:5000,
-# jobs do not), traffic between containers of one job, and the host-network stacks (monitoring, logging, caches).
-# Only IPv4 is handled. Remove the rules: systemctl disable --now ci-job-isolation; then iptables -F CI-JOBS-IN
-# and delete the two "ci-job-isolation" rules shown by iptables -S.
+# Keeps CI jobs away from the cloud metadata service (DOCKER-USER drops 169.254.169.254) and from host services (INPUT from docker0
+# and br-* goes through CI-JOBS-IN: replies, ping and the npm cache, docker0 IP port 4873, pass; br-* only from GH_JOB_SUBNET_POOL).
+# Run by ci-job-isolation.service at boot and after every Docker start; IPv4 only. Remove: disable the unit, iptables -F CI-JOBS-IN,
+# delete the two "ci-job-isolation" rules shown by iptables -S.
 set -Eeuo pipefail
-
 META_IP="${META_IP:-169.254.169.254}"
 NPM_PORT="${NPM_PORT:-4873}"
 TAG=ci-job-isolation
-
 log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$*"; }
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0   blocks CI jobs from ${META_IP} and from host services (except the npm cache on the docker0 IP, port ${NPM_PORT})"
   exit 0
 fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 command -v iptables >/dev/null 2>&1 || { log "iptables not found, nothing applied"; exit 1; }
-
 # Docker creates DOCKER-USER when it starts; wait for it after a boot.
 for _ in $(seq 1 30); do
   if iptables -n -L DOCKER-USER >/dev/null 2>&1; then break; fi
   sleep 1
 done
 iptables -n -L DOCKER-USER >/dev/null 2>&1 || { log "chain DOCKER-USER does not exist (is Docker running?), nothing applied"; exit 1; }
-
 # Insert a rule at the top of a chain unless it is there already.
 ensure() {
   local chain="$1"
   shift
   iptables -C "$chain" "$@" 2>/dev/null || iptables -I "$chain" 1 "$@"
 }
-
 ensure DOCKER-USER -d "$META_IP" -m comment --comment "$TAG" -j DROP
-
 BRIDGE_IP="${BRIDGE_IP:-}"
 if [[ -z "$BRIDGE_IP" ]] && command -v ip >/dev/null 2>&1; then
   BRIDGE_IP=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
 fi
-
 iptables -N CI-JOBS-IN 2>/dev/null || true
 iptables -F CI-JOBS-IN
 iptables -A CI-JOBS-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
@@ -18460,27 +22133,1071 @@ iptables -A CI-JOBS-IN -p icmp --icmp-type echo-request -j ACCEPT
 if [[ -n "$BRIDGE_IP" ]]; then
   iptables -A CI-JOBS-IN -i docker0 -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT
 fi
+POOL=$(sed -n 's/^GH_JOB_SUBNET_POOL=//p' "${GHR_CONFIG:-/etc/github-runner/config.env}" 2>/dev/null | tr -d '"' | head -1 || true)
+if [[ -n "$POOL" && -n "$BRIDGE_IP" ]]; then
+  # only a private /16 to /27 block with zero host bits (as the controller checks it); a failing rule must not skip the DROP
+  IFS=. read -r o1 o2 o3 o4 <<<"${POOL%/*}"
+  if [[ "$POOL" =~ ^(10(\.[0-9]{1,3}){3}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2}|192\.168(\.[0-9]{1,3}){2})/(1[6-9]|2[0-7])$ ]] \
+     && (( ((10#$o1 << 24 | 10#$o2 << 16 | 10#$o3 << 8 | 10#$o4) & ((1 << (32 - ${POOL#*/})) - 1)) == 0 )); then
+    iptables -A CI-JOBS-IN -i 'br-+' -s "$POOL" -d "$BRIDGE_IP" -p tcp --dport "$NPM_PORT" -j ACCEPT || { log "WARN: pool rule failed"; POOL=""; }
+  else
+    log "WARN: GH_JOB_SUBNET_POOL '${POOL}' is not an aligned private /16-/27 block, ignored"; POOL=""
+  fi
+fi
 iptables -A CI-JOBS-IN -j DROP
 ensure INPUT -i docker0 -m comment --comment "$TAG" -j CI-JOBS-IN
 ensure INPUT -i 'br-+' -m comment --comment "$TAG" -j CI-JOBS-IN
-
-log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT})"
+log "applied: ${META_IP} blocked for containers; host services closed to job networks (npm cache: ${BRIDGE_IP:-none}:${NPM_PORT}${POOL:+, also for ${POOL}})"
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/ci-job-isolation.sh"
+
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/github-runner-ctl" <<'__SIC_EOF__'
+#!/usr/bin/env bash
+# github-runner-ctl: controller of the opt-in ephemeral GitHub Actions runner (runner/install/github-runner.sh installs it).
+#
+# It authenticates as a GitHub App (private key on this host), finds the PRIVATE repositories of the App installation, watches
+# them for queued jobs that ask for this runner's labels and, for each such job, starts one "pod" on this host:
+#   - a just-in-time (JIT) runner: GitHub creates a one-job runner (POST .../actions/runners/generate-jitconfig), nothing long-lived
+#     is registered and no registration token is stored;
+#   - the pod is a per-job Docker network, an optional rootless BuildKit sidecar (TLS with an ephemeral CA) and the runner container.
+# The runner container has no Docker socket, no capabilities, no sudo and runs inside ci-jobs.slice with CPU/memory/pid limits.
+# Public, archived, internal and excluded repositories are never served; no pod is started for a fork pull request or for labels that are not
+# ours, and a pod that is given such a job anyway (an idle runner takes ANY queued job of its repository) is killed. Max GH_MAX_JOBS pods.
+#
+# Usage: github-runner-ctl [run | once | self-test | check-config | --help]
+#   run        poll forever (what github-runner-ctl.service runs)
+#   once       one poll, then exit (for tests and debugging)
+#   self-test  mint a JWT, get an installation token, list the repositories and print which would be served; starts nothing
+#   check-config  validate the config file only (exit 2 and the problems when it is invalid)
+# Config: /etc/github-runner/config.env (GHR_CONFIG overrides; no secrets), key: GH_KEY_FILE (default /etc/github-runner/app.pem).
+# State: GHR_STATE_DIR (default /run/github-runner): status.json (read by health), jobs/<pod>/ (per-pod secrets, mode 0700 parent), cache/.
+# Log: one "level=... event=..." line per decision to stderr (the journal); tokens, the JIT config and the key are never logged.
+# Exit codes: 0 ok, 1 runtime error, 2 usage or invalid config.
+set -Eeuo pipefail
+
+CONFIG="${GHR_CONFIG:-/etc/github-runner/config.env}"
+STATE_DIR="${GHR_STATE_DIR:-/run/github-runner}"
+LABEL_JOB=io.server-init.github-runner       # value "job" on every container of a pod (the idle gates and health look for it)
+LABEL_ROLE=io.server-init.github-runner.role
+LABEL_POD=io.server-init.github-runner.pod
+LABEL_REPO=io.server-init.github-runner.repo
+LABEL_RID=io.server-init.github-runner.runner-id
+LABEL_STARTED=io.server-init.github-runner.started
+LABEL_RUN=io.server-init.github-runner.run-id
+LABEL_SUBNET=io.server-init.github-runner.subnet
+POD_PREFIX_LEN=28                            # every pod network is a /28 (14 addresses) carved from GH_JOB_SUBNET_POOL
+POD_RE='^[0-9]{10}-[0-9a-f]{6}$'
+# Labels GitHub adds by itself: a job that asks only for these is not ours; our own label is a custom one.
+SYSTEM_LABELS="self-hosted linux windows macos x64 arm arm64 x86"
+# Rate limit: below this many requests left the poll only manages pods; JIT creation needs a few requests.
+RATE_LOW=500
+RATE_STOP=100
+
+# ---- logging --------------------------------------------------------------------------------------------------------------------
+INST_TOKEN="" JWT="" JWT_AT=0
+declare -A REPO_TOK=() REPO_TOK_EXP=()
+scrub() {
+  local t=$1 k
+  if [[ -n "$INST_TOKEN" ]]; then t=${t//"$INST_TOKEN"/'[token]'}; fi
+  if [[ -n "$JWT" ]]; then t=${t//"$JWT"/'[jwt]'}; fi
+  for k in "${!REPO_TOK[@]}"; do if [[ -n "${REPO_TOK[$k]}" ]]; then t=${t//"${REPO_TOK[$k]}"/'[token]'}; fi; done
+  printf '%s' "$t"
+}
+fmt_val() { local v=${1//$'\n'/ }; v=${v//\"/\'}; if [[ -z "$v" || "$v" =~ [[:space:]=] ]]; then printf '"%s"' "$v"; else printf '%s' "$v"; fi; }
+# say LEVEL EVENT [key=value ...]: <N> is the syslog priority the journal understands.
+say() {
+  local level=$1 event=$2 out="" kv prio=6; shift 2
+  case "$level" in error) prio=3 ;; warn) prio=4 ;; esac
+  for kv in "$@"; do out+=" ${kv%%=*}=$(fmt_val "${kv#*=}")"; done
+  scrub "<${prio}>level=${level} event=${event}${out}" >&2; printf '\n' >&2
+}
+die_cfg() { say error config_invalid "problem=$*"; exit 2; }
+
+usage() {
+  sed -n '2,/^set -E/{/^set -E/!p}' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ---- configuration --------------------------------------------------------------------------------------------------------------
+GH_OWNER="" GH_APP_CLIENT_ID="" GH_INSTALLATION_ID="" GH_LABELS="" GH_RUNNER_GROUP_ID=1 GH_MAX_JOBS=1 GH_POLL_INTERVAL=30
+GH_IDLE_TIMEOUT=300 GH_MAX_RUNTIME=21900 GH_EXCLUDE_REPOS="" GH_ALLOW_FORK_RUNS=0 GH_RUNNER_IMAGE="" GH_BUILDKIT_IMAGE="" GH_BUILDKIT=1
+GH_JOB_CPUS=1.5 GH_JOB_MEMORY=1536m GH_JOB_SHM=268435456 GH_JOB_PIDS=2048 GH_BUILDKIT_CPUS=1 GH_BUILDKIT_MEMORY=768m GH_BUILDKIT_PIDS=2048
+GH_JIT_PASS=env GH_KEY_FILE=/etc/github-runner/app.pem GH_API_URL=https://api.github.com GH_JOB_SUBNET_POOL=10.213.0.0/20
+CONFIG_KEYS="GH_OWNER GH_APP_CLIENT_ID GH_INSTALLATION_ID GH_LABELS GH_RUNNER_GROUP_ID GH_MAX_JOBS GH_POLL_INTERVAL GH_IDLE_TIMEOUT GH_MAX_RUNTIME GH_EXCLUDE_REPOS GH_ALLOW_FORK_RUNS GH_RUNNER_IMAGE GH_BUILDKIT_IMAGE GH_BUILDKIT GH_JOB_CPUS GH_JOB_MEMORY GH_JOB_SHM GH_JOB_PIDS GH_BUILDKIT_CPUS GH_BUILDKIT_MEMORY GH_BUILDKIT_PIDS GH_JIT_PASS GH_KEY_FILE GH_API_URL GH_JOB_SUBNET_POOL"
+
+# KEY=VALUE lines only (optionally "double quoted"), never executed.
+load_config() {
+  local line key val
+  [[ -r "$CONFIG" ]] || die_cfg "cannot read ${CONFIG}"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" =~ ^(GH_[A-Z0-9_]+)=(.*)$ ]] || die_cfg "unparsable line in ${CONFIG}: expected KEY=VALUE"
+    key=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+    if [[ "$val" == \"*\" && ${#val} -ge 2 ]]; then val=${val#\"}; val=${val%\"}; fi
+    if [[ " ${CONFIG_KEYS} " == *" ${key} "* ]]; then printf -v "$key" '%s' "$val"; else say warn config_unknown_key "key=${key}"; fi
+  done < "$CONFIG"
+}
+
+ip2int() { local IFS=.; local -a o; read -ra o <<<"$1"; echo $(( (o[0] << 24) + (o[1] << 16) + (o[2] << 8) + o[3] )); }
+int2ip() { echo "$(( ($1 >> 24) & 255 )).$(( ($1 >> 16) & 255 )).$(( ($1 >> 8) & 255 )).$(( $1 & 255 ))"; }
+# pool_check CIDR: a private IPv4 block /16 to /27, aligned; adds to CFG_ERRORS otherwise.
+pool_check() {
+  local c=$1 ip len a b o n mask
+  if [[ ! "$c" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then bad "invalid GH_JOB_SUBNET_POOL: '${c}' (expected a CIDR such as 10.213.0.0/20)"; return 0; fi
+  ip=${c%/*}; len=$((10#${c#*/}))
+  for o in ${ip//./ }; do (( 10#$o <= 255 )) || { bad "invalid GH_JOB_SUBNET_POOL: octet ${o} out of range"; return 0; }; done
+  (( len >= 16 && len <= POD_PREFIX_LEN - 1 )) || { bad "invalid GH_JOB_SUBNET_POOL: prefix /${len} must be between /16 and /$((POD_PREFIX_LEN - 1)) (each pod gets a /${POD_PREFIX_LEN})"; return 0; }
+  n=$(ip2int "$ip"); mask=$(( (0xFFFFFFFF << (32 - len)) & 0xFFFFFFFF ))
+  (( (n & mask) == n )) || { bad "invalid GH_JOB_SUBNET_POOL: ${c} is not aligned (network address would be $(int2ip $((n & mask))))"; return 0; }
+  a=$(( n >> 24 )); b=$(( (n >> 16) & 255 ))
+  if (( a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168) )); then :; else bad "invalid GH_JOB_SUBNET_POOL: ${c} is not a private (RFC 1918) block"; fi
+}
+
+CFG_ERRORS=()
+bad() { CFG_ERRORS+=("$*"); }
+rx() { [[ "$2" =~ $3 ]] || bad "invalid $1: '$2' (expected $4)"; }
+
+validate_config() {
+  local l e image_re='^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$' have_custom=0 have_self=0
+  CFG_ERRORS=()
+  rx GH_OWNER "$GH_OWNER" '^[A-Za-z0-9]([A-Za-z0-9-]{0,38})$' "a GitHub user or organization name"
+  rx GH_APP_CLIENT_ID "$GH_APP_CLIENT_ID" '^[A-Za-z0-9_.-]{4,64}$' "the App client ID (Iv1.... or Iv23...) or numeric App ID"
+  rx GH_INSTALLATION_ID "$GH_INSTALLATION_ID" '^([0-9]{1,15})?$' "empty (auto-discovered) or digits"
+  rx GH_RUNNER_GROUP_ID "$GH_RUNNER_GROUP_ID" '^[0-9]{1,9}$' "digits (1 is the default group)"
+  rx GH_MAX_JOBS "$GH_MAX_JOBS" '^[1-9][0-9]?$' "1 to 99"
+  rx GH_POLL_INTERVAL "$GH_POLL_INTERVAL" '^[0-9]{2,4}$' "seconds, 10 to 3600"
+  rx GH_IDLE_TIMEOUT "$GH_IDLE_TIMEOUT" '^[0-9]{2,5}$' "seconds, 60 to 86400"
+  rx GH_MAX_RUNTIME "$GH_MAX_RUNTIME" '^[0-9]{3,6}$' "seconds, 600 to 172800"
+  rx GH_ALLOW_FORK_RUNS "$GH_ALLOW_FORK_RUNS" '^[01]$' "0 or 1"
+  rx GH_BUILDKIT "$GH_BUILDKIT" '^[01]$' "0 or 1"
+  rx GH_JIT_PASS "$GH_JIT_PASS" '^(env|arg)$' "env or arg"
+  rx GH_RUNNER_IMAGE "$GH_RUNNER_IMAGE" "$image_re" "name:tag@sha256:<64 hex>"
+  if [[ "$GH_BUILDKIT" == 1 ]]; then rx GH_BUILDKIT_IMAGE "$GH_BUILDKIT_IMAGE" "$image_re" "name:tag@sha256:<64 hex>"; fi
+  rx GH_JOB_CPUS "$GH_JOB_CPUS" '^[0-9]+(\.[0-9]+)?$' "for example 1.5"
+  rx GH_BUILDKIT_CPUS "$GH_BUILDKIT_CPUS" '^[0-9]+(\.[0-9]+)?$' "for example 1"
+  rx GH_JOB_MEMORY "$GH_JOB_MEMORY" '^[0-9]+[kmg]$' "for example 1536m"
+  rx GH_BUILDKIT_MEMORY "$GH_BUILDKIT_MEMORY" '^[0-9]+[kmg]$' "for example 768m"
+  rx GH_JOB_SHM "$GH_JOB_SHM" '^[0-9]+$' "bytes"
+  rx GH_JOB_PIDS "$GH_JOB_PIDS" '^[0-9]+$' "a number"
+  rx GH_BUILDKIT_PIDS "$GH_BUILDKIT_PIDS" '^[0-9]+$' "a number"
+  rx GH_KEY_FILE "$GH_KEY_FILE" '^/[A-Za-z0-9._/-]+$' "an absolute path"
+  rx GH_API_URL "$GH_API_URL" '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._/-]*)?$' "an https:// URL without trailing slash"
+  [[ "$GH_API_URL" != */ ]] || bad "invalid GH_API_URL: no trailing slash"
+  pool_check "$GH_JOB_SUBNET_POOL"
+  # numeric ranges (only when the shape is right)
+  if [[ "$GH_POLL_INTERVAL" =~ ^[0-9]+$ ]] && (( 10#$GH_POLL_INTERVAL < 10 || 10#$GH_POLL_INTERVAL > 3600 )); then bad "GH_POLL_INTERVAL out of range: ${GH_POLL_INTERVAL} (10 to 3600)"; fi
+  if [[ "$GH_IDLE_TIMEOUT" =~ ^[0-9]+$ ]] && (( 10#$GH_IDLE_TIMEOUT < 60 || 10#$GH_IDLE_TIMEOUT > 86400 )); then bad "GH_IDLE_TIMEOUT out of range: ${GH_IDLE_TIMEOUT} (60 to 86400)"; fi
+  if [[ "$GH_MAX_RUNTIME" =~ ^[0-9]+$ ]] && (( 10#$GH_MAX_RUNTIME < 600 || 10#$GH_MAX_RUNTIME > 172800 )); then bad "GH_MAX_RUNTIME out of range: ${GH_MAX_RUNTIME} (600 to 172800)"; fi
+  # labels: comma separated; must contain self-hosted and at least one custom label (so a plain "runs-on: self-hosted" job is never taken)
+  if [[ -z "$GH_LABELS" ]]; then
+    bad "GH_LABELS is empty"
+  else
+    local -a labels; IFS=, read -ra labels <<<"$GH_LABELS"
+    for l in "${labels[@]}"; do
+      [[ "$l" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { bad "invalid label in GH_LABELS: '${l}'"; continue; }
+      l=${l,,}
+      [[ "$l" == self-hosted ]] && have_self=1
+      [[ " ${SYSTEM_LABELS} " == *" ${l} "* ]] || have_custom=1
+    done
+    (( have_self )) || bad "GH_LABELS must contain self-hosted"
+    (( have_custom )) || bad "GH_LABELS needs at least one custom label (for example hetzner): jobs that only ask for self-hosted, linux or the architecture are not taken"
+  fi
+  local -a excl; IFS=, read -ra excl <<<"$GH_EXCLUDE_REPOS"
+  for e in "${excl[@]}"; do
+    [[ "$e" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$ ]] || bad "invalid entry in GH_EXCLUDE_REPOS: '${e}' (owner/name or name)"
+  done
+  (( ${#CFG_ERRORS[@]} == 0 ))
+}
+
+# Derived values, after validation.
+derive_config() {
+  local h
+  API_URL=${GH_API_URL}
+  h=$(hostname -s 2>/dev/null || echo host); h=${h//[^A-Za-z0-9-]/-}
+  NAME_PREFIX="ghr-${h:0:30}-"
+  LABELS_JSON=$(printf '%s' "$GH_LABELS" | tr ',' '\n' | jq -R . | jq -sc .)
+  LABELS_LC=$(jq -c 'map(ascii_downcase)' <<<"$LABELS_JSON")
+  CUSTOM_LC=$(jq -c --arg sys "$SYSTEM_LABELS" '[.[] | select(. as $x | ($sys | split(" ")) | index($x) | not)]' <<<"$LABELS_LC")
+  local e ex=() excl
+  IFS=, read -ra excl <<<"$GH_EXCLUDE_REPOS"
+  for e in "${excl[@]}"; do
+    [[ "$e" == */* ]] || e="${GH_OWNER}/${e}"
+    ex+=("${e,,}")
+  done
+  if (( ${#ex[@]} )); then EXCL_JSON=$(printf '%s\n' "${ex[@]}" | jq -R . | jq -sc .); else EXCL_JSON='[]'; fi
+  MAX_JOBS=$((10#$GH_MAX_JOBS)); POLL=$((10#$GH_POLL_INTERVAL)); IDLE_TIMEOUT=$((10#$GH_IDLE_TIMEOUT)); MAX_RUNTIME=$((10#$GH_MAX_RUNTIME))
+}
+
+# ---- GitHub API -----------------------------------------------------------------------------------------------------------------
+TMP="" CACHE="" JOBS="" INSTALL_ID="" INST_EXP=0
+RATE_REMAINING="" RATE_LIMIT="" RATE_RESET=""
+API_CODE="" API_OUT="" API_HDR=""
+
+hdr_get() { awk -v want="$2" 'BEGIN { FS = ": *" } { sub(/\r$/, "") } tolower($1) == want { sub(/^[^:]*: */, ""); print; exit }' "$1"; }
+
+# api METHOD PATH AUTH(jwt|inst|repo:OWNER/NAME|none) [BODYFILE] [extra curl args...]: sets API_CODE (000 on a network error or while
+# API_OFF=1), API_OUT (body), API_HDR. "inst" is the installation token (Actions: read, all repositories); "repo:" is a token of one repository
+# with Administration: write (runners), minted on first use. The token goes to curl through "-K -" (stdin), never through argv.
+API_OFF=0
+api() {
+  local method=$1 path=$2 auth=$3 body=${4:-} tok="" n=$#; shift $(( n < 4 ? n : 4 ))
+  if (( API_OFF )); then API_CODE=000; : > "$API_OUT"; : > "$API_HDR"; return 0; fi
+  case "$auth" in
+    jwt) tok=$JWT ;;
+    inst) tok=$INST_TOKEN ;;
+    repo:*) if ensure_repo_token "${auth#repo:}"; then tok=${REPO_TOK[${auth#repo:}]}; else API_CODE=000; : > "$API_OUT"; : > "$API_HDR"; return 0; fi ;;
+  esac
+  local -a args=(-sS -m 30 --connect-timeout 10 -X "$method" -D "$API_HDR" -o "$API_OUT" -w '%{http_code}'
+                 -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -H 'User-Agent: github-runner-ctl')
+  if [[ -n "$body" ]]; then args+=(-H 'Content-Type: application/json' --data-binary "@${body}"); fi
+  args+=("$@")
+  : > "$API_OUT"; : > "$API_HDR"
+  API_CODE=000
+  if [[ -n "$tok" ]]; then
+    API_CODE=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl "${args[@]}" -K - "${API_URL}${path}" 2>/dev/null) || API_CODE=000
+  else
+    API_CODE=$(curl "${args[@]}" "${API_URL}${path}" 2>/dev/null) || API_CODE=000
+  fi
+  if [[ "$auth" == inst || "$auth" == repo:* ]]; then
+    local v
+    v=$(hdr_get "$API_HDR" x-ratelimit-remaining); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_REMAINING=$v; fi
+    v=$(hdr_get "$API_HDR" x-ratelimit-limit); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_LIMIT=$v; fi
+    v=$(hdr_get "$API_HDR" x-ratelimit-reset); if [[ "$v" =~ ^[0-9]+$ ]]; then RATE_RESET=$v; fi
+  fi
+  [[ "$API_CODE" =~ ^[0-9]{3}$ ]] || API_CODE=000
+}
+
+# A short, secret-free description of the last failed call.
+api_msg() {
+  local msg=""
+  if [[ -s "$API_OUT" ]]; then msg=$(jq -r '.message // empty' "$API_OUT" 2>/dev/null | head -c 200 || true); fi
+  if [[ "$API_CODE" == 000 ]]; then msg="no answer (network error or timeout)"; fi
+  printf '%s' "${msg:-none}"
+}
+api_err() { printf 'http=%s message=%s' "$API_CODE" "$(api_msg)"; }
+
+LAST_ERROR=""
+PAUSE_UNTIL=0
+# fail_api EVENT [key=value...]: log the last call as an error, remember it for the status file, honor Retry-After. Always returns 1.
+fail_api() {
+  local ev=$1 ra; shift
+  LAST_ERROR="${ev}: http ${API_CODE} $(api_msg)"
+  say error "$ev" "http=${API_CODE}" "message=$(api_msg)" "$@"
+  if [[ "$API_CODE" == 401 ]]; then INST_TOKEN=""; INST_EXP=0; REPO_TOK=(); REPO_TOK_EXP=(); fi
+  ra=$(hdr_get "$API_HDR" retry-after)
+  if [[ "$ra" =~ ^[0-9]+$ ]]; then PAUSE_UNTIL=$(( $(date +%s) + (ra > 900 ? 900 : ra) )); say warn rate_limited "retry_after=${ra}"; fi
+  if [[ "$API_CODE" == 403 || "$API_CODE" == 429 ]] && [[ "$RATE_REMAINING" == 0 && "$RATE_RESET" =~ ^[0-9]+$ ]]; then
+    PAUSE_UNTIL=$(( RATE_RESET + 5 )); say warn rate_limit_exhausted "until=${RATE_RESET}"
+  fi
+  return 1
+}
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# make_jwt: RS256, iat = now-60 (clock drift), exp = now+540 (< 10 min), iss = App client ID.
+make_jwt() {
+  local now header payload si sig
+  now=$(date +%s)
+  header='{"alg":"RS256","typ":"JWT"}'
+  payload=$(jq -cn --argjson iat $((now - 60)) --argjson exp $((now + 540)) --arg iss "$GH_APP_CLIENT_ID" '{iat: $iat, exp: $exp, iss: $iss}')
+  si="$(printf '%s' "$header" | b64url).$(printf '%s' "$payload" | b64url)"
+  sig=$(printf '%s' "$si" | openssl dgst -sha256 -sign "$GH_KEY_FILE" 2>/dev/null | b64url) || sig=""
+  if [[ -z "$sig" ]]; then
+    LAST_ERROR="cannot sign the JWT with ${GH_KEY_FILE}"
+    say error jwt_failed "problem=cannot sign with the key (missing, unreadable or not an RSA key)" "key=${GH_KEY_FILE}"
+    return 1
+  fi
+  JWT="${si}.${sig}"; JWT_AT=$now
+}
+
+LAST_TOKEN_OK=0
+# ensure_token: installation token, cached until 5 minutes before it expires.
+ensure_token() {
+  local now exp body
+  now=$(date +%s)
+  if [[ -n "$INST_TOKEN" ]] && (( INST_EXP > now + 300 )); then return 0; fi
+  make_jwt || return 1
+  if [[ -z "$INSTALL_ID" ]]; then
+    INSTALL_ID=${GH_INSTALLATION_ID}
+  fi
+  if [[ -z "$INSTALL_ID" ]]; then
+    api GET "/users/${GH_OWNER}/installation" jwt
+    if [[ "$API_CODE" != 200 ]]; then fail_api installation_discovery_failed "owner=${GH_OWNER}" "hint=install the App on this account and check GH_OWNER and GH_APP_CLIENT_ID"; return 1; fi
+    INSTALL_ID=$(jq -r '.id // empty' "$API_OUT")
+    [[ "$INSTALL_ID" =~ ^[0-9]+$ ]] || { INSTALL_ID=""; LAST_ERROR="installation id missing in the answer"; say error installation_discovery_failed "problem=no id in the answer"; return 1; }
+    say info installation_discovered "installation=${INSTALL_ID}"
+  fi
+  body="${TMP}/token-request.json"
+  # Least privilege: this token only reads runs and jobs (Actions: read; Metadata is implied). Whatever needs Administration: write
+  # (creating and deleting runners) uses a token of the one repository concerned, see ensure_repo_token.
+  printf '%s' '{"permissions":{"actions":"read"}}' > "$body"
+  api POST "/app/installations/${INSTALL_ID}/access_tokens" jwt "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then fail_api token_failed "installation=${INSTALL_ID}" "hint=the App needs Administration: write and Actions: read (repository permissions)"; return 1; fi
+  INST_TOKEN=$(jq -r '.token // empty' "$API_OUT")
+  exp=$(jq -r '.expires_at // empty' "$API_OUT")
+  : > "$API_OUT"
+  [[ -n "$INST_TOKEN" ]] || { LAST_ERROR="no token in the answer"; say error token_failed "problem=no token in the answer"; return 1; }
+  INST_EXP=$(date -u -d "$exp" +%s 2>/dev/null || echo $((now + 3000)))
+  LAST_TOKEN_OK=$now
+  say info token_minted "installation=${INSTALL_ID}" "valid_for=$((INST_EXP - now))s"
+}
+
+# ensure_repo_token OWNER/NAME: a token for that one repository with Administration: write only, cached until 5 minutes before it expires.
+ensure_repo_token() {
+  local repo=$1 now exp body
+  now=$(date +%s)
+  if [[ -n "${REPO_TOK[$repo]:-}" ]] && (( ${REPO_TOK_EXP[$repo]:-0} > now + 300 )); then return 0; fi
+  [[ -n "$INSTALL_ID" ]] || return 1
+  if [[ -z "$JWT" ]] || (( now - JWT_AT > 480 )); then make_jwt || return 1; fi
+  body="${TMP}/repo-token-request.json"
+  jq -n --arg r "${repo#*/}" '{repositories: [$r], permissions: {administration: "write"}}' > "$body" || return 1
+  api POST "/app/installations/${INSTALL_ID}/access_tokens" jwt "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then fail_api token_failed "installation=${INSTALL_ID}" "repo=${repo}" "scope=administration" "hint=the App needs Administration: Read and write and access to this repository"; return 1; fi
+  REPO_TOK[$repo]=$(jq -r '.token // empty' "$API_OUT")
+  exp=$(jq -r '.expires_at // empty' "$API_OUT")
+  : > "$API_OUT"
+  if [[ -z "${REPO_TOK[$repo]}" ]]; then LAST_ERROR="no token in the answer"; return 1; fi
+  REPO_TOK_EXP[$repo]=$(date -u -d "$exp" +%s 2>/dev/null || echo $((now + 3000)))
+}
+
+# api_get_cached PATH [AUTH]: conditional GET (If-None-Match); 304 costs no quota. Sets API_BODY to the cached body, CACHE_FRESH=1 when it changed.
+API_BODY="" CACHE_FRESH=0
+api_get_cached() {
+  local path=$1 auth=${2:-inst} key etag="" extra=()
+  key=$(printf '%s' "$path" | sha1sum | cut -c1-20)
+  if [[ -s "${CACHE}/${key}.etag" && -s "${CACHE}/${key}.json" ]]; then etag=$(<"${CACHE}/${key}.etag"); extra=(-H "If-None-Match: ${etag}"); fi
+  api GET "$path" "$auth" "" "${extra[@]}"
+  API_BODY="${CACHE}/${key}.json"
+  case "$API_CODE" in
+    200)
+      cp "$API_OUT" "$API_BODY"
+      etag=$(hdr_get "$API_HDR" etag)
+      if [[ -n "$etag" ]]; then printf '%s' "$etag" > "${CACHE}/${key}.etag"; else rm -f "${CACHE}/${key}.etag"; fi
+      CACHE_FRESH=1 ;;
+    304) CACHE_FRESH=0; touch "$API_BODY" "${CACHE}/${key}.etag" 2>/dev/null || true ;;   # a hit keeps the entry from being pruned
+    *) return 1 ;;
+  esac
+}
+
+# ---- repositories ---------------------------------------------------------------------------------------------------------------
+# get_paged PATH FIELD PER_PAGE MAXPAGES [AUTH]: GETs PATH?...&page=N (conditional, cached) until the last page and merges the arrays named
+# FIELD of all pages into PAGED_FILE as {FIELD: [...]}. PAGED_TRUNCATED=1 when MAXPAGES was not enough. Returns 1 when a page fails.
+PAGED_FILE="" PAGED_TRUNCATED=0
+get_paged() {
+  local base=$1 field=$2 per=$3 max=$4 auth=${5:-inst} page=1 more sep='&'
+  [[ "$base" == *\? ]] && sep=''; [[ "$base" == *\?* ]] || sep='?'
+  PAGED_FILE="${TMP}/paged.json"; PAGED_TRUNCATED=0
+  : > "${TMP}/paged.pages"
+  while :; do
+    api_get_cached "${base}${sep}per_page=${per}&page=${page}" "$auth" || return 1
+    printf '%s\n' "$API_BODY" >> "${TMP}/paged.pages"
+    more=0
+    # Link: rel="next" on a fresh answer; a 304 may come without headers, then a full page means there may be more
+    if grep -qi 'rel="next"' "$API_HDR" 2>/dev/null || { (( CACHE_FRESH == 0 )) && [[ "$(jq --arg f "$field" '.[$f] | length' "$API_BODY")" == "$per" ]]; }; then more=1; fi
+    (( more )) || break
+    if (( page >= max )); then PAGED_TRUNCATED=1; break; fi
+    page=$((page + 1))
+  done
+  # shellcheck disable=SC2046
+  jq -s --arg f "$field" '{($f): [.[] | .[$f][]?]}' $(cat "${TMP}/paged.pages") > "$PAGED_FILE"
+}
+
+SERVED=() SKIPPED=() ALL_REPOS=()
+REPOS_CHANGED=0
+# list_repos: fills SERVED (repo full names to serve) and SKIPPED ("name reason"), ALL_REPOS (everything the installation sees).
+list_repos() {
+  local merged tsv name why sum
+  get_paged "/installation/repositories?" repositories 100 50 || { fail_api repo_list_failed; return 1; }
+  merged=$PAGED_FILE
+  if (( PAGED_TRUNCATED )); then say warn repo_list_truncated "pages=50" "hint=more than 5000 repositories; the rest are not served"; fi
+  sum=$(sha1sum < "$merged" | cut -c1-40)
+  REPOS_CHANGED=0
+  if [[ "$sum" != "$(cat "${STATE_DIR}/repos.sha" 2>/dev/null || true)" ]]; then REPOS_CHANGED=1; printf '%s' "$sum" > "${STATE_DIR}/repos.sha"; fi
+  # Fail closed: a repository is served only when every flag says private. An absent field counts as "not private".
+  tsv=$(jq -r --arg owner "${GH_OWNER,,}" --argjson excl "$EXCL_JSON" '
+    .repositories[] | . as $r | ($r.full_name // "") as $n |
+    (if $n == "" then "unnamed"
+     elif ((($r.owner.login // "") | ascii_downcase) != $owner) then "other-owner"
+     elif $r.private != true then "public"
+     elif $r.visibility != "private" then "visibility-" + (($r.visibility // "unknown") | tostring)
+     elif $r.archived != false then "archived"
+     elif $r.disabled == true then "disabled"
+     elif ($excl | index($n | ascii_downcase)) != null then "excluded"
+     else "" end) as $why | [$n, $why] | @tsv' "$merged")
+  SERVED=() SKIPPED=() ALL_REPOS=()
+  while IFS=$'\t' read -r name why; do
+    [[ -n "$name" ]] || continue
+    [[ "$name" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { say warn repo_ignored "reason=unexpected-name"; continue; }
+    ALL_REPOS+=("$name")
+    if [[ -z "$why" ]]; then SERVED+=("$name"); else SKIPPED+=("${name} ${why}"); fi
+  done <<<"$tsv"
+}
+
+# ---- pods (docker) --------------------------------------------------------------------------------------------------------------
+PS_FORMAT="{{.Names}}|{{.State}}|{{.Label \"${LABEL_ROLE}\"}}|{{.Label \"${LABEL_POD}\"}}|{{.Label \"${LABEL_REPO}\"}}|{{.Label \"${LABEL_RID}\"}}|{{.Label \"${LABEL_STARTED}\"}}"
+declare -A POD_STATE=() POD_REPO=() POD_RID=() POD_STARTED=() POD_BK=() IDLE_BY_REPO=() WARNED=()
+ACTIVE=0 IDLE=0
+CONSEC_FAIL=0 BACKOFF_UNTIL=0 UPDATE_REQUIRED=0 IMAGE_CREATED=""
+
+save_state() { printf 'CONSEC_FAIL=%s\nBACKOFF_UNTIL=%s\nUPDATE_REQUIRED=%s\nIMAGE_CREATED=%s\n' "$CONSEC_FAIL" "$BACKOFF_UNTIL" "$UPDATE_REQUIRED" "$IMAGE_CREATED" > "${STATE_DIR}/ctl.state"; }
+load_state() {
+  local k v
+  [[ -f "${STATE_DIR}/ctl.state" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ "$v" =~ ^[0-9]*$ ]] || continue
+    case "$k" in CONSEC_FAIL|BACKOFF_UNTIL|UPDATE_REQUIRED|IMAGE_CREATED) printf -v "$k" '%s' "$v" ;; esac
+  done < "${STATE_DIR}/ctl.state"
+}
+
+# scan_pods: fills POD_* from the labels of the containers; the labels are the persistent state, so a restarted controller adopts running pods.
+# Returns 1 when docker does not answer: that is not "no pods" and the caller must not clean up or start anything on it.
+scan_pods() {
+  local name state role pod repo rid started out
+  out=$(docker ps -a --filter "label=${LABEL_JOB}=job" --format "$PS_FORMAT" 2>/dev/null) || return 1
+  POD_STATE=() POD_REPO=() POD_RID=() POD_STARTED=() POD_BK=()
+  while IFS='|' read -r name state role pod repo rid started; do
+    [[ "$pod" =~ $POD_RE ]] || continue
+    case "$role" in
+      runner) POD_STATE[$pod]=$state; POD_REPO[$pod]=$repo; POD_RID[$pod]=$rid; POD_STARTED[$pod]=$started ;;
+      buildkit) POD_BK[$pod]=$state ;;
+    esac
+  done <<<"$out"
+}
+
+# all_pod_ids: every pod id that has any trace: container, network (scan_nets) or directory.
+all_pod_ids() {
+  {
+    printf '%s\n' "${!POD_STATE[@]}" "${!POD_BK[@]}" "${NET_PODS[@]}"
+    ls -1 "$JOBS" 2>/dev/null || true
+  } | grep -E "$POD_RE" | sort -u || true
+}
+
+pod_dir() { printf '%s/%s' "$JOBS" "$1"; }
+
+delete_runner() { # delete_runner REPO ID REASON   (with the repository's own token)
+  local repo=$1 id=$2 why=$3
+  [[ "$id" =~ ^[0-9]+$ ]] || return 0
+  if (( API_OFF )); then return 0; fi   # JIT runners that never got a job are removed by GitHub itself; the sweep catches the rest
+  api DELETE "/repos/${repo}/actions/runners/${id}" "repo:${repo}"
+  case "$API_CODE" in
+    204) say info runner_deleted "repo=${repo}" "runner=${id}" "reason=${why}" ;;
+    404) ;;
+    *) say warn runner_delete_failed "repo=${repo}" "runner=${id}" "reason=${why}" "$(api_err)" ;;
+  esac
+}
+
+# cleanup_pod POD: remove containers, network and the secrets directory of a pod. Safe to repeat.
+cleanup_pod() {
+  local pod=$1
+  [[ "$pod" =~ $POD_RE ]] || return 0
+  docker rm -f "ghr-${pod}-runner" "ghr-${pod}-buildkitd" >/dev/null 2>&1 || true
+  docker network rm "ghr-${pod}" >/dev/null 2>&1 || true
+  rm -rf -- "$(pod_dir "$pod")"
+}
+
+kill_pod() { # kill_pod POD REPO RID REASON
+  local pod=$1
+  mkdir -p "$(pod_dir "$pod")" && : > "$(pod_dir "$pod")/killed"
+  say warn pod_killed "pod=${pod}" "repo=$2" "reason=$4"
+  docker kill "ghr-${pod}-runner" >/dev/null 2>&1 || true
+  delete_runner "$2" "$3" "$4"
+}
+
+# backoff_for N: seconds to wait after the N-th failure in a row: 30, 60, 120, ... at most 900.
+backoff_for() { local n=$1 d; (( n < 1 )) && n=1; d=$((30 * (1 << (n > 5 ? 5 : n - 1)))); (( d > 900 )) && d=900; echo "$d"; }
+
+# finish_pod POD: the runner container has exited; log why, keep the failure count, clean up.
+# The entry runs Runner.Listener directly (not run.sh, which swallows its exit code), so the code is the Listener's: 0 done, 1 error,
+# 2 retryable error, 3 or 4 it staged a self-update (the pinned image is too old). A runner that ends within 120 s without having taken
+# a job is a failure whatever the code says.
+finish_pod() {
+  local pod=$1 repo=${POD_REPO[$1]:-} rid=${POD_RID[$1]:-} started=${POD_STARTED[$1]:-0} info code oom now ran killed=0 ran_job=0 logs fail=0 why="" l
+  now=$(date +%s)
+  info=$(docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' "ghr-${pod}-runner" 2>/dev/null || echo "? false")
+  code=${info% *}; oom=${info#* }
+  [[ "$started" =~ ^[0-9]+$ ]] || started=$now
+  ran=$((now - started))
+  [[ -e "$(pod_dir "$pod")/killed" ]] && killed=1
+  logs=$(docker logs --tail 200 "ghr-${pod}-runner" 2>&1 || true)
+  # a job was taken if the poll saw the runner busy, or the runner itself says so (jobs shorter than a poll)
+  if [[ -e "$(pod_dir "$pod")/busy" ]] || grep -q 'Running job:' <<<"$logs"; then ran_job=1; fi
+  case "$code" in
+    0)
+      if (( ! ran_job && ! killed && ran < 120 )); then fail=1; why="exited after ${ran}s without taking a job"
+      else say info job_finished "pod=${pod}" "repo=${repo}" "seconds=${ran}"; CONSEC_FAIL=0; UPDATE_REQUIRED=0; fi ;;
+    3|4)
+      UPDATE_REQUIRED=1; fail=1; why="the runner staged a self-update"
+      say error runner_update_required "pod=${pod}" "repo=${repo}" "exit=${code}" \
+        "hint=the runner wanted to update itself: the pinned image is too old. Bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh" ;;
+    *)
+      if (( killed )); then say info pod_ended_after_kill "pod=${pod}" "repo=${repo}" "exit=${code}"
+      else fail=1; why="runner exit code ${code}"; fi ;;
+  esac
+  if (( fail )); then
+    CONSEC_FAIL=$((CONSEC_FAIL + 1))
+    say warn runner_failed "pod=${pod}" "repo=${repo}" "exit=${code}" "oom_killed=${oom}" "seconds=${ran}" "job_taken=${ran_job}" "why=${why}"
+    # the runner's own log shows why; the runner masks secrets in it
+    tail -n 15 <<<"$logs" | while IFS= read -r l; do say warn runner_log "pod=${pod}" "line=${l:0:300}"; done || true
+    if (( ran < 120 )); then
+      local d; d=$(backoff_for "$CONSEC_FAIL")
+      BACKOFF_UNTIL=$((now + d)); say warn pod_start_paused "seconds=${d}" "after_failures=${CONSEC_FAIL}"
+    fi
+  fi
+  delete_runner "$repo" "$rid" job_over
+  cleanup_pod "$pod"
+  save_state
+}
+
+is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
+
+# check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
+# it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
+# ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
+# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
+check_assigned_job() {
+  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
+  if (( tries >= 20 )); then
+    # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    : > "$(pod_dir "$pod")/verified"
+    kill_pod "$pod" "$repo" "$rid" job_unverified
+    return 0
+  fi
+  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  cp "$PAGED_FILE" "$runs_file"
+  for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
+    [[ "$run" =~ ^[0-9]+$ ]] || continue
+    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
+      [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
+      if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
+    [[ -n "$verdict" ]] || continue
+    if [[ "$verdict" == ok && "$GH_ALLOW_FORK_RUNS" != 1 ]]; then
+      verdict=$(jq -r --argjson run "$run" '.workflow_runs[] | select(.id == $run) |
+        if ((.event // "") | startswith("pull_request")) and ((.head_repository.full_name // "") != (.repository.full_name // "x")) then "fork" else "ok" end' "$runs_file")
+    fi
+    : > "$(pod_dir "$pod")/verified"
+    if [[ "$verdict" == ok ]]; then
+      say info job_accepted "pod=${pod}" "repo=${repo}" "run=${run}"
+    else
+      say warn job_rejected "pod=${pod}" "repo=${repo}" "run=${run}" "reason=${verdict}" "hint=an idle runner takes any queued job of its repository; the repository setting for fork pull requests is the real control"
+      kill_pod "$pod" "$repo" "$rid" "job_rejected_${verdict}"
+    fi
+    return 0
+  done
+  return 1
+}
+
+# manage_pods [api]: adopt running pods, finish exited ones, remove leftovers, enforce the idle and runtime limits. With api=0 (rate-limit
+# pause) it only does what needs Docker. Returns 1 when docker does not answer: nothing is touched then.
+manage_pods() {
+  local api_on=${1:-1} pod now busy started repo rid st
+  now=$(date +%s)
+  scan_pods && scan_nets || return 1
+  ACTIVE=0 IDLE=0; IDLE_BY_REPO=()
+  for pod in $(all_pod_ids); do
+    st=${POD_STATE[$pod]:-}
+    if [[ -z "$st" ]]; then
+      # no runner container: a pod that failed to start or whose controller died halfway
+      say warn pod_leftover "pod=${pod}" "action=removed"
+      cleanup_pod "$pod"
+      continue
+    fi
+    repo=${POD_REPO[$pod]:-} rid=${POD_RID[$pod]:-} started=${POD_STARTED[$pod]:-}
+    [[ "$started" =~ ^[0-9]+$ ]] || started=$now
+    if [[ "$st" != running ]]; then finish_pod "$pod"; continue; fi
+    if [[ "${GH_BUILDKIT}" == 1 && -z "${POD_BK[$pod]:-}" && -z "${WARNED[bk-$pod]:-}" ]]; then
+      WARNED[bk-$pod]=1; say warn buildkit_missing "pod=${pod}" "hint=image builds in this job will fail; check user.max_user_namespaces and docker logs of the sidecar at the next start"
+    fi
+    if (( now - started > MAX_RUNTIME )); then kill_pod "$pod" "$repo" "$rid" max_runtime; ACTIVE=$((ACTIVE + 1)); continue; fi
+    if (( api_on )) && [[ "$rid" =~ ^[0-9]+$ && "$repo" == */* ]]; then
+      if [[ ! -e "$(pod_dir "$pod")/busy" ]]; then
+        # not seen busy yet: ask GitHub (one request); the idle timeout only counts when GitHub answered "not busy"
+        api GET "/repos/${repo}/actions/runners/${rid}" "repo:${repo}"
+        busy=unknown
+        if [[ "$API_CODE" == 200 ]]; then busy=$(jq -r '.busy // false' "$API_OUT"); fi
+        if [[ "$busy" == true ]]; then
+          mkdir -p "$(pod_dir "$pod")" && printf '%s' "$now" > "$(pod_dir "$pod")/busy"
+          say info job_started "pod=${pod}" "repo=${repo}" "waited=$((now - started))s"
+        elif [[ "$busy" == false ]] && (( now - started > IDLE_TIMEOUT )); then
+          kill_pod "$pod" "$repo" "$rid" idle_timeout
+        elif [[ "$busy" == false ]] && ! is_served "$repo"; then
+          kill_pod "$pod" "$repo" "$rid" repo_not_served
+        else
+          IDLE=$((IDLE + 1)); IDLE_BY_REPO[$repo]=$(( ${IDLE_BY_REPO[$repo]:-0} + 1 ))
+        fi
+      fi
+      if [[ -e "$(pod_dir "$pod")/busy" && ! -e "$(pod_dir "$pod")/verified" && ! -e "$(pod_dir "$pod")/killed" ]]; then
+        check_assigned_job "$pod" "$repo" "$rid" || true
+      fi
+    elif (( api_on )); then
+      IDLE=$((IDLE + 1))   # a container without a usable runner id label: counted, never killed by the idle rule
+    fi
+    ACTIVE=$((ACTIVE + 1))
+  done
+}
+
+# sweep_runners: delete our runners (name prefix) where they must not exist. For repositories that are not served (public, archived,
+# excluded) every runner of ours goes; for served ones only runners without a pod on this host that are offline or idle.
+sweep_runners() {
+  local repo served rows id name status busy pod
+  declare -A have=()
+  for pod in "${!POD_RID[@]}"; do if [[ -n "${POD_RID[$pod]}" ]]; then have[${POD_RID[$pod]}]=1; fi; done
+  find "$CACHE" -type f -mtime +1 -delete 2>/dev/null || true   # cache entries that no answer has touched for a day
+  for repo in "${ALL_REPOS[@]}"; do
+    served=0; is_served "$repo" && served=1
+    if ! api_get_cached "/repos/${repo}/actions/runners?per_page=100" "repo:${repo}"; then
+      if [[ "$API_CODE" == 404 || "$API_CODE" == 403 ]]; then
+        say warn runner_list_denied "repo=${repo}" "hint=the App needs Administration: read or write on this repository"
+      else
+        fail_api runner_list_failed "repo=${repo}" || true
+      fi
+      continue
+    fi
+    rows=$(jq -r --arg p "$NAME_PREFIX" '.runners[]? | select(.name | startswith($p)) | [.id, .name, .status, .busy] | @tsv' "$API_BODY")
+    while IFS=$'\t' read -r id name status busy; do
+      [[ "$id" =~ ^[0-9]+$ ]] || continue
+      if (( ! served )); then
+        delete_runner "$repo" "$id" repo_not_served
+      elif [[ -z "${have[$id]:-}" && ( "$status" == offline || "$busy" == false ) ]]; then
+        delete_runner "$repo" "$id" container_gone
+      fi
+    done <<<"$rows"
+  done
+}
+
+# ---- starting a pod -------------------------------------------------------------------------------------------------------------
+ensure_image() {
+  local img=$1 created
+  if ! docker image inspect "$img" >/dev/null 2>&1; then
+    say info image_pull "image=${img%%@*}"
+    timeout 900 docker pull -q "$img" >/dev/null || { LAST_ERROR="cannot pull ${img%%@*}"; say error image_pull_failed "image=${img%%@*}"; return 1; }
+  fi
+  if [[ "$img" == "$GH_RUNNER_IMAGE" ]]; then
+    created=$(docker image inspect -f '{{.Created}}' "$img" 2>/dev/null || true)
+    if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); [[ "$created" =~ ^[0-9]+$ ]] && IMAGE_CREATED=$created; fi
+  fi
+  return 0
+}
+
+# gen_tls DIR: an ephemeral CA, a server certificate for the BuildKit daemon and a client certificate for the runner.
+# DIR/tls-srv (ca, cert, key) goes to the daemon only, DIR/tls-cli to the runner only; the CA key is deleted before the pod starts.
+# Files are mode 0644 inside a directory tree whose parent (jobs/) is 0700: the containers run as other uids (1000 and 1001) and
+# must read their own mount, which no other user of the host can reach.
+gen_tls() {
+  local d=$1 ca="$1/ca" days=2 who out
+  install -d -m 0700 "$ca" && install -d -m 0755 "$d/tls-srv" "$d/tls-cli" || return 1
+  openssl ecparam -name prime256v1 -genkey -noout -out "$ca/ca.key" 2>/dev/null || return 1
+  openssl req -x509 -new -key "$ca/ca.key" -sha256 -days "$days" -subj "/CN=ghr-ephemeral-ca" \
+    -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" -out "$ca/ca.pem" 2>/dev/null || return 1
+  printf 'subjectAltName=DNS:buildkitd,DNS:localhost\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' > "$ca/srv.ext" || return 1
+  printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' > "$ca/cli.ext" || return 1
+  for who in srv cli; do
+    out="$d/tls-${who}"
+    openssl ecparam -name prime256v1 -genkey -noout -out "$out/key.pem" 2>/dev/null || return 1
+    openssl req -new -key "$out/key.pem" -subj "/CN=ghr-${who}" -out "$ca/${who}.csr" 2>/dev/null || return 1
+    openssl x509 -req -in "$ca/${who}.csr" -CA "$ca/ca.pem" -CAkey "$ca/ca.key" -CAcreateserial -days "$days" -sha256 \
+      -extfile "$ca/${who}.ext" -out "$out/cert.pem" 2>/dev/null || return 1
+    cp "$ca/ca.pem" "$out/ca.pem" || return 1
+    chmod 0644 "$out/key.pem" "$out/cert.pem" "$out/ca.pem" || return 1
+  done
+  rm -rf -- "$ca"
+}
+
+# scan_nets: NET_PODS (pod ids that have a network) and NET_USED (subnets of pod networks that exist; the label is the state).
+declare -A NET_USED=()
+NET_PODS=()
+scan_nets() {
+  local pod sub out
+  out=$(docker network ls --filter "label=${LABEL_JOB}=job" --format "{{.Label \"${LABEL_POD}\"}}|{{.Label \"${LABEL_SUBNET}\"}}" 2>/dev/null) || return 1
+  NET_PODS=(); NET_USED=()
+  while IFS='|' read -r pod sub; do
+    [[ "$pod" =~ $POD_RE ]] && NET_PODS+=("$pod")
+    if [[ "$sub" =~ ^[0-9.]+/[0-9]+$ ]]; then NET_USED[$sub]=1; fi
+  done <<<"$out"
+}
+
+# create_pod_network POD LABELS...: creates the per-job network with the lowest free /28 of the pool (released when the network is
+# removed). Docker's default bridge naming (br-<id>) is kept so ci-job-isolation's br-+ rules cover it. Returns 2 when the pool is full.
+POD_SUBNET=""
+create_pod_network() {
+  local pod=$1 base len slots i cand err free=0; shift
+  base=$(ip2int "${GH_JOB_SUBNET_POOL%/*}"); len=${GH_JOB_SUBNET_POOL#*/}
+  slots=$(( 1 << (POD_PREFIX_LEN - len) ))
+  scan_nets || { say error network_create_failed "pod=${pod}" "problem=docker does not answer"; return 1; }
+  for (( i = 0; i < slots; i++ )); do
+    cand="$(int2ip $(( base + (i << (32 - POD_PREFIX_LEN)) )))/${POD_PREFIX_LEN}"
+    [[ -z "${NET_USED[$cand]:-}" ]] || continue
+    free=$((free + 1))
+    if err=$(docker network create --subnet "$cand" --label "${LABEL_SUBNET}=${cand}" "$@" "ghr-${pod}" 2>&1); then POD_SUBNET=$cand; return 0; fi
+    # an address range that Docker or the host already uses: take the next one; anything else is a real failure
+    if ! grep -qiE 'overlap|already in use|pool' <<<"$err"; then say error network_create_failed "pod=${pod}" "subnet=${cand}" "docker=${err:0:200}"; return 1; fi
+    say warn subnet_taken "subnet=${cand}" "hint=another network uses this range; GH_JOB_SUBNET_POOL should be a block nothing else uses"
+  done
+  if (( free == 0 )); then
+    say error subnet_pool_exhausted "pool=${GH_JOB_SUBNET_POOL}" "slots=${slots}" "hint=the job stays queued until a pod ends; a bigger pool allows more pods but GH_MAX_JOBS is the real limit"
+  else
+    say error subnet_pool_unusable "pool=${GH_JOB_SUBNET_POOL}" "hint=every free range overlaps another Docker network"
+  fi
+  return 2
+}
+
+START_FAIL=0
+# start_failed POD REPO RID STEP [DETAIL]: log, delete the JIT runner (if there is one), remove the pod and count the failure for the start
+# back-off (30 s, doubling, at most 15 min; any successful start resets it). Returns 1.
+start_failed() {
+  local pod=$1 repo=$2 rid=$3 step=$4 detail=${5:-} d now
+  say error pod_start_failed "pod=${pod}" "repo=${repo}" "step=${step}" "detail=${detail:0:200}"
+  if [[ -n "$rid" ]]; then delete_runner "$repo" "$rid" start_failed; fi
+  cleanup_pod "$pod"
+  START_FAIL=$((START_FAIL + 1)); now=$(date +%s); d=$(backoff_for "$START_FAIL")
+  if (( now + d > BACKOFF_UNTIL )); then BACKOFF_UNTIL=$((now + d)); fi
+  say warn pod_start_paused "seconds=${d}" "after_start_failures=${START_FAIL}"
+  save_state
+  return 1
+}
+
+# docker0 address without netlink (the unit's RestrictAddressFamilies has none): the gateway of the default bridge network.
+bridge_ip() { docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null | head -n1 || true; }
+
+# start_pod REPO RUN_ID JOB_ID: network + JIT runner + sidecar + runner container. Any failure removes everything it created and backs off.
+# Returns 2 when the pod network pool is full (nothing was created on GitHub's side).
+start_pod() {
+  local repo=$1 run_id=$2 job_id=$3 pod name dir body rid="" now bk_args=() sec_apparmor=() sec_label=() jit_file zopt="" rc npm_args=() err ip_cache
+  now=$(date +%s)
+  if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then zopt=",Z"; fi   # private label for this pod's own directory
+  pod="${now}-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  name="${NAME_PREFIX}${pod}"; dir=$(pod_dir "$pod")
+  ensure_image "$GH_RUNNER_IMAGE" || { start_failed "" "$repo" "" image "$LAST_ERROR"; return 1; }
+  if [[ "$GH_BUILDKIT" == 1 ]]; then ensure_image "$GH_BUILDKIT_IMAGE" || { start_failed "" "$repo" "" image "$LAST_ERROR"; return 1; }; fi
+  install -d -m 0700 "$dir" && install -d -m 0755 "$dir/jit" && [[ "$(stat -c %a "$dir")" == 700 ]] || { start_failed "$pod" "$repo" "" directory; return 1; }
+  local -a lab=(--label "${LABEL_JOB}=job" --label "${LABEL_POD}=${pod}" --label "${LABEL_REPO}=${repo}" --label "${LABEL_RUN}=${run_id}"
+                --label "${LABEL_STARTED}=${now}" --label "io.server-init.github-runner.job-id=${job_id}")
+  # The network comes first: with no free range nothing is created on GitHub's side and the job stays queued.
+  rc=0; create_pod_network "$pod" "${lab[@]}" || rc=$?
+  if (( rc == 2 )); then cleanup_pod "$pod"; return 2; fi
+  if (( rc )); then start_failed "$pod" "$repo" "" network; return 1; fi
+  if [[ "$GH_BUILDKIT" == 1 ]] && ! gen_tls "$dir"; then start_failed "$pod" "$repo" "" tls; return 1; fi
+  body="${TMP}/jit-request.json"
+  jq -n --arg name "$name" --argjson group "$((10#$GH_RUNNER_GROUP_ID))" --argjson labels "$LABELS_JSON" \
+    '{name: $name, runner_group_id: $group, labels: $labels, work_folder: "_work"}' > "$body" || { start_failed "$pod" "$repo" "" request; return 1; }
+  api POST "/repos/${repo}/actions/runners/generate-jitconfig" "repo:${repo}" "$body"
+  rm -f "$body"
+  if [[ "$API_CODE" != 201 ]]; then
+    if [[ "$API_CODE" == 422 ]]; then
+      fail_api jit_failed "repo=${repo}" "hint=422: check GH_RUNNER_GROUP_ID (now ${GH_RUNNER_GROUP_ID}; 1 is assumed for repositories of a personal account) and GH_LABELS" || true
+    else
+      fail_api jit_failed "repo=${repo}" || true
+    fi
+    err="$(api_err)"; : > "$API_OUT"
+    start_failed "$pod" "$repo" "" jit "$err"; return 1
+  fi
+  rid=$(jq -r '.runner.id // empty' "$API_OUT")
+  jit_file="${dir}/jit/config"
+  ( umask 077; jq -r '.encoded_jit_config // empty' "$API_OUT" > "$jit_file" )
+  : > "$API_OUT"
+  if [[ ! "$rid" =~ ^[0-9]+$ || ! -s "$jit_file" ]]; then
+    start_failed "$pod" "$repo" "$rid" jit "answer without runner id or config"; return 1
+  fi
+  chmod 0644 "$jit_file"   # readable by the runner uid (and by the job itself, same uid); the 0700 parent keeps every other host user out
+
+  if [[ "$GH_BUILDKIT" == 1 ]]; then
+    # Rootless BuildKit (docs/rootless.md of moby/buildkit): seccomp and systempaths must be unconfined so runc can create user namespaces and
+    # a /proc of its own; AppArmor only where it is active. SELinux (Rocky): container_t may not mount inside a user namespace, so the label is
+    # disabled for this one container only. Not added, because they would break rootless BuildKit: --cap-drop ALL (the bounding set also
+    # limits the capabilities in the new user namespace), no-new-privileges (newuidmap is setuid) and --read-only (it needs a writable
+    # state volume). Limits that do not: CPU, memory without swap, process limit.
+    if [[ -r /sys/module/apparmor/parameters/enabled && "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" == Y ]]; then sec_apparmor=(--security-opt apparmor=unconfined); fi
+    if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then sec_label=(--security-opt label=disable); fi
+    if ! err=$(docker run -d --rm --name "ghr-${pod}-buildkitd" --network "ghr-${pod}" --network-alias buildkitd "${lab[@]}" --label "${LABEL_ROLE}=buildkit" \
+        --cgroup-parent ci-jobs.slice --cpus "$GH_BUILDKIT_CPUS" --memory "$GH_BUILDKIT_MEMORY" --memory-swap "$GH_BUILDKIT_MEMORY" --pids-limit "$GH_BUILDKIT_PIDS" \
+        --security-opt seccomp=unconfined --security-opt systempaths=unconfined "${sec_apparmor[@]}" "${sec_label[@]}" \
+        -v "${dir}/tls-srv:/certs:ro" "$GH_BUILDKIT_IMAGE" \
+        --addr tcp://0.0.0.0:1234 --tlscacert /certs/ca.pem --tlscert /certs/cert.pem --tlskey /certs/key.pem 2>&1 >/dev/null); then
+      start_failed "$pod" "$repo" "$rid" buildkit "$err"; return 1
+    fi
+    bk_args=(-v "${dir}/tls-cli:/etc/buildkit-tls:ro${zopt}" -e "BUILDKIT_HOST=tcp://buildkitd:1234")
+  fi
+  # The npm cache (runner/install/npm-cache.sh) listens on the docker0 IP; ci-job-isolation lets this pool, and only this pool of the br-
+  # networks, reach that one port. Same values the GitLab jobs get from config.toml.
+  if [[ -f "${GHR_NPM_DIR:-/opt/npm-cache}/docker-compose.yml" ]]; then
+    ip_cache=$(bridge_ip)
+    if [[ "$ip_cache" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      npm_args=(-e "NPM_CONFIG_REGISTRY=http://${ip_cache}:4873/" -e "YARN_NPM_REGISTRY_SERVER=http://${ip_cache}:4873/" -e "YARN_UNSAFE_HTTP_WHITELIST=${ip_cache}")
+    else
+      say warn npm_cache_unavailable "hint=/opt/npm-cache exists but the docker0 address is unknown; jobs use the public registry"
+    fi
+  fi
+  # The entry reads the JIT config from the read-only file and hands it to the Listener as an environment variable of that process only
+  # (not in docker inspect, not in the host's process list). It runs Runner.Listener itself instead of run.sh: run.sh restarts the Listener
+  # on exit codes 2, 3 and 4 inside the container and turns every other code into 0, so Docker would never see why a runner ended.
+  # GH_JIT_PASS=arg is a debugging fallback: --jitconfig on the command line shows the config in /proc/<pid>/cmdline.
+  local entry='set -eu; J=$(cat /run/ghr-jit/config); [ -n "$J" ] || exit 1; [ ! -f ./.env ] || { set -a; . ./.env; set +a; }; if [ "${GHR_JIT_PASS:-env}" = arg ]; then exec ./bin/Runner.Listener run --jitconfig "$J"; fi; ACTIONS_RUNNER_INPUT_JITCONFIG=$J; export ACTIONS_RUNNER_INPUT_JITCONFIG; unset J; exec ./bin/Runner.Listener run'
+  # Not --rm: the exit code of the Listener is read from the stopped container, which the controller removes.
+  if ! err=$(docker run -d --init --name "ghr-${pod}-runner" --network "ghr-${pod}" "${lab[@]}" --label "${LABEL_ROLE}=runner" --label "${LABEL_RID}=${rid}" \
+      --cgroup-parent ci-jobs.slice --cpus "$GH_JOB_CPUS" --memory "$GH_JOB_MEMORY" --memory-swap "$GH_JOB_MEMORY" --pids-limit "$GH_JOB_PIDS" --shm-size "$GH_JOB_SHM" \
+      --user 1001:1001 --security-opt no-new-privileges --cap-drop ALL \
+      -v "${dir}/jit:/run/ghr-jit:ro${zopt}" "${bk_args[@]}" -w /home/runner \
+      -e "GHR_JIT_PASS=${GH_JIT_PASS}" -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 "${npm_args[@]}" \
+      "$GH_RUNNER_IMAGE" sh -c "$entry" ghr-entry 2>&1 >/dev/null); then
+    start_failed "$pod" "$repo" "$rid" runner "$err"; return 1
+  fi
+  START_FAIL=0
+  say info pod_started "pod=${pod}" "repo=${repo}" "run=${run_id}" "job=${job_id}" "runner=${rid}" "subnet=${POD_SUBNET}" "buildkit=${GH_BUILDKIT}" "npm_cache=$([[ ${#npm_args[@]} -gt 0 ]] && echo 1 || echo 0)" "cpus=${GH_JOB_CPUS}" "memory=${GH_JOB_MEMORY}"
+}
+
+# ---- discovery ------------------------------------------------------------------------------------------------------------------
+# queued_jobs REPO: fills FOUND with "run_id job_id" for each queued job that asks only for our labels, including a custom one.
+# This only decides whether a pod is started: an idle runner takes any queued job of its repository (see check_assigned_job).
+FOUND=()
+queued_jobs() {
+  local repo=$1 st run runs line
+  FOUND=()
+  for st in queued in_progress; do
+    if ! get_paged "/repos/${repo}/actions/runs?status=${st}" workflow_runs 50 6; then
+      if [[ "$API_CODE" == 403 || "$API_CODE" == 404 ]]; then say warn runs_denied "repo=${repo}" "hint=the App needs Actions: read on this repository"; return 0; fi
+      fail_api run_list_failed "repo=${repo}" || true; continue
+    fi
+    if (( PAGED_TRUNCATED )); then say warn runs_truncated "repo=${repo}" "status=${st}" "hint=more than 300 runs; the oldest are looked at first on the next polls only if these finish"; fi
+    # A fork pull request would run code of someone else on this host: no pod is started for it unless GH_ALLOW_FORK_RUNS=1.
+    runs=$(jq -r --argjson fork "$GH_ALLOW_FORK_RUNS" '.workflow_runs[]? |
+      select($fork == 1 or ((.event // "") | startswith("pull_request") | not) or ((.head_repository.full_name // "") == (.repository.full_name // "x"))) | .id' "$PAGED_FILE")
+    for run in $runs; do
+      [[ "$run" =~ ^[0-9]+$ ]] || continue
+      if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then
+        if [[ "$API_CODE" != 403 && "$API_CODE" != 404 ]]; then fail_api job_list_failed "repo=${repo}" "run=${run}" || true; fi
+        continue
+      fi
+      if (( PAGED_TRUNCATED )); then say warn jobs_truncated "repo=${repo}" "run=${run}" "hint=more than 500 jobs in one run"; fi
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && FOUND+=("$line")
+      done < <(jq -r --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" --arg run "$run" '.jobs[]? |
+        select(.status == "queued" and .runner_id == null) |
+        ([.labels[]? | ascii_downcase]) as $l |
+        select(($l | length) > 0 and (($l - $ours) | length) == 0 and (($l | map(select(. as $x | $custom | index($x))) | length) > 0)) |
+        "\($run) \(.id)"' "$PAGED_FILE")
+    done
+  done
+}
+
+discover() {
+  local repo run job n need rc
+  if (( ACTIVE >= MAX_JOBS )); then return 0; fi
+  if (( $(date +%s) < BACKOFF_UNTIL )); then say info discovery_paused "reason=backoff" "until=${BACKOFF_UNTIL}"; return 0; fi
+  if [[ "$RATE_REMAINING" =~ ^[0-9]+$ ]] && (( RATE_REMAINING < RATE_STOP )); then
+    LAST_ERROR="GitHub API quota nearly used up (${RATE_REMAINING} left)"; say error discovery_paused "reason=rate_limit" "remaining=${RATE_REMAINING}"; return 0
+  fi
+  for repo in "${SERVED[@]}"; do
+    (( ACTIVE < MAX_JOBS )) || break
+    queued_jobs "$repo"
+    n=${#FOUND[@]}; need=$(( n - ${IDLE_BY_REPO[$repo]:-0} ))
+    if (( n > 0 )); then say info jobs_queued "repo=${repo}" "queued=${n}" "idle_runners=${IDLE_BY_REPO[$repo]:-0}"; fi
+    for job in "${FOUND[@]}"; do
+      (( need > 0 && ACTIVE < MAX_JOBS )) || break
+      run=${job% *}; job=${job#* }
+      rc=0; start_pod "$repo" "$run" "$job" || rc=$?
+      if (( rc == 0 )); then
+        ACTIVE=$((ACTIVE + 1)); IDLE=$((IDLE + 1)); IDLE_BY_REPO[$repo]=$(( ${IDLE_BY_REPO[$repo]:-0} + 1 )); need=$((need - 1))
+      elif (( rc == 2 )); then
+        return 0   # no free pod network: the jobs stay queued, the next poll retries
+      else
+        return 0   # a failed start backs off for all repositories; the next poll after the pause retries
+      fi
+    done
+  done
+}
+
+# ---- status for health ----------------------------------------------------------------------------------------------------------
+LAST_POLL_OK=0 STARTED_AT=0
+write_status() {
+  local tmp="${STATE_DIR}/status.json.new"
+  jq -n --argjson updated "$(date +%s)" --argjson started "$STARTED_AT" --argjson poll "$LAST_POLL_OK" --argjson tok "$LAST_TOKEN_OK" \
+    --arg err "$LAST_ERROR" --arg rem "$RATE_REMAINING" --arg lim "$RATE_LIMIT" --arg rst "$RATE_RESET" \
+    --argjson served "${#SERVED[@]}" --argjson skipped "${#SKIPPED[@]}" --argjson active "$ACTIVE" --argjson idle "$IDLE" --argjson max "$MAX_JOBS" \
+    --argjson upd "$UPDATE_REQUIRED" --argjson fails "$CONSEC_FAIL" --argjson backoff "$BACKOFF_UNTIL" --arg img "$IMAGE_CREATED" --arg inst "$INSTALL_ID" \
+    '{version: 1, updated: $updated, started: $started, last_poll_ok: $poll, last_token_ok: $tok,
+      last_error: (if $err == "" then null else $err end),
+      rate_remaining: ($rem | tonumber? // null), rate_limit: ($lim | tonumber? // null), rate_reset: ($rst | tonumber? // null),
+      served: $served, skipped: $skipped, active_pods: $active, idle_pods: $idle, max_jobs: $max,
+      update_required: ($upd == 1), consecutive_failures: $fails, backoff_until: $backoff,
+      runner_image_created: ($img | tonumber? // null), installation: $inst}' > "$tmp"
+  chmod 0644 "$tmp"; mv -f "$tmp" "${STATE_DIR}/status.json"
+}
+
+TICK=0
+SWEEP_EVERY=10
+tick() {
+  local now ok=1
+  TICK=$((TICK + 1)); now=$(date +%s)
+  LAST_ERROR=""
+  if (( now < PAUSE_UNTIL )); then
+    # GitHub asked us to wait: no request, but pods are still finished, cleaned up and limited by their runtime (Docker only)
+    say warn poll_paused "seconds=$((PAUSE_UNTIL - now))" "reason=rate_limit"
+    API_OFF=1; manage_pods 0 || say error docker_unreachable "hint=docker ps or docker network ls failed"; API_OFF=0
+    LAST_ERROR="paused by GitHub's rate limit"; save_state; write_status; return 0
+  fi
+  if ensure_token && list_repos; then
+    if [[ "$RATE_REMAINING" =~ ^[0-9]+$ ]] && (( RATE_REMAINING < RATE_LOW )) && (( TICK % 20 == 1 || RATE_REMAINING < RATE_STOP )); then
+      say warn rate_limit_low "remaining=${RATE_REMAINING}" "limit=${RATE_LIMIT:-?}"
+    fi
+  else
+    ok=0
+  fi
+  # Finish and clean up pods first (this needs only Docker, so it runs even when GitHub does not answer); then, every SWEEP_EVERY polls,
+  # at the start and whenever the repository list changed, delete runners that must not exist; then look for work.
+  if ! manage_pods; then
+    # not "no pods": nothing is cleaned up, swept or started on a poll where docker does not answer
+    LAST_ERROR="docker does not answer (docker ps or docker network ls failed)"; say error docker_unreachable "hint=is docker running and is ${USER:-this user} in the docker group?"; ok=0
+  fi
+  if (( ok )); then
+    if (( TICK == 1 || REPOS_CHANGED || TICK % SWEEP_EVERY == 0 )); then sweep_runners; fi
+    say info poll "served=${#SERVED[@]}" "skipped=${#SKIPPED[@]}" "active=${ACTIVE}" "remaining=${RATE_REMAINING:-?}"
+    discover
+    [[ -z "$LAST_ERROR" ]] || ok=0
+  fi
+  if (( ok )); then LAST_POLL_OK=$(date +%s); fi
+  save_state; write_status
+  (( ok ))
+}
+
+# ---- modes ----------------------------------------------------------------------------------------------------------------------
+# init_dirs: the state directory, its private parts (jobs/ holds the per-pod secrets, so it must be 0700 and ours) and the lock that
+# keeps the service and a manual run from working on the same pods at once.
+init_dirs() {
+  install -d -m 0755 "$STATE_DIR"
+  JOBS="${STATE_DIR}/jobs"; CACHE="${STATE_DIR}/cache"; TMP="${STATE_DIR}/tmp"
+  install -d -m 0700 "$JOBS" "$CACHE"
+  if [[ "$(stat -c '%a:%u' "$JOBS")" != "700:$(id -u)" ]]; then
+    say error jobs_dir_unsafe "dir=${JOBS}" "found=$(stat -c '%a:%U' "$JOBS")" "hint=it holds the secrets of the pods: it must be mode 700 and owned by the user that runs the controller"; exit 1
+  fi
+  exec 8>"${STATE_DIR}/ctl.lock"
+  flock -n 8 || { say error already_running "lock=${STATE_DIR}/ctl.lock" "hint=github-runner-ctl is already running (the service?); stop it before a manual run"; exit 1; }
+  rm -rf -- "$TMP"; install -d -m 0700 "$TMP"
+  API_OUT="${TMP}/api.body"; API_HDR="${TMP}/api.hdr"
+}
+
+preflight() {
+  local t
+  for t in curl jq openssl docker sha1sum flock; do command -v "$t" >/dev/null 2>&1 || { say error missing_tool "tool=${t}"; return 1; }; done
+  docker info >/dev/null 2>&1 || { say error docker_unreachable "hint=is the service user in the docker group and is docker running?"; return 1; }
+  [[ -r "$GH_KEY_FILE" ]] || { say error key_missing "key=${GH_KEY_FILE}"; return 1; }
+}
+
+common_start() {
+  load_config
+  validate_config || { local e; for e in "${CFG_ERRORS[@]}"; do say error config_invalid "problem=${e}"; done; exit 2; }
+  derive_config
+}
+
+run_loop() {
+  local stop=0 sleeper=0 rc
+  common_start
+  init_dirs
+  preflight || exit 1
+  STARTED_AT=$(date +%s)
+  load_state
+  trap 'stop=1; [[ $sleeper -gt 0 ]] && kill "$sleeper" 2>/dev/null; true' TERM INT
+  say info started "owner=${GH_OWNER}" "labels=${GH_LABELS}" "max_jobs=${MAX_JOBS}" "poll=${POLL}s" "buildkit=${GH_BUILDKIT}" "name_prefix=${NAME_PREFIX}"
+  ensure_image "$GH_RUNNER_IMAGE" || true
+  while (( ! stop )); do
+    rc=0; tick || rc=$?
+    (( rc == 0 )) || say warn poll_failed "error=${LAST_ERROR:-unknown}"
+    (( stop )) && break
+    sleep "$(( POLL + RANDOM % 4 ))" 8>&- & sleeper=$!
+    wait "$sleeper" 2>/dev/null || true
+    sleeper=0
+  done
+  say info stopping "note=running pods keep running; the next start adopts them"
+}
+
+once() {
+  common_start
+  init_dirs
+  preflight || exit 1
+  STARTED_AT=$(date +%s)
+  load_state
+  tick
+}
+
+# self_test: read-only against GitHub (no runner is created, no container started).
+self_test() {
+  local rc=0 perms name slug k want have
+  common_start
+  STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ghr-selftest.XXXXXX"); trap 'rm -rf -- "$STATE_DIR"' EXIT
+  JOBS="${STATE_DIR}/jobs"; CACHE="${STATE_DIR}/cache"; TMP="${STATE_DIR}/tmp"; install -d -m 0700 "$JOBS" "$CACHE" "$TMP"
+  API_OUT="${TMP}/api.body"; API_HDR="${TMP}/api.hdr"
+  for k in curl jq openssl; do command -v "$k" >/dev/null 2>&1 || { echo "FAIL  ${k} is not installed"; return 1; }; done
+  echo "config:  ${CONFIG}: valid (owner ${GH_OWNER}, labels ${GH_LABELS}, max ${MAX_JOBS} job(s), runner group ${GH_RUNNER_GROUP_ID})"
+  if openssl pkey -in "$GH_KEY_FILE" -noout >/dev/null 2>&1; then echo "OK    key ${GH_KEY_FILE} parses"; else echo "FAIL  key ${GH_KEY_FILE} is missing, unreadable or not a private key"; return 1; fi
+  make_jwt || { echo "FAIL  cannot sign a JWT with the key"; return 1; }
+  echo "OK    JWT signed (RS256, iss ${GH_APP_CLIENT_ID})"
+  api GET /app jwt
+  if [[ "$API_CODE" == 200 ]]; then
+    name=$(jq -r '.name // "?"' "$API_OUT"); slug=$(jq -r '.slug // "?"' "$API_OUT")
+    echo "OK    GitHub App: ${name} (${slug})"
+    for k in administration:write actions:read metadata:read; do
+      want=${k#*:}; have=$(jq -r --arg p "${k%%:*}" '.permissions[$p] // "none"' "$API_OUT")
+      if [[ "$have" == write || "$have" == "$want" ]]; then echo "OK    permission ${k%%:*}: ${have}"; else echo "FAIL  permission ${k%%:*}: ${have} (needs ${want})"; rc=1; fi
+    done
+    perms=$(jq -r '(.events // []) | join(",")' "$API_OUT"); echo "info  subscribed webhook events: ${perms:-none} (none is right: this controller polls)"
+  else
+    echo "FAIL  GET /app: $(api_err) (wrong GH_APP_CLIENT_ID or key?)"; return 1
+  fi
+  ensure_token || { echo "FAIL  no installation token: ${LAST_ERROR}"; return 1; }
+  echo "OK    installation ${INSTALL_ID}: token minted"
+  list_repos || { echo "FAIL  cannot list repositories: ${LAST_ERROR}"; return 1; }
+  echo "repositories of the installation (${#ALL_REPOS[@]}):"
+  local r
+  for r in "${SERVED[@]}"; do echo "  SERVE  ${r} (private)"; done
+  for r in "${SKIPPED[@]}"; do echo "  SKIP   ${r%% *} (${r#* })"; done
+  (( ${#SERVED[@]} > 0 )) || { echo "WARN  no private repository would be served (is the App installed on All repositories?)"; rc=1; }
+  if (( ${#SERVED[@]} > 0 )); then
+    # the permission that creates and deletes runners, with a token of one repository only (what the controller uses)
+    if ensure_repo_token "${SERVED[0]}"; then
+      api GET "/repos/${SERVED[0]}/actions/runners?per_page=100" "repo:${SERVED[0]}"
+      if [[ "$API_CODE" == 200 ]]; then echo "OK    Administration token for ${SERVED[0]} alone can list its runners"
+      else echo "FAIL  listing runners of ${SERVED[0]}: $(api_err)"; rc=1; fi
+    else
+      echo "FAIL  no Administration token for ${SERVED[0]}: ${LAST_ERROR}"; rc=1
+    fi
+  fi
+  echo "info  API quota: ${RATE_REMAINING:-?} of ${RATE_LIMIT:-?} left"
+  echo "info  not tested here: runner group ${GH_RUNNER_GROUP_ID} for JIT runners (checked on the first job; a 422 names GH_RUNNER_GROUP_ID in the log)"
+  return "$rc"
+}
+
+main() {
+  case "${1:-run}" in
+    -h|--help) usage; exit 0 ;;
+    run) run_loop ;;
+    once) once ;;
+    check-config) common_start; echo "config OK: ${CONFIG}" ;;
+    self-test|--self-test) self_test ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
+__SIC_EOF__
+chmod 644 "$R/runner/scripts/github-runner-ctl"
 
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-disk-guard.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Emergency cleanup when the root filesystem crosses HARD_LIMIT percent.
 set -Eeuo pipefail
-
 HARD_LIMIT="${HARD_LIMIT:-85}"
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0  (env: HARD_LIMIT=85) runs runner-weekly-cleanup.sh with RETENTION_DAYS=1 when disk usage >= HARD_LIMIT%"
   exit 0
 fi
-
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
@@ -18492,23 +23209,16 @@ chmod 755 "$R/runner/scripts/runner-disk-guard.sh"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Weekly upgrade of Docker CE and GitLab Runner, only while no CI job runs (the distro's automatic updates skip these
-# vendor repos). The runner is stopped gracefully (no new job, running jobs finish; KillSignal=SIGQUIT), the job list is
-# checked again, the Docker packages are upgraded and Docker restarted, then gitlab-runner is upgraded last and started
-# (separate transactions, so no Docker restart happens after the runner is back). Runner and jobs are checked again
-# before the Docker restart. If a job is there, the runner is started again and nothing (more) is changed.
-# The result is one line in /var/log/runner-engine-update.log, which health reads.
-# Env: DRY_RUN=1 shows the plan only; STOP_WAIT seconds to wait for the graceful stop (default 1800).
+# Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
+# stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
+# One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
 set -Eeuo pipefail
-
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-
 note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
   exit 0
@@ -18517,9 +23227,9 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>/run/runner-engine-update.lock
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-
-# A docker error is not "no jobs": updating then could kill running jobs.
-if ! jobs=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null); then
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
 fi
@@ -18527,7 +23237,6 @@ if [[ -n "$jobs" ]]; then
   note "SKIP $(wc -w <<<"$jobs") CI job(s) running, will retry next week"
   exit 0
 fi
-
 installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
@@ -18542,30 +23251,24 @@ else
   exit 1
 fi
 (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
-
 if ! pending; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
-# Two transactions: Docker packages first (they restart Docker), gitlab-runner last (its scriptlet starts the runner).
 docker_pkgs=(); runner_pkgs=()
 for p in "${installed[@]}"; do if [[ "$p" == gitlab-runner ]]; then runner_pkgs+=("$p"); else docker_pkgs+=("$p"); fi; done
 if [[ "$DRY_RUN" == 1 ]]; then
   note "DRY-RUN would upgrade ${installed[*]}"
   exit 0
 fi
-
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
-
-# From here the runner may be stopped; whatever happens, leave it running again. --no-block: if the runner is still
-# finishing a job, systemd runs this start after the stop completes, and this script does not wait for it.
-runner_stopped=0
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; }
+# From here whatever happens: start the runner again.
+runner_stopped=0 ctl_stopped=0
+ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
+runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
 trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
-
-# `systemctl is-active` is false while a unit is deactivating, so the state is read with `show`.
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
-# SIGQUIT is the runner's graceful stop: no new job, running jobs finish. Returns 1 when it is still running after STOP_WAIT.
+# SIGQUIT = graceful stop (jobs finish). Returns 1 when still running after STOP_WAIT.
 stop_runner_wait() {
   local waited=0 st
   systemctl stop --no-block gitlab-runner
@@ -18577,48 +23280,44 @@ stop_runner_wait() {
     waited=$((waited + 5))
   done
 }
-no_jobs() { local j; j=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>/dev/null) && [[ -z "$j" ]]; }
-
-# The default SIGTERM ends running jobs. TimeoutStopSec=infinity: systemd never SIGKILLs a runner that is still
-# waiting for a job; this script gives up waiting on its own (STOP_WAIT) and leaves the stop to finish by itself.
+no_jobs() { local j; j=$(job_ids 2>/dev/null) && [[ -z "$j" ]]; }
+# SIGTERM would end jobs; TimeoutStopSec=infinity: systemd never SIGKILLs the runner.
 if ! grep -qs '^KillSignal=SIGQUIT' "$DROPIN" 2>/dev/null || ! grep -qs '^TimeoutStopSec=infinity' "$DROPIN" 2>/dev/null; then
   mkdir -p "$(dirname "$DROPIN")"
   printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' > "$DROPIN"
   systemctl daemon-reload
 fi
 runner_stopped=1
+# no new GitHub pod during the upgrade
+if systemctl is-active --quiet github-runner-ctl 2>/dev/null; then systemctl stop github-runner-ctl && ctl_stopped=1; fi
 if ! stop_runner_wait; then
-  # Starting a unit that is still stopping queues the start behind the stop: the runner comes back when the job ends.
-  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running); it starts again once it has stopped, will retry next week"
+  note "SKIP gitlab-runner did not stop within ${STOP_WAIT}s (jobs still running), will retry next week"
   exit 0
 fi
 if ! no_jobs; then
-  note "SKIP a CI job appeared or docker does not answer after the runner stopped; runner started again, will retry next week"
+  note "SKIP a CI job appeared or docker does not answer after the runner stopped; will retry next week"
   exit 0
 fi
-
-# Docker packages first, runner stopped: their own Docker restart finds no job.
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
 fi
-# A package scriptlet may have started the runner (a unit file in /etc cannot be masked from /run), and it may have
-# taken a job. Restarting Docker under a running job would kill it, so stop the runner again and look once more.
+# a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted, gitlab-runner not upgraded (new version active after the next restart or reboot, retry next week)"
+    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
     exit 0
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted, gitlab-runner not upgraded (retry next week)"
+  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
   exit 0
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
   systemctl restart docker
   sleep 5
-  # The isolation rules live in iptables; reapply them after the Docker restart.
+  # reapply the isolation rules
   if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
 fi
 if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
@@ -18627,6 +23326,7 @@ if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
 fi
 systemctl start gitlab-runner || true
 runner_stopped=0
+ctl_back
 sleep 5
 for s in docker gitlab-runner; do systemctl is-active --quiet "$s" || bad+=" $s"; done
 if [[ -n "$bad" ]]; then
@@ -18642,25 +23342,20 @@ cat > "$R/runner/scripts/runner-weekly-cleanup.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Weekly cleanup of the GitLab Runner host: Docker, runner caches, packages, logs, temp files.
 set -Eeuo pipefail
-
 RETENTION_DAYS="${RETENTION_DAYS:-7}"
 JOURNAL_MAX="${JOURNAL_MAX:-500M}"
 SHARED_CACHE_DIR="${SHARED_CACHE_DIR:-/srv/ci-cache}"
 SHARED_CACHE_MAX_AGE_DAYS="${SHARED_CACHE_MAX_AGE_DAYS:-14}"
 DRY_RUN="${DRY_RUN:-0}"
-
 CACHE_DIRS=(/home/gitlab-runner/cache /home/gitlab-runner/.cache /var/lib/gitlab-runner/cache /root/.cache)
 BUILD_DIRS=(/home/gitlab-runner/builds /var/lib/gitlab-runner/builds)
-
 log()  { logger -t runner-weekly-cleanup -- "$*"; echo "$(date -u +%FT%TZ) $*"; }
 disk() { df --output=used,avail,pcent -h / | tail -1 | xargs; }
-
 run() {
   log "-> $*"
   [[ "$DRY_RUN" == "1" ]] && return 0
   "$@" || log "WARN: failed: $*"
 }
-
 wipe_dir() {
   local dir="$1" age="${2:-}"
   [[ -d "$dir" ]] || return 0
@@ -18674,7 +23369,6 @@ wipe_dir() {
     find "$dir" -mindepth 1 -delete 2>/dev/null || log "WARN: partial wipe of $dir"
   fi
 }
-
 usage() {
   cat <<USAGE
 Usage: $0 [--dry-run] [--help]
@@ -18687,7 +23381,6 @@ Env:
   DRY_RUN=1                   show what would be cleaned without deleting anything
 USAGE
 }
-
 while (( $# )); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -18697,19 +23390,15 @@ while (( $# )); do
   shift
 done
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-
 exec 9>/run/runner-weekly-cleanup.lock
 flock -n 9 || { log "another cleanup is running, exit"; exit 0; }
-
 hours=$(( RETENTION_DAYS * 24 ))
 log "start (dry_run=${DRY_RUN}), disk before: $(disk)"
-
 if command -v docker >/dev/null 2>&1; then
-  # Never guess the job count: if docker does not answer, a default of 0 would wipe the caches under running jobs.
-  # stderr goes to a temp file so a docker WARNING is never counted as a running job.
+  # docker not answering is not "no jobs"; stderr is kept apart so a warning is not counted as a job
   ps_err=$(mktemp)
   trap 'rm -f "$ps_err"' EXIT
-  if ! job_ids=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" 2>"$ps_err"); then
+  if ! job_ids=$({ docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; } 2>"$ps_err"); then
     log "ERROR: docker is not responding, cleanup skipped: $(cat "$ps_err")"
     exit 1
   fi
@@ -18725,12 +23414,14 @@ if command -v docker >/dev/null 2>&1; then
   fi
   run docker container prune -f --filter "until=${hours}h"
   run docker image prune -af --filter "until=${hours}h"
+  # the prune takes the pinned GitHub runner images too: fetch them again
+  for img in $(sed -n 's/^GH_\(RUNNER\|BUILDKIT\)_IMAGE=//p' "${GHR_CONFIG:-/etc/github-runner/config.env}" 2>/dev/null); do
+    docker image inspect "$img" >/dev/null 2>&1 || run docker pull -q "$img"
+  done
   run docker builder prune -af --filter "until=${hours}h"
   run docker network prune -f --filter "until=${hours}h"
 fi
-
 for dir in "${BUILD_DIRS[@]}"; do wipe_dir "$dir" "$RETENTION_DAYS"; done
-
 if command -v apt-get >/dev/null 2>&1; then
   run apt-get -o DPkg::Lock::Timeout=600 autoremove --purge -y -q
   run apt-get -o DPkg::Lock::Timeout=600 autoclean -q
@@ -18739,22 +23430,18 @@ elif command -v dnf >/dev/null 2>&1; then
   run dnf -y -q autoremove
   run dnf -q clean all
 fi
-
 run journalctl --vacuum-time="$(( RETENTION_DAYS * 2 ))d" --vacuum-size="$JOURNAL_MAX"
-
 if [[ "$DRY_RUN" != "1" ]]; then
   log "-> removing rotated logs older than 30d"
   find /var/log -type f \( -name '*.gz' -o -name '*-[0-9]*' -o -name '*.[0-9]' -o -name '*.old' \) -mtime +30 -delete 2>/dev/null || true
   find /tmp /var/tmp -xdev -mindepth 1 -type f -atime +"$RETENTION_DAYS" -delete 2>/dev/null || true
 fi
 run systemd-tmpfiles --clean
-
 if [[ -d "$SHARED_CACHE_DIR" && "$DRY_RUN" != "1" ]]; then
   log "-> pruning ${SHARED_CACHE_DIR} files not used for ${SHARED_CACHE_MAX_AGE_DAYS}d"
   find "$SHARED_CACHE_DIR" -xdev -type f -atime +"$SHARED_CACHE_MAX_AGE_DAYS" -delete 2>/dev/null || true
   find "$SHARED_CACHE_DIR" -xdev -mindepth 2 -type d -empty -delete 2>/dev/null || true
 fi
-
 log "done, disk after: $(disk)"
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/runner-weekly-cleanup.sh"
@@ -18807,6 +23494,64 @@ ExecReload=/usr/local/bin/ci-job-isolation.sh
 WantedBy=multi-user.target
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/ci-job-isolation.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/github-runner-ctl.service" <<'__SIC_EOF__'
+[Unit]
+Description=Ephemeral GitHub Actions runner controller (private repositories)
+After=docker.service network-online.target ci-job-isolation.service
+Wants=network-online.target
+Requires=docker.service ci-job-isolation.service
+ConditionPathExists=/etc/github-runner/config.env
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=github-runner
+Group=github-runner
+# docker group = root on this host; the controller only runs the fixed docker commands of runner/scripts/github-runner-ctl
+SupplementaryGroups=docker
+ExecStart=/usr/local/bin/github-runner-ctl run
+SyslogIdentifier=github-runner-ctl
+# Pods are independent Docker containers: stopping or restarting the controller does not end a running job, the next start adopts it.
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=300
+# invalid config (exit 2) is not fixed by a restart
+RestartPreventExitStatus=2
+RuntimeDirectory=github-runner
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+MemoryMax=256M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/github-runner-ctl.service"
 
 install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/runner-disk-guard.service" <<'__SIC_EOF__'
@@ -18933,7 +23678,7 @@ chmod 644 "$R/runner/systemd/server-freshness.timer"
 install -d "$R/runner/stacks/logging"
 cat > "$R/runner/stacks/logging/config.alloy" <<'__SIC_EOF__'
 // Container logs and the systemd journal to the local Loki.
-// CI job containers are skipped: their output is already the job log in GitLab.
+// CI job containers are skipped: their output is already the job log in GitLab (or in GitHub, for the pods of the GitHub Actions runner).
 
 logging {
   level = "warn"
@@ -18956,6 +23701,12 @@ discovery.relabel "containers" {
   rule {
     source_labels = ["__meta_docker_container_label_com_gitlab_gitlab_runner_managed"]
     regex         = "true"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_io_server_init_github_runner"]
+    regex         = "job"
     action        = "drop"
   }
 
@@ -20390,13 +25141,15 @@ check_security() {
   fi
 
   local members u shell pid ru
-  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vx 'gitlab-runner' | grep . | tr '\n' ' ' || true)
+  members=$(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -vxE 'gitlab-runner|github-runner' | grep . | tr '\n' ' ' || true)
   if [[ -n "${members// /}" ]]; then
     warn "users in the docker group (root-equivalent): ${members}; use sudo docker instead"
   else
-    if is_runner; then ok "docker group: only gitlab-runner"; else ok "docker group: no members"; fi
+    if is_runner; then
+      if getent group docker 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -qx 'github-runner'; then ok "docker group: only gitlab-runner and github-runner"; else ok "docker group: only gitlab-runner"; fi
+    else ok "docker group: no members"; fi
   fi
-  for u in gitlab-runner monitoring; do
+  for u in gitlab-runner github-runner monitoring; do
     id "$u" >/dev/null 2>&1 || continue
     shell=$(getent passwd "$u" | cut -d: -f7)
     case "$shell" in
@@ -20935,8 +25688,8 @@ check_runner() {
   fi
 
   local jobs
-  jobs=$(docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true 2>/dev/null | wc -l || true)
-  info "running job containers: ${jobs:-0}"
+  jobs=$({ docker ps -q --filter label=com.gitlab.gitlab-runner.managed=true; docker ps -q --filter label=io.server-init.github-runner=job; } 2>/dev/null | wc -l || true)
+  info "running job containers (GitLab jobs and GitHub runner pods): ${jobs:-0}"
 
   if grep -q '^listen_address' "$CFG"; then
     if [[ "$(http_code http://127.0.0.1:9252/metrics 3)" == "200" ]]; then
@@ -20952,6 +25705,94 @@ check_runner() {
     warn "${errs} error lines in runner log in the last hour (journalctl -u gitlab-runner --since -1h | grep ERROR)"
   else
     ok "no runner errors in the last hour"
+  fi
+  return 0
+}
+
+# Opt-in GitHub Actions runner (runner/install/github-runner.sh): the controller writes /run/github-runner/status.json every poll,
+# so this check makes no GitHub API call. HEALTH_GHR_STATUS and HEALTH_GHR_CONFIG are for tests.
+check_github_runner() {
+  local unit=github-runner-ctl.service st="${HEALTH_GHR_STATUS:-/run/github-runner/status.json}" gcfg="${HEALTH_GHR_CONFIG:-/etc/github-runner/config.env}"
+  if ! unit_exists "$unit" && [[ ! -f "$gcfg" ]]; then return 0; fi
+  if (( LIMITED )); then
+    skip "github runner: needs root (skipped)"
+    return 0
+  fi
+  section "GitHub Actions runner"
+  if ! have jq; then
+    warn "jq missing: the GitHub runner status cannot be read"
+    return 0
+  fi
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    ok "${unit} active"
+  elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+    fail "${unit} $(systemctl is-active "$unit" 2>/dev/null || true) (journalctl -u github-runner-ctl -n 30)"
+  else
+    warn "${unit} installed but not enabled (systemctl enable --now github-runner-ctl)"
+    return 0
+  fi
+  if [[ ! -s "$st" ]]; then
+    warn "no controller status yet (${st}); the first poll writes it"
+    return 0
+  fi
+  local now age v owner image created img_age
+  now=$(date +%s)
+  owner=$(sed -nE 's/^GH_OWNER="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  info "private repositories of ${owner:-?}: $(jq -r '"\(.served // 0) served, \(.skipped // 0) skipped (public, archived or excluded)"' "$st" 2>/dev/null || echo unknown)"
+  v=$(jq -r '.last_poll_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 300 )); then ok "last successful poll $(human_age "$age") ago"
+    elif (( age <= 900 )); then warn "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"
+    else fail "last successful poll $(human_age "$age") ago ($(jq -r '.last_error // "no error recorded"' "$st"))"; fi
+  else
+    warn "no successful poll yet ($(jq -r '.last_error // "no error recorded"' "$st" 2>/dev/null))"
+  fi
+  v=$(jq -r '.last_token_ok // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > 0 )); then
+    age=$(( now - v ))
+    if (( age <= 4200 )); then ok "installation token minted $(human_age "$age") ago"
+    else warn "installation token last minted $(human_age "$age") ago (the GitHub App key or installation may be gone: github-runner-ctl self-test)"; fi
+  else
+    warn "no installation token minted yet"
+  fi
+  v=$(jq -r '.rate_remaining // empty' "$st" 2>/dev/null || true)
+  if [[ -n "$v" ]] && isnum "$v"; then
+    if (( v < 100 )); then fail "GitHub API quota nearly used up: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    elif (( v < 500 )); then warn "GitHub API quota low: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"
+    else ok "GitHub API quota: ${v} of $(jq -r '.rate_limit // "?"' "$st") left"; fi
+  fi
+  info "pods: $(jq -r '"\(.active_pods // 0) active (\(.idle_pods // 0) waiting for a job), limit \(.max_jobs // "?")"' "$st" 2>/dev/null)"
+  if [[ "$(jq -r '.update_required // false' "$st" 2>/dev/null)" == true ]]; then
+    fail "a runner exited with code 3 or 4 (it wanted to update itself): the pinned runner image is too old; bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+  fi
+  v=$(jq -r '.backoff_until // 0' "$st" 2>/dev/null || echo 0)
+  if isnum "$v" && (( v > now )); then
+    warn "pod start paused after repeated runner failures (until $(date -d "@${v}" +%H:%M:%S)); journalctl -u github-runner-ctl"
+  fi
+  # age of the pinned runner image: GitHub stops queuing jobs to a runner that was not updated for 30 days
+  image=$(sed -nE 's/^GH_RUNNER_IMAGE="?([^"]*)"?$/\1/p' "$gcfg" 2>/dev/null | head -n1 || true)
+  created=""
+  if [[ -n "$image" ]] && have docker; then created=$(docker image inspect -f '{{.Created}}' "$image" 2>/dev/null || true); fi
+  if [[ -n "$created" ]]; then created=$(date -d "$created" +%s 2>/dev/null || true); else created=$(jq -r '.runner_image_created // empty' "$st" 2>/dev/null || true); fi
+  if [[ -n "$created" ]] && isnum "$created"; then
+    img_age=$(( (now - created) / 86400 ))
+    # age alone is only a warning (a newer pin may already be waiting for update.sh); a runner that really cannot take jobs shows up as update_required
+    if (( img_age >= 25 )); then warn "runner image is ${img_age} days old (GitHub stops queuing jobs to a runner older than 30 days): bump GHR_RUNNER_IMAGE in common/lib.sh and run runner/install/update.sh"
+    else ok "runner image is ${img_age} days old"; fi
+  else
+    info "runner image age unknown (image not on disk and not yet recorded)"
+  fi
+  if have docker && docker info >/dev/null 2>&1; then
+    local stopped nets running
+    stopped=$(docker ps -aq --filter label=io.server-init.github-runner=job --filter status=exited --filter status=dead --filter status=created 2>/dev/null | wc -l || true)
+    nets=$(docker network ls -q --filter label=io.server-init.github-runner=job 2>/dev/null | wc -l || true)
+    running=$(docker ps -q --filter label=io.server-init.github-runner.role=runner 2>/dev/null | wc -l || true)
+    if (( ${stopped:-0} > 0 || ${nets:-0} > ${running:-0} )); then
+      warn "leftover pod parts: ${stopped:-0} stopped container(s), ${nets:-0} network(s) for ${running:-0} running pod(s); the controller removes them on its next poll"
+    else
+      ok "no leftover pod containers or networks"
+    fi
   fi
   return 0
 }
@@ -21021,12 +25862,13 @@ check_containers() {
     s_pids[$name]="$pids"
   done < <(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}' "${ids[@]}" 2>/dev/null || true)
 
-  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}'
-  local state health restarts oom started memlimit job started_s age short details level reasons
+  local tpl='{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.StartedAt}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.gitlab.gitlab-runner.managed"}}|{{index .Config.Labels "io.server-init.github-runner"}}'
+  local state health restarts oom started memlimit job ghjob started_s age short details level reasons
   local n_total=0 n_jobs=0
 
-  while IFS='|' read -r name state health restarts oom started memlimit job; do
+  while IFS='|' read -r name state health restarts oom started memlimit job ghjob; do
     [[ -z "$name" ]] && continue
+    if [[ "$ghjob" == "job" ]]; then job=true; fi
     name="${name#/}"
     n_total=$((n_total + 1))
     short="$name"
@@ -21458,6 +26300,7 @@ check_securitytools
 check_services
 check_freshness
 check_runner
+check_github_runner
 check_docker
 check_containers
 check_recent_container_oom
@@ -21471,13 +26314,9 @@ chmod 755 "$R/common/health"
 install -d "$R/common"
 cat > "$R/common/pin-repo-key.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
-# Download a package repository signing key and install it only if it has the expected fingerprint.
-# Usage: pin-repo-key URL FINGERPRINT DEST
-# The fingerprint is the 40 hex digits of the primary key (spaces allowed). The file is checked with gpg in an empty
-# keyring; only the key with that fingerprint is written to DEST (anything else in the download is dropped).
-# On a mismatch nothing is written and the exit code is 1, so the repository is never trusted with a swapped key.
+# Usage: pin-repo-key URL FINGERPRINT DEST. Downloads a repository signing key, checks it with gpg in an empty keyring and writes only
+# the key with that fingerprint (40 hex digits, spaces allowed) to DEST. On a mismatch nothing is written and the exit code is 1.
 set -Eeuo pipefail
-
 if [[ $# -ne 3 || "$1" == "-h" || "$1" == "--help" ]]; then
   echo "Usage: $0 URL FINGERPRINT DEST" >&2
   exit 2
@@ -21487,7 +26326,6 @@ want=$(printf '%s' "$2" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
 dest="$3"
 [[ "$want" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-repo-key: fingerprint must be 40 hex digits" >&2; exit 2; }
 command -v gpg >/dev/null 2>&1 || { echo "pin-repo-key: gpg is not installed" >&2; exit 1; }
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 chmod 0700 "$work"
@@ -21513,7 +26351,6 @@ cat > "$R/common/shell-history.sh" <<'__SIC_EOF__'
 # Shell history and fzf key bindings for interactive bash (Ctrl+R history search, Ctrl+T file search).
 [ -n "${BASH_VERSION-}" ] || return 0
 [[ $- == *i* ]] || return 0
-
 __shell_history_vars() {
   HISTSIZE=100000
   HISTFILESIZE=200000
@@ -21522,9 +26359,7 @@ __shell_history_vars() {
 }
 __shell_history_vars
 shopt -s histappend cmdhist
-
-# Run before each prompt: append the last command to the history file (parallel sessions share it). Debian's
-# ~/.bashrc lowers the limits after this file, so the first prompt applies them again.
+# Before each prompt: append the last command to the history; the first prompt re-applies the limits (Debian lowers them).
 __shell_history_prompt() {
   history -a
   if [[ -z "${__shell_history_done-}" ]]; then
@@ -21532,9 +26367,8 @@ __shell_history_prompt() {
     __shell_history_vars
   fi
 }
-# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. If it is still empty (Fedora/EL read
-# profile.d before /etc/bashrc, which sets the terminal title only when it is empty), use an array with an empty
-# element 0 for /etc/bashrc's title command; the hook stays in element 1.
+# Keeps an existing PROMPT_COMMAND (string or array); safe to source twice. Still empty (Fedora/EL): an array whose element 0 is left
+# empty for /etc/bashrc's title command.
 if [[ -z "${PROMPT_COMMAND-}" && "$(declare -p PROMPT_COMMAND 2>/dev/null)" != "declare -a"* ]] && (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
   unset PROMPT_COMMAND
   PROMPT_COMMAND=('' '__shell_history_prompt')
@@ -21553,7 +26387,6 @@ case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
     fi
     ;;
 esac
-
 # Debian and Ubuntu install fd as fdfind.
 if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
   alias fd=fdfind
@@ -21567,7 +26400,6 @@ if [[ -n "${__fd-}" ]]; then
   export FZF_ALT_C_COMMAND="${FZF_ALT_C_COMMAND:-$__fd --type d --hidden --follow --exclude .git}"
 fi
 unset __fd
-
 if command -v fzf >/dev/null 2>&1; then
   for __f in /usr/share/fzf/shell/key-bindings.bash /usr/share/doc/fzf/examples/key-bindings.bash; do
     if [[ -r "$__f" ]]; then
@@ -21598,7 +26430,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 56"
+echo "files written to $R: 59"
 bash "$R/runner/install/users.sh" </dev/null
 bash "$R/common/admin-tools.sh" </dev/null
 bash "$R/runner/install/host-tools.sh" </dev/null
