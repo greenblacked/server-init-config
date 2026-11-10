@@ -103,6 +103,8 @@ grep -q 'already set' /tmp/runner-job-limits-rerun.log && pass "job-limits rerun
 
 echo "== GitHub Actions runner component (stubbed docker, throwaway key, no GitHub)"
 # No Docker daemon here: a stub answers the few docker commands the installer uses, and a stand-in docker.service lets the preflight see "running".
+# The installer now fails closed unless ci-job-isolation.service starts, and that script needs the DOCKER-USER chain dockerd would create.
+# Add the chain here; the actual isolation rules are still checked on a real daemon in runner-host-e2e.sh.
 # Not under /tmp: the container mounts it noexec (--tmpfs), so a stub there cannot be run and `docker info` would fail.
 GHR_STUB=/var/tmp/ghr-stub; install -d "$GHR_STUB"
 cat > "$GHR_STUB/docker" <<'STUB'
@@ -114,6 +116,8 @@ chmod +x "$GHR_STUB/docker"
 getent group docker >/dev/null || groupadd -r docker
 printf '[Service]\nExecStart=/bin/sleep infinity\n' > /etc/systemd/system/docker.service
 systemctl daemon-reload; systemctl start docker.service
+iptables -N DOCKER-USER 2>/dev/null || true
+iptables -n -L DOCKER-USER >/dev/null 2>&1 || fail "cannot create the stand-in DOCKER-USER chain (iptables is required for ci-job-isolation)"
 # a minimal image has no openssl command (the installer fetches it itself, but only after it needs a key to start with)
 command -v openssl >/dev/null 2>&1 || { dnf -y -q install openssl || { apt-get update -q && apt-get install -y -q openssl; }; } >/tmp/runner-openssl.log 2>&1
 openssl genrsa -out /tmp/ghr-test.pem 2048 2>/dev/null || fail "cannot create the throwaway RSA key (openssl genrsa)"
