@@ -62,11 +62,20 @@ step() {
   if "$@"; then log "ok: ${name}"; else fail "step failed: ${name}"; FAILED_STEPS+=("$name"); fi
 }
 
+dnf_install() {
+  local i
+  for i in 1 2 3; do
+    dnf -y -q install "$@" && return 0
+    (( i < 3 )) && dnf -q clean metadata && sleep $((i * 5))
+  done
+  return 1
+}
+
 packages() {
-  rpm -q dnf-plugins-core >/dev/null 2>&1 || dnf -y -q install dnf-plugins-core || return 1
+  rpm -q dnf-plugins-core >/dev/null 2>&1 || dnf_install dnf-plugins-core || return 1
   dnf config-manager --set-enabled crb || return 1
-  rpm -q epel-release >/dev/null 2>&1 || dnf -y -q install epel-release || return 1
-  dnf -y -q install sudo diffutils tzdata dbus-broker firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates policycoreutils || return 1
+  rpm -q epel-release >/dev/null 2>&1 || dnf_install epel-release || return 1
+  dnf_install sudo diffutils tzdata dbus-broker firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates policycoreutils || return 1
   # firewall-cmd and timedatectl need the D-Bus system bus; minimal images have none.
   systemctl is-active --quiet dbus.service || systemctl enable --now dbus-broker.service || return 1
   local p
@@ -314,7 +323,7 @@ fail2ban() {
 }
 
 auto_updates() {
-  rpm -q dnf-automatic >/dev/null 2>&1 || dnf -y -q install dnf-automatic || return 1
+  rpm -q dnf-automatic >/dev/null 2>&1 || dnf_install dnf-automatic || return 1
   install -d /etc/dnf
   cat > /etc/dnf/automatic.conf <<'CONF'
 [commands]
@@ -389,7 +398,7 @@ docker_engine() {
     if ! dnf repolist --enabled 2>/dev/null | grep -q '^docker-ce-stable'; then
       docker_repo || return 1
     fi
-    dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
+    dnf_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
   fi
   docker_start
 }
