@@ -81,8 +81,9 @@
 
   - path: /usr/local/bin/runner-engine-update.sh
     permissions: '0755'
+    encoding: gzip+base64
     content: |
-@@FILE runner/scripts/runner-engine-update.sh@@
+@@GZIPFILE runner/scripts/runner-engine-update.sh@@
 
   - path: /usr/local/bin/ci-job-isolation.sh
     permissions: '0755'

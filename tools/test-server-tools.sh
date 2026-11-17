@@ -599,6 +599,7 @@ check "caddy ports are published on IPv4 only" 'grep -qF "\"0.0.0.0:\${TS_HTTP_P
 section "runner-engine-update"
 stub logger 'exit 0'
 export ENGINE_UPDATE_LOG="$T/engine.log"
+export ENGINE_UPDATE_LOCK="$T/runner-engine-update.lock"
 stub docker '[[ "$*" == *github-runner* ]] && exit 0; echo abc123'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "a running CI job: skipped, exit 0" '[[ $rc -eq 0 ]] && grep -q "SKIP 1 CI job" <<<"$out"'
@@ -615,7 +616,7 @@ stub systemctl 'case "$1" in
   start) rm -f "'"$T"'/runner-stopped" ;;
   show) if [[ -e "'"$T"'/runner-stopped" || -e "'"$T"'/runner-masked" ]]; then echo inactive; else echo active; fi ;;
   is-active) [[ "$3" == github-runner-ctl ]] && exit 3; [[ "$3" == gitlab-runner && -e "'"$T"'/runner-stopped" ]] && exit 3 ;;
-  cat) exit 1 ;;
+  cat) exit 0 ;;
 esac
 exit 0'
 rm -f "$T/runner-stopped" "$T/docker-calls"
@@ -634,7 +635,7 @@ rm -f "$T/runner-stopped"; reset_calls
 stub systemctl 'case "$1" in
   is-active) [[ "$3" == github-runner-ctl ]] && exit 3 ;;
   show) echo deactivating ;;
-  cat) exit 1 ;;
+  cat) exit 0 ;;
 esac
 exit 0'
 out=$(STOP_WAIT=10 bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
@@ -648,7 +649,7 @@ stub systemctl 'case "$1" in
   start) rm -f "'"$T"'/runner-stopped" ;;
   show) if [[ -e "'"$T"'/runner-stopped" && ! -e "'"$T"'/scriptlet-started" ]]; then echo inactive; elif [[ -e "'"$T"'/scriptlet-started" && "$(cat "'"$T"'/scriptlet-n" 2>/dev/null || echo 0)" -ge 1 ]]; then echo inactive; else [[ -e "'"$T"'/scriptlet-started" ]] && echo 1 > "'"$T"'/scriptlet-n"; echo active; fi ;;
   is-active) [[ "$3" == github-runner-ctl ]] && exit 3 ;;
-  cat) exit 1 ;;
+  cat) exit 0 ;;
 esac
 exit 0'
 rm -f "$T/scriptlet-started" "$T/scriptlet-n"
@@ -665,7 +666,7 @@ stub systemctl 'case "$1" in
   is-active) [[ "$3" == github-runner-ctl ]] && exit 3 ;;
   restart) [[ "$2" == docker ]] && echo "restart-docker" >> "'"$T"'/order" ;;
   show) if [[ -e "'"$T"'/runner-stopped" ]]; then echo inactive; else echo active; fi ;;
-  cat) exit 1 ;;
+  cat) exit 0 ;;
 esac
 exit 0'
 rm -f "$T/order"
@@ -686,7 +687,7 @@ stub systemctl 'case "$1" in
   start) [[ "$2" == gitlab-runner ]] && rm -f "'"$T"'/runner-stopped" ;;
   show) if [[ -e "'"$T"'/runner-stopped" ]]; then echo inactive; else echo active; fi ;;
   is-active) exit 0 ;;
-  cat) exit 1 ;;
+  cat) exit 0 ;;
 esac
 exit 0'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
@@ -697,7 +698,11 @@ rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
 stub docker 'if [[ "$*" == *github-runner* ]]; then n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 1 ]] && echo ghpod1; fi; exit 0'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "a GitHub pod appears after the stop: runner and controller started again, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP a CI job appeared" <<<"$out" && grep -q "^start --no-block gitlab-runner" <<<"$(calls systemctl)" && grep -q "^start --no-block github-runner-ctl" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)"'
-rm -f "$T/bin/docker" "$T/bin/logger" "$T/bin/sleep" "$T/bin/dnf" "$T/bin/rpm" "$T/bin/systemctl" "$T/runner-stopped" "$T/docker-calls"; unset ENGINE_UPDATE_LOG ENGINE_UPDATE_DROPIN; reset_calls
+rm -f "$T/bin/docker" "$T/bin/logger" "$T/bin/sleep" "$T/bin/dnf" "$T/bin/rpm" "$T/bin/systemctl" "$T/runner-stopped" "$T/docker-calls"; unset ENGINE_UPDATE_LOG ENGINE_UPDATE_DROPIN ENGINE_UPDATE_LOCK; reset_calls
+
+
+out=$("$ROOT/tests/unit/run.sh" "$ROOT/tests/container/runner-engine-update-main.test.sh" 2>&1); rc=$?
+check "runner-engine-update main flow (fully stubbed and hermetic)" '[[ $rc -eq 0 && "$out" == *"== 6 passed, 0 failed"* ]]'
 
 section "server lock-root"
 LR="$ROOT/server/lock-root.sh"

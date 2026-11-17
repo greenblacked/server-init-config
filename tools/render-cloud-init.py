@@ -4,6 +4,8 @@
 Directives (each on its own line):
   @@INCLUDE path@@  insert another template verbatim
   @@FILE path@@     insert a repo file as a YAML block scalar, indented to 6 spaces
+  @@GZIPFILE path@@ insert a repo file as gzip+base64 for cloud-init write_files
+                     from the canonical, validated path.gz sidecar
 
 Usage: tools/render-cloud-init.py [--check]
   --check  fail if the committed cloud-init files are out of date (for CI / pre-commit)
@@ -12,9 +14,12 @@ Usage: tools/render-cloud-init.py [--check]
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
 import logging
 import re
 import sys
+import zlib
 from pathlib import Path
 
 import yaml
@@ -32,7 +37,7 @@ TARGETS = {
     "server/cloud-init/templates/server-opensuse.yaml.in": "server/cloud-init/server-opensuse.yaml",
 }
 HETZNER_USER_DATA_LIMIT = 32 * 1024
-DIRECTIVE = re.compile(r"^@@(INCLUDE|FILE) (\S+)@@$")
+DIRECTIVE = re.compile(r"^@@(INCLUDE|FILE|GZIPFILE) (\S+)@@$")
 INDENT = " " * 6
 
 log = logging.getLogger("render-cloud-init")
@@ -53,9 +58,22 @@ def render(path: Path, depth: int = 0) -> str:
             raise FileNotFoundError(f"{path.name}: referenced file not found: {rel}")
         if kind == "INCLUDE":
             out.append(render(src, depth + 1).rstrip("\n"))
-        else:
+        elif kind == "FILE":
             for content_line in src.read_text(encoding="utf-8").rstrip("\n").splitlines():
                 out.append(f"{INDENT}{content_line}" if content_line else "")
+        else:
+            archive = src.with_name(src.name + ".gz")
+            if not archive.is_file():
+                raise FileNotFoundError(f"{path.name}: canonical gzip asset not found: {archive.relative_to(ROOT)}")
+            compressed = archive.read_bytes()
+            try:
+                decoded = gzip.decompress(compressed)
+            except (gzip.BadGzipFile, EOFError, OSError, zlib.error) as exc:
+                raise ValueError(f"{archive.relative_to(ROOT)} is not a valid gzip asset") from exc
+            if decoded != src.read_bytes():
+                raise ValueError(f"{archive.relative_to(ROOT)} is stale; run tools/update-cloud-init-gzip.sh")
+            encoded = base64.b64encode(compressed).decode("ascii")
+            out.append(f"{INDENT}{encoded}")
     return "\n".join(out) + "\n"
 
 

@@ -3742,15 +3742,83 @@ LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable fo
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
+LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
 note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+
+# Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
+probe_failed() {
+  local command=$1 rc=$2 output=$3
+  if [[ -n "$output" ]]; then
+    printf '%s failed (exit %s):\n%s\n' "$command" "$rc" "$output" >&2
+  else
+    printf '%s failed (exit %s)\n' "$command" "$rc" >&2
+  fi
+}
+pending_dnf() {
+  local output rc
+  if output=$(dnf -q check-update "$@" 2>&1); then rc=0; else rc=$?; fi
+  case $rc in
+    0) return 1 ;;
+    100) return 0 ;;
+    *) probe_failed 'dnf -q check-update' "$rc" "$output"; return 2 ;;
+  esac
+}
+pending_apt() {
+  local output rc
+  if output=$(apt-get update -q --error-on=any 2>&1); then :; else
+    rc=$?; probe_failed 'apt-get update -q' "$rc" "$output"; return 2
+  fi
+  if output=$(apt-get -s install --only-upgrade "$@" 2>&1); then :; else
+    rc=$?; probe_failed 'apt-get -s install --only-upgrade' "$rc" "$output"; return 2
+  fi
+  if grep -q '^Inst ' <<<"$output"; then return 0; fi
+  return 1
+}
+ensure_isolation() {
+  if ! systemctl cat ci-job-isolation.service >/dev/null 2>&1; then
+    note "FAIL ci-job-isolation.service missing; refusing to restart CI services"
+    return 1
+  fi
+  if ! systemctl restart ci-job-isolation.service; then
+    note "FAIL ci-job-isolation.service restart failed; refusing to restart CI services"
+    return 1
+  fi
+  if ! systemctl is-active --quiet ci-job-isolation.service; then
+    note "FAIL ci-job-isolation.service is not active after restart; refusing to restart CI services"
+    return 1
+  fi
+}
+can_restart_services() {
+  (( restart_allowed )) || return 1
+  if (( isolation_required )) && ! systemctl is-active --quiet ci-job-isolation.service; then
+    restart_allowed=0
+    note "FAIL ci-job-isolation.service is no longer active; refusing to restart CI services"
+    return 1
+  fi
+}
+ctl_back() {
+  if (( ctl_stopped )) && can_restart_services; then
+    systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true
+  fi
+}
+runner_back() {
+  if can_restart_services; then
+    systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true
+    ctl_back
+  fi
+}
+cleanup_services() {
+  if (( runner_stopped )); then runner_back; fi
+}
+main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
   exit 0
 fi
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-exec 9>/run/runner-engine-update.lock
+exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
 # A docker error is not "no jobs".
 job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
@@ -3766,17 +3834,25 @@ installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
   upgrade() { dnf -y -q upgrade "$@"; }
-  pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
 elif command -v apt-get >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
   upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "$@"; }
-  pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
 else
   note "FAIL no supported package manager"
   exit 1
 fi
 (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
-if ! pending; then
+has_updates=0 probe_rc=0
+if command -v dnf >/dev/null 2>&1; then
+  if pending_dnf "${installed[@]}"; then has_updates=1; else probe_rc=$?; fi
+else
+  if pending_apt "${installed[@]}"; then has_updates=1; else probe_rc=$?; fi
+fi
+if [[ ${probe_rc:-1} -eq 2 ]]; then
+  note "FAIL package update probe failed; no packages or services changed"
+  exit 1
+fi
+if [[ ${has_updates:-0} -ne 1 ]]; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
@@ -3787,11 +3863,9 @@ if [[ "$DRY_RUN" == 1 ]]; then
   exit 0
 fi
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
-# From here whatever happens: start the runner again.
-runner_stopped=0 ctl_stopped=0
-ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
-trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
+# From here, EXIT cleanup restarts only services that this run stopped and is allowed to restore.
+runner_stopped=0 ctl_stopped=0 restart_allowed=1 isolation_required=0
+trap cleanup_services EXIT
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
 # SIGQUIT = graceful stop (jobs finish). Returns 1 when still running after STOP_WAIT.
 stop_runner_wait() {
@@ -3823,6 +3897,11 @@ if ! no_jobs; then
   note "SKIP a CI job appeared or docker does not answer after the runner stopped; will retry next week"
   exit 0
 fi
+# The package transaction can restart Docker and alter its firewall before our explicit restart.
+if (( ${#docker_pkgs[@]} )); then
+  restart_allowed=0
+  isolation_required=1
+fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
@@ -3840,13 +3919,24 @@ if ! no_jobs; then
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
-  systemctl restart docker
+  # Docker's restart can clear the job firewall rules. Keep both CI services down
+  # unless isolation is present, restarts successfully, and is active afterward.
+  restart_allowed=0
+  isolation_required=1
+  if ! systemctl restart docker; then
+    note "FAIL Docker restart failed; CI services left stopped"
+    exit 1
+  fi
   sleep 5
-  # reapply the isolation rules
-  if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+  ensure_isolation || exit 1
+  restart_allowed=1
 fi
 if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL gitlab-runner upgrade failed, see ${LOG}"
+  exit 1
+fi
+if ! can_restart_services; then
+  note "FAIL refusing to restart CI services without active isolation"
   exit 1
 fi
 systemctl start gitlab-runner || true
@@ -3859,6 +3949,12 @@ if [[ -n "$bad" ]]; then
   exit 1
 fi
 note "OK upgraded ${installed[*]}; was: ${before}"
+
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/runner-engine-update.sh"
 
@@ -16039,15 +16135,83 @@ LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable fo
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
+LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
 note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+
+# Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
+probe_failed() {
+  local command=$1 rc=$2 output=$3
+  if [[ -n "$output" ]]; then
+    printf '%s failed (exit %s):\n%s\n' "$command" "$rc" "$output" >&2
+  else
+    printf '%s failed (exit %s)\n' "$command" "$rc" >&2
+  fi
+}
+pending_dnf() {
+  local output rc
+  if output=$(dnf -q check-update "$@" 2>&1); then rc=0; else rc=$?; fi
+  case $rc in
+    0) return 1 ;;
+    100) return 0 ;;
+    *) probe_failed 'dnf -q check-update' "$rc" "$output"; return 2 ;;
+  esac
+}
+pending_apt() {
+  local output rc
+  if output=$(apt-get update -q --error-on=any 2>&1); then :; else
+    rc=$?; probe_failed 'apt-get update -q' "$rc" "$output"; return 2
+  fi
+  if output=$(apt-get -s install --only-upgrade "$@" 2>&1); then :; else
+    rc=$?; probe_failed 'apt-get -s install --only-upgrade' "$rc" "$output"; return 2
+  fi
+  if grep -q '^Inst ' <<<"$output"; then return 0; fi
+  return 1
+}
+ensure_isolation() {
+  if ! systemctl cat ci-job-isolation.service >/dev/null 2>&1; then
+    note "FAIL ci-job-isolation.service missing; refusing to restart CI services"
+    return 1
+  fi
+  if ! systemctl restart ci-job-isolation.service; then
+    note "FAIL ci-job-isolation.service restart failed; refusing to restart CI services"
+    return 1
+  fi
+  if ! systemctl is-active --quiet ci-job-isolation.service; then
+    note "FAIL ci-job-isolation.service is not active after restart; refusing to restart CI services"
+    return 1
+  fi
+}
+can_restart_services() {
+  (( restart_allowed )) || return 1
+  if (( isolation_required )) && ! systemctl is-active --quiet ci-job-isolation.service; then
+    restart_allowed=0
+    note "FAIL ci-job-isolation.service is no longer active; refusing to restart CI services"
+    return 1
+  fi
+}
+ctl_back() {
+  if (( ctl_stopped )) && can_restart_services; then
+    systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true
+  fi
+}
+runner_back() {
+  if can_restart_services; then
+    systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true
+    ctl_back
+  fi
+}
+cleanup_services() {
+  if (( runner_stopped )); then runner_back; fi
+}
+main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
   exit 0
 fi
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-exec 9>/run/runner-engine-update.lock
+exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
 # A docker error is not "no jobs".
 job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
@@ -16063,17 +16227,25 @@ installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
   upgrade() { dnf -y -q upgrade "$@"; }
-  pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
 elif command -v apt-get >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
   upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "$@"; }
-  pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
 else
   note "FAIL no supported package manager"
   exit 1
 fi
 (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
-if ! pending; then
+has_updates=0 probe_rc=0
+if command -v dnf >/dev/null 2>&1; then
+  if pending_dnf "${installed[@]}"; then has_updates=1; else probe_rc=$?; fi
+else
+  if pending_apt "${installed[@]}"; then has_updates=1; else probe_rc=$?; fi
+fi
+if [[ ${probe_rc:-1} -eq 2 ]]; then
+  note "FAIL package update probe failed; no packages or services changed"
+  exit 1
+fi
+if [[ ${has_updates:-0} -ne 1 ]]; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
@@ -16084,11 +16256,9 @@ if [[ "$DRY_RUN" == 1 ]]; then
   exit 0
 fi
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
-# From here whatever happens: start the runner again.
-runner_stopped=0 ctl_stopped=0
-ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
-trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
+# From here, EXIT cleanup restarts only services that this run stopped and is allowed to restore.
+runner_stopped=0 ctl_stopped=0 restart_allowed=1 isolation_required=0
+trap cleanup_services EXIT
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
 # SIGQUIT = graceful stop (jobs finish). Returns 1 when still running after STOP_WAIT.
 stop_runner_wait() {
@@ -16120,6 +16290,11 @@ if ! no_jobs; then
   note "SKIP a CI job appeared or docker does not answer after the runner stopped; will retry next week"
   exit 0
 fi
+# The package transaction can restart Docker and alter its firewall before our explicit restart.
+if (( ${#docker_pkgs[@]} )); then
+  restart_allowed=0
+  isolation_required=1
+fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
@@ -16137,13 +16312,24 @@ if ! no_jobs; then
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
-  systemctl restart docker
+  # Docker's restart can clear the job firewall rules. Keep both CI services down
+  # unless isolation is present, restarts successfully, and is active afterward.
+  restart_allowed=0
+  isolation_required=1
+  if ! systemctl restart docker; then
+    note "FAIL Docker restart failed; CI services left stopped"
+    exit 1
+  fi
   sleep 5
-  # reapply the isolation rules
-  if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+  ensure_isolation || exit 1
+  restart_allowed=1
 fi
 if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL gitlab-runner upgrade failed, see ${LOG}"
+  exit 1
+fi
+if ! can_restart_services; then
+  note "FAIL refusing to restart CI services without active isolation"
   exit 1
 fi
 systemctl start gitlab-runner || true
@@ -16156,6 +16342,12 @@ if [[ -n "$bad" ]]; then
   exit 1
 fi
 note "OK upgraded ${installed[*]}; was: ${before}"
+
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/runner-engine-update.sh"
 
@@ -23217,15 +23409,83 @@ LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable fo
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
+LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
 note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+
+# Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
+probe_failed() {
+  local command=$1 rc=$2 output=$3
+  if [[ -n "$output" ]]; then
+    printf '%s failed (exit %s):\n%s\n' "$command" "$rc" "$output" >&2
+  else
+    printf '%s failed (exit %s)\n' "$command" "$rc" >&2
+  fi
+}
+pending_dnf() {
+  local output rc
+  if output=$(dnf -q check-update "$@" 2>&1); then rc=0; else rc=$?; fi
+  case $rc in
+    0) return 1 ;;
+    100) return 0 ;;
+    *) probe_failed 'dnf -q check-update' "$rc" "$output"; return 2 ;;
+  esac
+}
+pending_apt() {
+  local output rc
+  if output=$(apt-get update -q --error-on=any 2>&1); then :; else
+    rc=$?; probe_failed 'apt-get update -q' "$rc" "$output"; return 2
+  fi
+  if output=$(apt-get -s install --only-upgrade "$@" 2>&1); then :; else
+    rc=$?; probe_failed 'apt-get -s install --only-upgrade' "$rc" "$output"; return 2
+  fi
+  if grep -q '^Inst ' <<<"$output"; then return 0; fi
+  return 1
+}
+ensure_isolation() {
+  if ! systemctl cat ci-job-isolation.service >/dev/null 2>&1; then
+    note "FAIL ci-job-isolation.service missing; refusing to restart CI services"
+    return 1
+  fi
+  if ! systemctl restart ci-job-isolation.service; then
+    note "FAIL ci-job-isolation.service restart failed; refusing to restart CI services"
+    return 1
+  fi
+  if ! systemctl is-active --quiet ci-job-isolation.service; then
+    note "FAIL ci-job-isolation.service is not active after restart; refusing to restart CI services"
+    return 1
+  fi
+}
+can_restart_services() {
+  (( restart_allowed )) || return 1
+  if (( isolation_required )) && ! systemctl is-active --quiet ci-job-isolation.service; then
+    restart_allowed=0
+    note "FAIL ci-job-isolation.service is no longer active; refusing to restart CI services"
+    return 1
+  fi
+}
+ctl_back() {
+  if (( ctl_stopped )) && can_restart_services; then
+    systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true
+  fi
+}
+runner_back() {
+  if can_restart_services; then
+    systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true
+    ctl_back
+  fi
+}
+cleanup_services() {
+  if (( runner_stopped )); then runner_back; fi
+}
+main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: $0 [--dry-run]   upgrades ${PKGS[*]} when no CI job runs"
   exit 0
 fi
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-exec 9>/run/runner-engine-update.lock
+exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
 # A docker error is not "no jobs".
 job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
@@ -23241,17 +23501,25 @@ installed=()
 if command -v dnf >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && installed+=("$p"); done
   upgrade() { dnf -y -q upgrade "$@"; }
-  pending() { dnf -q check-update "${installed[@]}" >/dev/null 2>&1; [[ $? -eq 100 ]]; }
 elif command -v apt-get >/dev/null 2>&1; then
   for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 && installed+=("$p"); done
   upgrade() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade "$@"; }
-  pending() { apt-get update -q >/dev/null 2>&1; apt-get -s install --only-upgrade "${installed[@]}" 2>/dev/null | grep -q '^Inst '; }
 else
   note "FAIL no supported package manager"
   exit 1
 fi
 (( ${#installed[@]} )) || { note "SKIP none of the packages is installed"; exit 0; }
-if ! pending; then
+has_updates=0 probe_rc=0
+if command -v dnf >/dev/null 2>&1; then
+  if pending_dnf "${installed[@]}"; then has_updates=1; else probe_rc=$?; fi
+else
+  if pending_apt "${installed[@]}"; then has_updates=1; else probe_rc=$?; fi
+fi
+if [[ ${probe_rc:-1} -eq 2 ]]; then
+  note "FAIL package update probe failed; no packages or services changed"
+  exit 1
+fi
+if [[ ${has_updates:-0} -ne 1 ]]; then
   note "OK nothing to upgrade (${installed[*]})"
   exit 0
 fi
@@ -23262,11 +23530,9 @@ if [[ "$DRY_RUN" == 1 ]]; then
   exit 0
 fi
 before=$(for p in "${installed[@]}"; do if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' "$p"; else dpkg-query -W -f='${Package}-${Version} ' "$p"; fi; done)
-# From here whatever happens: start the runner again.
-runner_stopped=0 ctl_stopped=0
-ctl_back() { if (( ctl_stopped )); then systemctl start --no-block github-runner-ctl >/dev/null 2>&1 || true; fi; }
-runner_back() { systemctl start --no-block gitlab-runner >/dev/null 2>&1 || true; ctl_back; }
-trap '[[ $runner_stopped -eq 1 ]] && runner_back' EXIT
+# From here, EXIT cleanup restarts only services that this run stopped and is allowed to restore.
+runner_stopped=0 ctl_stopped=0 restart_allowed=1 isolation_required=0
+trap cleanup_services EXIT
 runner_state() { systemctl show -p ActiveState --value gitlab-runner 2>/dev/null || echo unknown; }
 # SIGQUIT = graceful stop (jobs finish). Returns 1 when still running after STOP_WAIT.
 stop_runner_wait() {
@@ -23298,6 +23564,11 @@ if ! no_jobs; then
   note "SKIP a CI job appeared or docker does not answer after the runner stopped; will retry next week"
   exit 0
 fi
+# The package transaction can restart Docker and alter its firewall before our explicit restart.
+if (( ${#docker_pkgs[@]} )); then
+  restart_allowed=0
+  isolation_required=1
+fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL Docker package upgrade failed, see ${LOG}"
   exit 1
@@ -23315,13 +23586,24 @@ if ! no_jobs; then
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
-  systemctl restart docker
+  # Docker's restart can clear the job firewall rules. Keep both CI services down
+  # unless isolation is present, restarts successfully, and is active afterward.
+  restart_allowed=0
+  isolation_required=1
+  if ! systemctl restart docker; then
+    note "FAIL Docker restart failed; CI services left stopped"
+    exit 1
+  fi
   sleep 5
-  # reapply the isolation rules
-  if systemctl cat ci-job-isolation.service >/dev/null 2>&1; then systemctl restart ci-job-isolation.service || bad+=" ci-job-isolation"; fi
+  ensure_isolation || exit 1
+  restart_allowed=1
 fi
 if (( ${#runner_pkgs[@]} )) && ! upgrade "${runner_pkgs[@]}" >>"$LOG" 2>&1; then
   note "FAIL gitlab-runner upgrade failed, see ${LOG}"
+  exit 1
+fi
+if ! can_restart_services; then
+  note "FAIL refusing to restart CI services without active isolation"
   exit 1
 fi
 systemctl start gitlab-runner || true
@@ -23334,6 +23616,12 @@ if [[ -n "$bad" ]]; then
   exit 1
 fi
 note "OK upgraded ${installed[*]}; was: ${before}"
+
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
 __SIC_EOF__
 chmod 755 "$R/runner/scripts/runner-engine-update.sh"
 

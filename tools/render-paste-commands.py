@@ -40,8 +40,8 @@ class Block:
     skip: frozenset[str] = frozenset()
 
 
-# Never copied onto the runner host: the separate AI server installs it (its compose file is not embedded either).
-EXCLUDE = {"server/install-ai.sh", "common/README.md"}
+# Render input only; never copied to the runner host or included in paste commands.
+EXCLUDE = {"runner/scripts/runner-engine-update.sh.gz", "server/install-ai.sh", "common/README.md"}
 
 
 def expand(paths: list[str]) -> list[str]:

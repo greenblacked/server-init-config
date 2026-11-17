@@ -15,6 +15,8 @@ Usage: tools/test-cloud-init.py [FILE ...]   (default: every generated cloud-ini
 
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 import os
 import re
@@ -22,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import zlib
 import tempfile
 import time
 from pathlib import Path
@@ -148,6 +151,18 @@ def test_file(rel: str) -> None:
 
     for f in data.get("write_files", []):
         p, content = f["path"], f.get("content", "")
+        if f.get("encoding") == "gzip+base64":
+            try:
+                compressed = base64.b64decode(content.strip(), validate=True)
+                source = ROOT / "runner/scripts/runner-engine-update.sh"
+                canonical = source.with_name(source.name + ".gz").read_bytes()
+                check(compressed == canonical, f"{p} gzip payload matches canonical asset")
+                content = gzip.decompress(compressed).decode()
+                check(p == "/usr/local/bin/runner-engine-update.sh" and content == source.read_text(),
+                      f"{p} gzip+base64 content matches its source")
+            except (ValueError, OSError, UnicodeDecodeError, zlib.error) as e:
+                check(False, f"{p} gzip+base64 content decodes", str(e))
+                content = ""
         if p.endswith(".json"):
             try:
                 json.loads(content)
