@@ -1,233 +1,128 @@
-# server-init-config
+# Server Init Config
 
-Set up and look after Hetzner Cloud servers: a plain hardened server, or a GitLab Runner host. Everything is run from your laptop over SSH; the repo is streamed to the server with `git archive` by default (nothing is cloned there, no credential goes there); cloning it on the server also works: `git clone https://github.com/greenblacked/server-init-config`. Root keeps key login on port 22 throughout, so none of this can lock you out.
+Provision and maintain Hetzner Cloud hosts from a local Git checkout. Choose a hardened Linux server or a dedicated GitLab Runner host with Docker, monitoring, logging, and caches.
 
-## Guides
+[Choose a host](#choose-a-host) · [Provision](#provision-a-host) · [Operate and recover](#operate-and-recover) · [Validate changes](#validate-changes)
 
-- [Plain servers](server/README.md): supported systems, bootstrap, maintenance.
-- [Runner hosts](runner/README.md): GitLab setup, caches, monitoring, updates.
-- [Optional GitHub Actions runner](runner/docs/github-runner.md): trusted private repositories, GitHub App setup, limitations.
-- [Copy-paste installation blocks](runner/COMMANDS.md): generated alternative to a repository checkout.
-- [CI reference](docs/ci.md): workflow coverage and local checks.
+## Choose a host
 
-## Which one do I need?
+Cloud config goes in **Cloud config** when creating a Hetzner server. It is optional for plain servers. Runner hosts start with a runner cloud-init file.
 
-| Goal | OS | Cloud config (optional, paste when creating the server) | First command, on your laptop in the repo root |
-|---|---|---|---|
-| Plain server | Fedora 44 | `server/cloud-init/server-fedora.yaml` | `server/bootstrap.sh SERVER_IP` |
-| Plain server | CentOS Stream 10, Rocky 10, AlmaLinux 10 | `server/cloud-init/server-el10.yaml` | `server/bootstrap.sh SERVER_IP` |
-| Plain server | Ubuntu 26.04, Debian 13 (also the Hetzner Apps images) | `server/cloud-init/server-debian.yaml` | `server/bootstrap.sh SERVER_IP` |
-| Plain server | openSUSE Leap 16 | `server/cloud-init/server-opensuse.yaml` | `server/bootstrap.sh SERVER_IP` |
-| GitLab Runner host | Rocky Linux 10 (ARM64 or x86_64) | `runner/cloud-init/rocky-clean.yaml` (recommended) or `rocky.yaml` | `runner/bootstrap.sh SERVER_IP` |
-| GitLab Runner host | Debian 13 (ARM64 or x86_64) | `runner/cloud-init/debian.yaml` | `runner/bootstrap.sh SERVER_IP` |
+| Host | Operating system | Cloud config | Bootstrap |
+| --- | --- | --- | --- |
+| Plain server | Fedora 44 | [server-fedora.yaml](server/cloud-init/server-fedora.yaml) | `server/bootstrap.sh` |
+| Plain server | CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 | [server-el10.yaml](server/cloud-init/server-el10.yaml) | `server/bootstrap.sh` |
+| Plain server | Ubuntu 26.04, Debian 13, Hetzner Apps based on Ubuntu 24.04 | [server-debian.yaml](server/cloud-init/server-debian.yaml) | `server/bootstrap.sh` |
+| Plain server | openSUSE Leap 16 | [server-opensuse.yaml](server/cloud-init/server-opensuse.yaml) | `server/bootstrap.sh` |
+| Runner host | Rocky Linux 10 | [rocky-clean.yaml](runner/cloud-init/rocky-clean.yaml) (recommended for ARM64 and x86-64), [rocky.yaml](runner/cloud-init/rocky.yaml) for ARM64, [rocky-x86.yaml](runner/cloud-init/rocky-x86.yaml) for x86-64 | `runner/bootstrap.sh` |
+| Runner host | Debian 13 | [debian.yaml](runner/cloud-init/debian.yaml) for ARM64, [debian-x86.yaml](runner/cloud-init/debian-x86.yaml) for x86-64 | `runner/bootstrap.sh` |
 
-x86 servers use `rocky-x86.yaml` or `debian-x86.yaml`; then set the tags in `runner/ci/*.yml` to your x86 tag instead of `arm64`. The Cloud config is optional for plain servers: `server/bootstrap.sh` works on a fresh image too. It is user-data for cloud-init, never paste it into a terminal.
+See the [plain-server guide](server/README.md) for OS differences and [Hetzner Apps behavior](server/README.md#hetzner-apps-images). The [runner guide](runner/README.md#which-init-file) explains what each image configures on first boot, including SELinux on Rocky.
 
-## 60-second quick start
+## Provision a host
 
-Before either path, in the Hetzner Console: add your SSH key, and in the Cloud Firewall allow inbound TCP 22 from your IP only. The first connection needs the host key accepted once (the scripts never auto-accept keys).
+Create the VM with your SSH public key. Restrict inbound TCP 22 in the Hetzner Cloud Firewall to your management IP or network. Add application ports only where the workload requires them.
 
-**Plain server.** Accept the host key (laptop, any directory), then bootstrap (laptop, repo root):
+Clone the repository on your workstation. Use the same revision for the VM's cloud config and the bootstrap.
 
 ```bash
-ssh root@SERVER_IP true
+git clone https://github.com/greenblacked/server-init-config.git
+cd server-init-config
 ```
+
+Open an interactive root session in a separate terminal. Replace `SERVER_IP` with the new server's address. Before accepting the SSH host key, compare its fingerprint with the same key type shown in the VM's boot output through the [Hetzner console](https://docs.hetzner.com/cloud/servers/getting-started/vnc-console/). Keep the root session open while you run bootstrap from the local checkout.
+
+```bash
+ssh -o StrictHostKeyChecking=ask root@SERVER_IP
+```
+
+Use a clean checkout of the commit you intend to deploy. Bootstrap waits for cloud-init and streams files from Git `HEAD` over SSH to `/root/server-init-config`. The streamed copy has no `.git` directory and requires no Git credentials on the host. Run either script with `--dry-run` to see its plan.
+
+### Plain server
 
 ```bash
 server/bootstrap.sh SERVER_IP
 ```
 
-It waits for cloud-init, copies `server/` and `common/`, runs the init for the detected OS (admin user `ops`, SSH keys only, firewall, fail2ban, automatic security updates, Docker, swap), installs `health` and, on Fedora and EL, `srv` with the timers, and ends with `health`. Then test the admin login from a second terminal (laptop, any directory):
+The bootstrap selects the init script from `/etc/os-release`, configures the `ops` admin user, key-only SSH, firewall, fail2ban, security updates, and Docker, then runs the health report. Read the [plain-server setup guide](server/README.md#set-up-a-server) before setting extra ports or customizing an existing host.
 
-```bash
-ssh ops@SERVER_IP 'sudo -n true && echo ok'
-```
+### GitLab Runner host
 
-**Runner host.** Create the runner in GitLab first (Settings, CI/CD, Runners, New runner) and keep the `glrt-` token ready. Then (laptop, repo root):
+Create the runner in GitLab, choose its tags, and keep the `glrt-` authentication token available for the registration prompt. Keep the token out of Cloud config and shell arguments.
 
 ```bash
 runner/bootstrap.sh SERVER_IP
 ```
 
-It installs the users, admin tools, health and cleanup, registers the runner (you type the token at the prompt on the server, it never goes into a command line), the Docker Hub cache, monitoring, logging and the npm and shared caches, and ends with `health`. An opt-in GitHub Actions runner for your private repositories (GitHub App, one ephemeral runner per job) is described in [runner/README.md](runner/README.md#github-actions-runner-private-repositories). Run `runner/ci/smoke.yml` in a project: the log must show `on <runner description>` and `aarch64` (`x86_64` on x86). Close root SSH only after the `ops` login works: see [runner/README.md](runner/README.md#close-root-ssh).
+Verify the runner is online in GitLab. Add the job from [smoke.yml](runner/ci/smoke.yml) to a trusted project's `.gitlab-ci.yml` and set `tags` to match the intended runner. Use a dedicated tag if other runners could pick up the job. Run the pipeline and check the job log for the expected runner and `uname -m` output (`aarch64` or `x86_64`). See the [runner setup guide](runner/README.md#build-one) for the full sequence.
 
-Rerunning either bootstrap is safe. Options: `--help`.
+### Confirm access and health
 
-## What it changes
-
-| Area | Plain server | Runner host |
-|---|---|---|
-| SSH | keys only, root by key on port 22 | keys only, only the `ssh-users` group, root by key until you lock it |
-| Users | admin `ops` with sudo | `ops` (sudo), service accounts `gitlab-runner` and `monitoring` without login |
-| Firewall | firewalld (RHEL family, openSUSE, Fedora) or ufw (Ubuntu, Debian): only SSH and your `EXTRA_PORTS`; SSH is saved before the firewall starts | firewalld (Rocky) or ufw (Debian) with only SSH open, set by `setup.sh --firewall` (the bootstrap runs it; `--no-firewall` skips it); also use the Hetzner Cloud Firewall |
-| Brute force | fail2ban for SSH (5 failures in 10 minutes, 1 hour ban) | the same, installed with the firewall step |
-| Updates | daily security updates, no automatic reboot | same (dnf-automatic or unattended-upgrades), plus a weekly upgrade of Docker CE and GitLab Runner that runs only while no job runs |
-| Docker | Docker Engine and Compose (distro packages on openSUSE) | Docker Engine, GitLab Runner (docker executor), `concurrent = 2` |
-| Extras | swap if none, sysctl tuning and kernel hardening, core dumps off, journald limit, time sync, weekly cleanup (not on Ubuntu or Debian), admin tools, shell history with fzf, optional `server/lock-root.sh` | Docker Hub cache, monitoring, logging, npm and shared caches, weekly cleanup, disk guard at 85%, kernel hardening, core dumps off, per-job CPU, memory and process limits, CI jobs blocked from the cloud metadata address and from host services |
-| SELinux | as the image has it | enforcing on Rocky (`rocky.yaml` sets it at boot, `rocky-clean.yaml` leaves it to `setup.sh --selinux`) |
-
-## Daily use
-
-On the server, as `ops`, any directory:
+Keep the original SSH session open until you have tested `ops` in a second terminal and confirmed recovery console access. Review warnings in the health report before proceeding. `health -q` returns 0 for healthy, 1 for warnings, and 2 for failures.
 
 ```bash
-health -q
+ssh ops@SERVER_IP 'sudo -n true && health -q'
 ```
 
-`health` is the one report for system, security, firewall, services, containers and trends (full report 10 to 40 seconds; exit code 0 ok, 1 warnings, 2 failures). It re-runs itself through sudo when that needs no password.
+Root SSH by key remains available through provisioning. If you choose to close it, follow the [plain-server](server/README.md#close-root-ssh-optional) or [runner](runner/README.md#close-root-ssh) procedure after verifying access.
 
-On runner hosts, freshness and drift checks report changes without applying them:
+## Operate and recover
 
-```bash path=null start=null
-freshness --check
-sudo config-drift --check
-```
+| Task | Plain server | Runner host |
+| --- | --- | --- |
+| Check health | `health -q`. Fedora and EL also have `srv status` and `srv timers`. | `health -q`, `freshness --check`, and `sudo config-drift --check`. |
+| Apply changes | Review the [update procedure](server/README.md#update) and the existing `/etc/server-init.conf` before rerunning bootstrap. | Follow the [runner update procedure](runner/README.md#update). Use the preview command below. |
+| Recover | Open the Hetzner console if SSH is unavailable. See [plain-server rollback](server/README.md#roll-back) for restoring settings or disabling maintenance timers. | Use the rollback command below to restore repo-managed files. For Grafana data, follow the [Grafana recovery procedure](runner/README.md#grafana-upgrade-and-rollback). |
+When using the streamed copy, update it from your workstation. `runner/update.sh --pull` requires a Git clone on the host. Before changing a production machine, record the deployed commit and make sure backups cover the persistent data and configuration you need to recover. If root SSH is closed, pass `--user ops` when running bootstrap from your workstation.
 
-The daily `server-freshness.timer` refreshes the cached report; `sudo freshness --refresh`
-does it on demand. Refreshing checks package metadata and public image tags, never
-upgrades packages, pulls images, or restarts services. `health` reads the cache only.
-The first report needs a completed refresh. Image candidates are a bounded tag
-sample, not a security, compatibility, or EOL guarantee. See
-[freshness and drift](runner/README.md#check-only-freshness-and-configuration-drift)
-for scope and exit codes.
-
-On Fedora and EL plain servers, `srv` is the single entry point (`srv status`, `srv update`, `srv clean`, `srv logs`, `srv timers`), and the admin sees a 7-line summary at login: load, disk, memory, firewall, banned IPs, pending updates and reboot, last update and cleanup. On Ubuntu, Debian and openSUSE use `health` and the init's own timers. On runner hosts, aliases:
-
-| Alias | Does |
-|---|---|
-| `health` | `sudo health` |
-| `runner-logs`, `runner-errors` | follow the runner log, errors of the last 30 minutes |
-| `runner-jobs` | running job containers: name and status |
-| `runner-metrics` | runner metrics from `127.0.0.1:9252` |
-| `dfd`, `dstats` | disk use incl. Docker, container stats |
-
-## Update and clean
-
-Updating means: stream the new repo state, then apply it. Laptop, repo root:
+On a runner host, preview the update as `ops`.
 
 ```bash
-server/bootstrap.sh SERVER_IP
+sudo bash -c 'cd /root/server-init-config && runner/update.sh --dry-run'
 ```
 
-For a runner host, run `runner/bootstrap.sh SERVER_IP` instead, then (laptop, any directory):
-
-```bash
-ssh ops@SERVER_IP 'sudo bash -c "cd /root/server-init-config && runner/update.sh --dry-run"'
-ssh ops@SERVER_IP 'sudo bash -c "cd /root/server-init-config && runner/update.sh"'
-```
-
-`update.sh` backs up every file it changes, restores them if a check fails, and skips steps that would interrupt CI while jobs run (exit code 3, rerun later). With the default streaming install do not use `update.sh --pull`: the server has no git clone. After a `git clone` of the public repo `--pull` works without a credential. Cleanup runs weekly by itself; to run it now: `srv clean` or `sudo server-cleanup` (plain servers on Fedora, EL and openSUSE), `sudo bash /root/server-init-config/server/server-cleanup.sh` (Ubuntu and Debian), `sudo runner-weekly-cleanup.sh` (runner). Add `--dry-run` to any of them to preview.
-
-## Roll back
-
-On a plain server every step is a file you can undo: settings are in `/etc/server-init.conf`, `UPDATE_SCHEDULE=off` gives the updates back to the distro timer, and `sudo systemctl disable --now server-update.timer server-cleanup.timer` stops the maintenance timers. A bad firewall rule is fixed from the Hetzner web console. On a runner host (server, as `ops`, any directory), restore the files `update.sh` changed from the newest backup:
+To restore the latest backup of repo-managed files, use the runner rollback command.
 
 ```bash
 sudo bash -c 'cd /root/server-init-config && runner/update.sh --rollback'
 ```
 
-Restore the runner configuration from its newest backup (server, as root via `sudo -i`, any directory):
+Exit code `3` means one or more steps were skipped. Check the updater summary before retrying. Causes include active CI jobs and an installed npm cache without a `docker0` IPv4 address.
+
+### Troubleshooting
+
+If bootstrap stops while waiting for cloud-init, run `cloud-init status --long` and inspect `/var/log/cloud-init-output.log` on the VM. Confirm first boot has finished before retrying, including any reboot scheduled by the cloud config.
+
+| Host | Bootstrap log | Guide |
+| --- | --- | --- |
+| Plain server | `/var/log/server-init-failed.log` | [Troubleshoot a plain server](server/README.md#troubleshooting) |
+| Runner host | `/var/log/ci-bootstrap-failed.log` | [Troubleshoot a runner host](runner/README.md#troubleshooting) |
+
+### Runner trust boundary
+
+Attach only trusted projects to the runner. Projects share caches. Runner job isolation applies to IPv4 Docker traffic, and Docker daemon access on the host is root-equivalent. The logging stack's Alloy collector also has direct Docker socket access. Treat its image and configuration as privileged infrastructure. Keep monitoring endpoints private where possible, and use the Cloud Firewall to control any service ports published by Docker. The [runner security notes](runner/README.md#security-notes) cover these settings in more detail.
+
+## Validate changes
+
+Edit the [cloud-init templates for servers](server/cloud-init/templates) or [runners](runner/cloud-init/templates) and regenerate their YAML when inputs change. Regenerate the copy-paste commands when their installer sources change.
 
 ```bash
-cp -a "$(ls -1t /etc/gitlab-runner/config.toml.bak.* | head -1)" /etc/gitlab-runner/config.toml && chown gitlab-runner:gitlab-runner /etc/gitlab-runner/config.toml && systemctl restart gitlab-runner
-cp -a "$(ls -1t /etc/docker/daemon.json.bak.* | head -1)" /etc/docker/daemon.json && systemctl restart docker
+python3 tools/render-cloud-init.py
+python3 tools/render-paste-commands.py
+tools/ci/lint.sh render
+tools/ci/lint.sh unit
 ```
 
-Plain servers: `sudo bash /root/server-init-config/server/lock-root.sh --unlock-root` (server, as `ops`, any directory).
+See the [CI reference](docs/ci.md) for lint tools, Linux/container checks, VM coverage, and local equivalents. Test provisioning on a disposable VM that matches the production OS and architecture before applying code changes to an in-use host.
 
-Reopen root SSH after you locked it on a runner host (server, as `ops` or root, any directory):
+## More guides
 
-```bash
-sudo bash /root/server-init-config/runner/install/users.sh --unlock-root
-```
-
-Stop a stack without deleting data: `sudo docker compose -f /opt/monitoring/docker-compose.yml down` (also `/opt/logging`, `/opt/registry-cache`, `/opt/npm-cache`). Never add `-v` unless you want its data volumes deleted for good.
-
-## Troubleshooting
-
-| Symptom | Cause and fix |
-|---|---|
-| `Connection timed out` | The Hetzner Cloud Firewall has no inbound rule for TCP 22 from your current IP. Fix the rule in the Console; it applies at once. |
-| `Permission denied (publickey)` as `ops` | The key was not copied or you use another key. Plain server: log in as root and rerun `server/bootstrap.sh`; it copies root's keys again. Runner host: rerunning `runner/bootstrap.sh` does not (the users step counts as installed and is skipped); as root run `bash /root/server-init-config/runner/install/users.sh` on the server, which merges root's keys into `ops`. If root is already locked, use the Hetzner web console. |
-| Connection refused right after many tries | fail2ban banned your IP (1 hour). Unban from the Hetzner web console: `fail2ban-client set sshd unbanip YOUR_IP`. The console asks for the root password, which Hetzner does not set when you add an SSH key: use Rescue, Reset root password in the Console first. Use `IdentitiesOnly yes` in `~/.ssh/config` to stop agents offering many keys. |
-| Cloud config pasted into a terminal gives errors | It is cloud-init user-data. Paste it into the Console field **Cloud config** when creating the server. |
-| `fatal: detected dubious ownership` | A git command ran as root in a directory owned by another user. The server copy has no `.git`; run git on your laptop. |
-| `sudo: health: command not found` | `secure_path` lacks `/usr/local/bin`. Check `sudo cat /etc/sudoers.d/50-secure-path` and `/etc/sudoers.d/90-ops`, or run `sudo /usr/local/bin/health`. |
-| `service user monitoring missing` | The Users step has not run. `sudo bash -c 'cd /root/server-init-config && runner/setup.sh --users'`, then the component again. |
-| Runner aliases: `permission denied ... docker.sock` | You ran `docker` without sudo; `ops` is deliberately not in the `docker` group. The aliases already use sudo; use `sudo docker`. |
-| `SHA1` or `SHA-1` GPG warning on CentOS, Rocky or Alma 10 | Harmless: an old vendor key signature. Packages are still verified. |
-| `Request bottleneck: request_concurrency=1` | Add `request_concurrency = 2` under `[[runners]]` in `/etc/gitlab-runner/config.toml` and restart the runner. |
-| Jobs stay pending | Tags do not match, untagged jobs are not allowed, or an instance runner took them. Compare tags in the job log and runner settings. |
-| `toomanyrequests` pulling an image | Docker Hub rate limit. Install the Docker Hub cache (`runner/setup.sh --registry-cache`). |
-| Disk full | `dfd` on a runner, `srv clean` or `sudo server-cleanup`. The weekly cleanup and the disk guard do this automatically. |
-| A step failed | See `/var/log/server-init-failed.log` (plain server) or `/var/log/ci-bootstrap-failed.log` (runner). Fix the cause and rerun the same command. |
-
-<details>
-<summary>Reference: layout, tools, security</summary>
-
-### Layout
-
-| Path | Purpose |
-|---|---|
-| `runner/` | GitLab Runner host: `cloud-init/` (generated, sources in `templates/`), `install/` (installers, `update.sh`), `scripts/` and `systemd/` (cleanup, disk guard, prewarm), `stacks/` (Compose stacks), `ci/` (`.gitlab-ci.yml` snippets), `setup.sh`, `register.sh`, `update.sh`, `bootstrap.sh`, `COMMANDS.md`. See [runner/README.md](runner/README.md). |
-| `server/` | plain servers: `server-init-*.sh` per OS, `cloud-init/`, maintenance tools (`srv`, update, cleanup, notify, disk guard), `bootstrap.sh`, `ai/`. See [server/README.md](server/README.md). |
-| `common/` | shared: `health`, `shell-history.sh`, `lib.sh`, `admin-tools.sh`, security tools. See [common/README.md](common/README.md). |
-| `tools/` | `render-cloud-init.py`, `render-paste-commands.py` (both with `--check`), `test-cloud-init.py`, `test-server-tools.sh`; `ci/` holds the scripts the GitHub workflows run (see [CI](#ci)) |
-| `other/` | standalone extras, not copied by the bootstrap scripts (each README says how to get it onto a server); `other/torrserver/` installs TorrServer in Docker for streaming only: HTTPS with login on a random port (sslip.io, no domain needed), or localhost, or optional WireGuard (see its README) |
-| `other/lampa-stack/` | Lampa + Lampac (online sources, optional 18+) + TorrServer (streaming) + qBittorrent behind Caddy and Authelia; public HTTPS on a random port (sslip.io, Let's Encrypt) by default, `--local` tunnel or optional `--vpn` WireGuard; every path needs a login or a per-device key; installed by its own `install.sh` (see its README) |
-
-### Supported systems
-
-| OS | Plain server | Runner host |
-|---|---|---|
-| CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 | yes | Rocky 10 |
-| Fedora 44 | yes | no |
-| Ubuntu 26.04 (24.04 for Hetzner Apps images) | yes | no |
-| Debian 13 | yes | yes |
-| openSUSE Leap 16 | yes | no |
-
-All on x86_64 and ARM64. Hetzner Apps images (Ubuntu 24.04 with Coolify, GitLab CE, Nextcloud and others) are detected and keep their own Docker and configuration; only the app's documented ports are added. Details in [server/README.md](server/README.md#hetzner-apps-images).
-
-### Security tools (authorized use only)
-
-`common/security-tools.sh` installs lynis, OpenSCAP, auditd, ssh-audit, testssl, nmap and network tools, trivy, gitleaks and more, plus a `kali` container helper. Use them only against systems you own or are explicitly authorized to test. On Hetzner, scanning or attacking third-party systems violates their terms; check their current policy first. Commands: [server/README.md](server/README.md#security-tools). On a runner host: `setup.sh --security`.
-
-### Runner concurrency
-
-`concurrent = 2` on a CAX11 (2 vCPU, 4 GB): two jobs at once. Registering the runner (or `setup.sh --job-limits`) sets per-job limits by default: 1536 MB memory, 1.5 CPUs, 256 MB shared memory, smaller limits for `services:` containers, and a ceiling on processes and memory for all jobs together. Change them as described in [runner/README.md](runner/README.md#concurrent-jobs-and-limits).
-
-### Changing the repo
-
-Edit the sources, then regenerate and check (laptop, repo root):
-
-```bash
-tools/render-cloud-init.py
-tools/render-paste-commands.py
-tools/render-cloud-init.py --check
-tools/render-paste-commands.py --check
-python3 tools/test-cloud-init.py
-tools/test-server-tools.sh
-```
-
-Generated files (`*/cloud-init/*.yaml`, `runner/COMMANDS.md`) are never edited by hand. Cloud config stays under Hetzner's 32 KiB limit; the test enforces it.
-
-### CI
-
-See [the CI reference](docs/ci.md) for workflow coverage, local equivalents,
-pinned dependencies, and what the tests do not prove. Quick source checks are
-listed under [Changing the repo](#changing-the-repo).
-
-### Security notes
-
-- No tokens or passwords are stored in the repo, in command lines or in logs. The runner token is typed at a prompt; the Grafana password is generated on the server.
-- Never put the runner token in user-data: anything on the server, including job containers, can read it through the metadata service.
-- Ports published by Docker (`-p 8080:80`) bypass firewalld and ufw. Bind to `127.0.0.1` unless the port should be public. The Hetzner Cloud Firewall still filters them.
-- Job containers are not privileged. Membership of the `docker` group is root-equivalent; only `gitlab-runner` has it (and `github-runner`, if the opt-in GitHub Actions runner is installed).
-- `/srv/ci-cache` and the npm cache are shared by every project on the runner: do not attach untrusted projects or forks.
-- Reach Grafana and Prometheus through an SSH tunnel (laptop, any directory): `ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ops@SERVER_IP`.
-
-### Decommission
-
-Delete the runner in GitLab and its deploy tokens. In Hetzner delete the server and its Primary IPv4 (billed separately even when unattached) and any snapshots. Remove DNS records that point at the server.
-
-</details>
+| Guide | What it covers |
+| --- | --- |
+| [Plain servers](server/README.md) | OS-specific setup, SSH, maintenance, recovery, and optional tooling |
+| [Runner hosts](runner/README.md) | GitLab registration, job limits, caching, monitoring, updates, and decommissioning |
+| [GitHub Actions runner](runner/docs/github-runner.md) | Optional ephemeral runners for trusted private repositories |
+| [Copy-paste installer commands](runner/COMMANDS.md) | Generated commands for setups without a local checkout |
+| [Shared files](common/README.md) | Common health, administration, and security tooling |
+| [Local AI](server/README.md#local-ai-separate-server) | Optional Ollama and Open WebUI on a separate server |
+| [TorrServer](other/torrserver/README.md) and [Lampa stack](other/lampa-stack/README.md) | Standalone stacks with their own installation guides |
