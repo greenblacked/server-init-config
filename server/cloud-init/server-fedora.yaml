@@ -97,8 +97,17 @@ write_files:
         if "$@"; then log "ok: ${name}"; else fail "step failed: ${name}"; FAILED_STEPS+=("$name"); fi
       }
 
+      dnf_install() {
+        local i
+        for i in 1 2 3; do
+          dnf -y -q install "$@" && return 0
+          (( i < 3 )) && dnf -q clean metadata && sleep $((i * 5))
+        done
+        return 1
+      }
+
       packages() {
-        dnf -y -q install diffutils tzdata dbus-broker firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
+        dnf_install diffutils tzdata dbus-broker firewalld fail2ban-server fail2ban-firewalld chrony curl ca-certificates || return 1
         # firewall-cmd and timedatectl need the D-Bus system bus; minimal images have none.
         systemctl is-active --quiet dbus.service || systemctl enable --now dbus-broker.service || return 1
         local p
@@ -351,7 +360,7 @@ write_files:
 
       auto_updates() {
         # Fedora 41+ ships dnf5; the automatic plugin is dnf5-plugin-automatic.
-        rpm -q dnf5-plugin-automatic >/dev/null 2>&1 || dnf -y -q install dnf5-plugin-automatic || dnf -y -q install dnf-automatic || return 1
+        rpm -q dnf5-plugin-automatic >/dev/null 2>&1 || dnf_install dnf5-plugin-automatic || dnf_install dnf-automatic || return 1
         install -d /etc/dnf
         cat > /etc/dnf/automatic.conf <<'CONF'
       [commands]
@@ -422,7 +431,7 @@ write_files:
           if ! dnf repolist --enabled 2>/dev/null | grep -q '^docker-ce-stable'; then
             docker_repo || return 1
           fi
-          dnf -y -q install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
+          dnf_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
         fi
         docker_start
       }
