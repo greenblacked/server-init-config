@@ -14,7 +14,7 @@ Cloud config goes in **Cloud config** when creating a Hetzner server. It is opti
 | Plain server | CentOS Stream 10, Rocky Linux 10, AlmaLinux 10 | [server-el10.yaml](server/cloud-init/server-el10.yaml) | `server/bootstrap.sh` |
 | Plain server | Ubuntu 26.04, Debian 13, Hetzner Apps based on Ubuntu 24.04 | [server-debian.yaml](server/cloud-init/server-debian.yaml) | `server/bootstrap.sh` |
 | Plain server | openSUSE Leap 16 | [server-opensuse.yaml](server/cloud-init/server-opensuse.yaml) | `server/bootstrap.sh` |
-| Runner host | Rocky Linux 10 | [rocky-clean.yaml](runner/cloud-init/rocky-clean.yaml) (recommended) or [rocky.yaml](runner/cloud-init/rocky.yaml) for ARM64, [rocky-x86.yaml](runner/cloud-init/rocky-x86.yaml) for x86-64 | `runner/bootstrap.sh` |
+| Runner host | Rocky Linux 10 | [rocky-clean.yaml](runner/cloud-init/rocky-clean.yaml) (recommended for ARM64 and x86-64), [rocky.yaml](runner/cloud-init/rocky.yaml) for ARM64, [rocky-x86.yaml](runner/cloud-init/rocky-x86.yaml) for x86-64 | `runner/bootstrap.sh` |
 | Runner host | Debian 13 | [debian.yaml](runner/cloud-init/debian.yaml) for ARM64, [debian-x86.yaml](runner/cloud-init/debian-x86.yaml) for x86-64 | `runner/bootstrap.sh` |
 
 See the [plain-server guide](server/README.md) for OS differences and [Hetzner Apps behavior](server/README.md#hetzner-apps-images). The [runner guide](runner/README.md#which-init-file) explains what each image configures on first boot, including SELinux on Rocky.
@@ -23,12 +23,17 @@ See the [plain-server guide](server/README.md) for OS differences and [Hetzner A
 
 Create the VM with your SSH public key. Restrict inbound TCP 22 in the Hetzner Cloud Firewall to your management IP or network. Add application ports only where the workload requires them.
 
-Run these commands from your workstation. Replace `SERVER_IP` with the new server's address and verify its SSH host-key fingerprint through the provider console before accepting it.
+Clone the repository on your workstation. Use the same revision for the VM's cloud config and the bootstrap.
 
 ```bash
 git clone https://github.com/greenblacked/server-init-config.git
 cd server-init-config
-ssh root@SERVER_IP true
+```
+
+Open an interactive root session in a separate terminal. Replace `SERVER_IP` with the new server's address. Before accepting the SSH host key, compare its fingerprint with the same key type shown in the VM's boot output through the [Hetzner console](https://docs.hetzner.com/cloud/servers/getting-started/vnc-console/). Keep the root session open while you run bootstrap from the local checkout.
+
+```bash
+ssh -o StrictHostKeyChecking=ask root@SERVER_IP
 ```
 
 Use a clean checkout of the commit you intend to deploy. Bootstrap waits for cloud-init and streams files from Git `HEAD` over SSH to `/root/server-init-config`. The streamed copy has no `.git` directory and requires no Git credentials on the host. Run either script with `--dry-run` to see its plan.
@@ -49,7 +54,7 @@ Create the runner in GitLab, choose its tags, and keep the `glrt-` authenticatio
 runner/bootstrap.sh SERVER_IP
 ```
 
-Verify the runner is online in GitLab and run the [smoke job](runner/ci/smoke.yml) from a trusted project. Match its tags to the registered runner, including the x86 tag when appropriate, and confirm the job log reports the expected runner and architecture. See the [runner setup guide](runner/README.md#build-one) for the full sequence.
+Verify the runner is online in GitLab. Add the job from [smoke.yml](runner/ci/smoke.yml) to a trusted project's `.gitlab-ci.yml` and set `tags` to match the intended runner. Use a dedicated tag if other runners could pick up the job. Run the pipeline and check the job log for the expected runner and `uname -m` output (`aarch64` or `x86_64`). See the [runner setup guide](runner/README.md#build-one) for the full sequence.
 
 ### Confirm access and health
 
@@ -66,11 +71,32 @@ Root SSH by key remains available through provisioning. If you choose to close i
 | Task | Plain server | Runner host |
 | --- | --- | --- |
 | Check health | `health -q`. Fedora and EL also have `srv status` and `srv timers`. | `health -q`, `freshness --check`, and `sudo config-drift --check`. |
-| Apply changes | Review the [update procedure](server/README.md#update) and the existing `/etc/server-init.conf` before rerunning bootstrap. | Follow the [runner update procedure](runner/README.md#update). Preview with `runner/update.sh --dry-run` from the on-host copy at `/root/server-init-config`. Exit 3 means CI-affecting work was deferred because jobs were active. |
-| Recover | Open the Hetzner console if SSH is unavailable. See [plain-server rollback](server/README.md#roll-back) for restoring settings or disabling maintenance timers. | `runner/update.sh --rollback` restores files backed up by the updater. Review the [runner update procedure](runner/README.md#update) for its scope. |
-| Diagnose bootstrap failures | Read `/var/log/server-init-failed.log` and the [troubleshooting guide](server/README.md#troubleshooting). | Read `/var/log/ci-bootstrap-failed.log` and the [troubleshooting guide](runner/README.md#troubleshooting). |
+| Apply changes | Review the [update procedure](server/README.md#update) and the existing `/etc/server-init.conf` before rerunning bootstrap. | Follow the [runner update procedure](runner/README.md#update). Use the preview command below. |
+| Recover | Open the Hetzner console if SSH is unavailable. See [plain-server rollback](server/README.md#roll-back) for restoring settings or disabling maintenance timers. | Use the rollback command below to restore repo-managed files. For Grafana data, follow the [Grafana recovery procedure](runner/README.md#grafana-upgrade-and-rollback). |
+When using the streamed copy, update it from your workstation. `runner/update.sh --pull` requires a Git clone on the host. Before changing a production machine, record the deployed commit and make sure backups cover the persistent data and configuration you need to recover. If root SSH is closed, pass `--user ops` when running bootstrap from your workstation.
 
-When using the streamed copy, update it from your workstation. `runner/update.sh --pull` requires a Git clone on the host. Before changing a production machine, record the deployed commit and make sure backups cover the persistent data and configuration you need to recover.
+On a runner host, preview the update as `ops`.
+
+```bash
+sudo bash -c 'cd /root/server-init-config && runner/update.sh --dry-run'
+```
+
+To restore the latest backup of repo-managed files, use the runner rollback command.
+
+```bash
+sudo bash -c 'cd /root/server-init-config && runner/update.sh --rollback'
+```
+
+Exit code `3` means one or more steps were skipped. Check the updater summary before retrying. Causes include active CI jobs and an installed npm cache without a `docker0` IPv4 address.
+
+### Troubleshooting
+
+If bootstrap stops while waiting for cloud-init, run `cloud-init status --long` and inspect `/var/log/cloud-init-output.log` on the VM. Confirm first boot has finished before retrying, including any reboot scheduled by the cloud config.
+
+| Host | Bootstrap log | Guide |
+| --- | --- | --- |
+| Plain server | `/var/log/server-init-failed.log` | [Troubleshoot a plain server](server/README.md#troubleshooting) |
+| Runner host | `/var/log/ci-bootstrap-failed.log` | [Troubleshoot a runner host](runner/README.md#troubleshooting) |
 
 ### Runner trust boundary
 
