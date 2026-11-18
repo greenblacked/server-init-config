@@ -42,6 +42,18 @@ gitlab-runner register --non-interactive \
   --docker-volumes "/cache" >/dev/null
 unset token
 
+# Local /cache does not need a distributed adapter with an empty Type.
+cache_tmp=$(mktemp "${CFG}.local-cache.XXXXXX")
+chmod 600 "$cache_tmp"
+trap 'rm -f "$cache_tmp"' EXIT
+awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
+if ! cmp -s "$CFG" "$cache_tmp"; then
+  backup "$CFG"
+  cat "$cache_tmp" > "$CFG"
+fi
+rm -f "$cache_tmp"
+trap - EXIT
+
 if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
