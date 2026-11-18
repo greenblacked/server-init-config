@@ -23,13 +23,13 @@ done
 install -d -m 0755 /etc/server-freshness
 printf '%s\n' "$REPO_ROOT" | install -m 0644 /dev/stdin /etc/server-freshness/repo
 restorecon_if -R /etc/server-freshness
-for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
+for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh h2ci-telegram-notify; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer h2ci-telegram-notify@.service; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done

@@ -2,6 +2,8 @@
 Description=Emergency disk cleanup when usage is high
 After=docker.service
 
+OnFailure=h2ci-telegram-notify@runner-disk-guard.service
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/runner-disk-guard.sh

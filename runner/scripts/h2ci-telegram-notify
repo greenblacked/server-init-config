@@ -1,0 +1,60 @@
+#!/usr/bin/python3
+"""Send a fixed monitor event using credentials supplied by systemd."""
+
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import sys
+from urllib.parse import urlencode
+
+EVENTS = {
+    "disk-threshold": "Root filesystem reached the disk guard threshold; emergency cleanup triggered.",
+    "runner-disk-guard": "Disk guard failed. Check: journalctl -u runner-disk-guard.service",
+    "server-freshness": "Freshness check failed. Check: journalctl -u server-freshness.service",
+    "test": "TEST: systemd monitor alert delivery verified.",
+}
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in EVENTS:
+        print("Unknown Telegram alert event", file=sys.stderr)
+        return 2
+    event = sys.argv[1]
+    try:
+        credential = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "telegram.credentials"
+        token, chat_id = credential.read_text(encoding="ascii").splitlines()
+        if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token) or not re.fullmatch(r"-?[0-9]+", chat_id):
+            print("Invalid Telegram credentials format", file=sys.stderr)
+            return 2
+        os.environ["TELEGRAM_BOT_TOKEN"] = token
+        del token
+        body = urlencode({"chat_id": chat_id, "text": "[h2ci] " + EVENTS[event]})
+        connection = http.client.HTTPSConnection("api.telegram.org", timeout=10)
+        try:
+            connection.request(
+                "POST", "/bot" + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage", body=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            response = connection.getresponse()
+            if response.status != 200:
+                print(f"Telegram rejected {event}: HTTP {response.status}", file=sys.stderr)
+                return 1
+            data = json.loads(response.read(65536))
+        finally:
+            connection.close()
+        if data.get("ok") is True:
+            result = data["result"]
+            if str(result["chat"]["id"]) == chat_id and type(result["message_id"]) is int:
+                print(f"Telegram delivered {event}; message ID {result['message_id']}")
+                return 0
+        print(f"Telegram did not confirm delivery of {event}", file=sys.stderr)
+    except Exception as exc:
+        # Exception details can contain the URL, including the bot token.
+        print(f"Telegram delivery failed for {event}: {type(exc).__name__}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

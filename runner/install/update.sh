@@ -246,9 +246,9 @@ script_path() {
 
 update_host_tools() {
   local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
-  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh h2ci-telegram-notify)
   local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
-                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer)
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer h2ci-telegram-notify@.service)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -259,9 +259,9 @@ update_host_tools() {
   # health is shared with plain servers (common/); the other scripts belong to the runner host.
   command -v python3 >/dev/null || die "python3 is required for freshness checks"
   for f in "${scripts[@]}"; do
-    if [[ "$f" == freshness ]]; then
-      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/common/freshness" \
-        || die "syntax error in freshness, nothing changed"
+    if [[ "$f" == freshness || "$f" == h2ci-telegram-notify ]]; then
+      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/$(script_path "$f")" \
+        || die "syntax error in $f, nothing changed"
     else
       bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
     fi

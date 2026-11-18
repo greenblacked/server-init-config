@@ -9,5 +9,8 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
+  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+    logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
+  fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
 fi

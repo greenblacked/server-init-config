@@ -1,0 +1,18 @@
+[Unit]
+Description=Send Telegram notification for h2ci monitor event %i
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/h2ci-monitor/telegram.credentials
+
+[Service]
+Type=oneshot
+LoadCredential=telegram.credentials:/etc/h2ci-monitor/telegram.credentials
+ExecStart=/usr/local/bin/h2ci-telegram-notify %i
+TimeoutStartSec=20s
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitCORE=0
+UMask=0077

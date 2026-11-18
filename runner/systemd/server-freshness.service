@@ -4,6 +4,8 @@ After=network-online.target docker.service
 Wants=network-online.target
 ConditionPathExists=/etc/server-freshness/repo
 
+OnFailure=h2ci-telegram-notify@server-freshness.service
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/freshness --refresh
