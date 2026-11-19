@@ -7,11 +7,15 @@ STATE=${SERVER_UPDATE_STATE:-/var/lib/server-update}
 SBIN=${SERVER_SBIN:-/usr/local/sbin}
 CHECK=0; SECURITY=0; REBOOT=0; SCHEDULED=0
 
-if (( $# == 0 && EUID != 0 )) && [[ -f /etc/systemd/system/h2ci-server-update.service ]]; then
+if (( $# == 0 )) && [[ -f /etc/systemd/system/h2ci-server-update.service ]]; then
   exec /usr/bin/systemctl --no-ask-password start h2ci-server-update.service
 fi
-if (( $# == 1 && EUID == 0 )) && [[ $1 == --h2ci-managed ]]; then
-  exec /usr/local/libexec/h2ci-maintenance update
+if (( $# == 1 && EUID == 0 )); then
+  case "$1" in
+    --h2ci-managed) exec /usr/local/libexec/h2ci-maintenance update ;;
+    --h2ci-engine) exec /usr/local/libexec/h2ci-maintenance engine ;;
+    --h2ci-verify) exec /usr/local/libexec/h2ci-maintenance verify ;;
+  esac
 fi
 
 usage() {

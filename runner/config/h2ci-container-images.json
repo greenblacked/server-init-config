@@ -1,0 +1,26 @@
+{
+  "prometheus": {
+    "image": "docker.io/prom/prometheus:v3.13.5@sha256:aafa9d694e6a883c02db516d9f6e5b84e14195f49a2a6456a4cca815edda72b9",
+    "from": "prom/prometheus:v3.4.0"
+  },
+  "registry": {
+    "image": "docker.io/library/registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c",
+    "from": "registry:2.8.3"
+  },
+  "grafana": {
+    "image": "docker.io/grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf",
+    "from": "grafana/grafana:12.0.0"
+  },
+  "loki": {
+    "image": "docker.io/grafana/loki:3.7.7@sha256:d70e4659623f3e109af669cae76fe2a5dd5be54e2298fe8aed380d982fbc2500"
+  },
+  "alloy": {
+    "image": "docker.io/grafana/alloy:v1.19.2@sha256:b8ec653c44235fbe910879145dac3597d66b0aaecf60bcbbe82580767771a839"
+  },
+  "verdaccio": {
+    "image": "docker.io/verdaccio/verdaccio:7.0.2@sha256:5623458a61100ff2c89526752e8ea2db58ae2d494fa202c18bf4a508ec46892c"
+  },
+  "node-exporter": {
+    "image": "docker.io/prom/node-exporter:v1.9.1@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a"
+  }
+}

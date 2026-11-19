@@ -1,5 +1,26 @@
 # Runner maintenance log
 
+## 2026-11-19 — System-wide h2ci updates
+
+On the existing h2ci managed deployment, install the updater extensions with
+`sudo bash runner/install/h2ci-system-updates.sh`. The unprivileged `ops`
+entry point is still `server-update`. It applies signed OS RPM updates, then
+reconciles `/etc/h2ci-container-update/images.json`. Docker, containerd and
+GitLab Runner retain the guarded Sunday timer; its service now invokes the
+same entry point in engine mode, and the daily report includes its latest
+outcome. Neither path reboots the host.
+
+`sudo server-update --h2ci-verify` only checks the active images and timer;
+it does not install packages, pull images, or restart services. To approve an
+image update, review its release and migration requirements, then set the
+vendor version and digest plus `from`, the exact current Compose image
+reference. An entry without `from` cannot trigger a replacement. Do not
+overwrite live Compose files with the templates to apply a pin. A verified
+rollback holds that target digest (see
+`/var/lib/h2ci-server-update/<service>.rollback`) until reviewed; keep the
+rollback volume archives in `/var/backups/monitoring` or
+`/var/backups/h2ci-container-update` according to the host's retention policy.
+
 ## 2026-11-18 — Monitoring Compose drift on `h2ci`
 
 Compared the deployed `/opt/monitoring/docker-compose.yml` with `runner/stacks/monitoring/docker-compose.yml` using `config-drift --diff`. The three image pins differ:

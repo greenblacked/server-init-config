@@ -39,6 +39,8 @@ class MaintenanceTests(unittest.TestCase):
                     "UPDATE_RESULT": result, "HEALTH_STATE": state, "LOCKS": locks, "run": lambda *_: rc,
                     "rpm_inventory": iter((before, after)).__next__,
                     "transaction": lambda _: (complete, packages), "reboot_status": lambda: "unknown",
+                    "engine_status": lambda: "not-due",
+                    "containers": lambda: dict.fromkeys(update.__globals__["CONTAINER_NAMES"], "current"),
                 }):
                     self.assertEqual(update(), int(outcome not in {"unchanged", "applied"}))
                     recorded = json.loads(result.read_text())
@@ -165,6 +167,19 @@ class MaintenanceTests(unittest.TestCase):
         self.assertIn("- +3 more (see DNF history)", lines)
         self.assertIn("Reboot: unknown", lines)
         self.assertEqual(len(actions), 3)
+
+    def test_engine_and_image_outcomes(self):
+        classify = update.__globals__["engine_outcome"]
+        self.assertEqual(classify(0, "2026-11-22T04:30:00Z SKIP 1 CI job(s) running"), "deferred")
+        self.assertEqual(classify(0, "2026-11-22T04:30:00Z SKIP Docker packages upgraded, but busy"), "failed")
+        self.assertEqual(classify(0, "2026-11-22T04:30:00Z OK nothing to upgrade (docker-ce)"), "current")
+        self.assertEqual(classify(0, ""), "unverified")
+        result = {"update": "unchanged", "reboot": "not needed", "freshness": "refreshed",
+                  "engine": "disabled", "containers": {"grafana": "rolled-back", "alloy": "current"}}
+        self.assertFalse(update.__globals__["components_ok"](result))
+        lines, actions = render(result)
+        self.assertIn("- grafana: rolled-back", lines)
+        self.assertEqual(len(actions), 2)
 
 
 if __name__ == "__main__":

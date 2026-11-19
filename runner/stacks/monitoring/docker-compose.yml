@@ -2,7 +2,7 @@ name: monitoring
 
 services:
   prometheus:
-    image: prom/prometheus:v3.15.1
+    image: prom/prometheus:v3.13.5
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host
@@ -35,7 +35,7 @@ services:
       - /:/host:ro,rslave
 
   grafana:
-    image: grafana/grafana:13.3.0
+    image: grafana/grafana:13.3.1
     user: "${MON_UID:?run runner/install/users.sh first}:${MON_GID:?run runner/install/users.sh first}"
     restart: unless-stopped
     network_mode: host

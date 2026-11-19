@@ -1,0 +1,293 @@
+#!/usr/bin/python3
+import collections
+import contextlib
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+SERVICES = {
+    "prometheus": ("monitoring", "prom/prometheus", "/prometheus", 9090, "/-/ready"),
+    "registry": ("registry-cache", "library/registry", "/var/lib/registry", 5000, "/v2/"),
+    "grafana": ("monitoring", "grafana/grafana", "/var/lib/grafana", 3000, "/api/health"),
+    "loki": ("logging", "grafana/loki", "/loki", 3100, "/ready"),
+    "alloy": ("logging", "grafana/alloy", "/data", 12345, "/-/ready"),
+    "verdaccio": ("npm-cache", "verdaccio/verdaccio", "/verdaccio/storage", 4873, "/-/ping"),
+    "node-exporter": ("monitoring", "prom/node-exporter", None, 9100, "/metrics"),
+}
+DOCKER = "/usr/bin/docker"
+POLICY = Path("/etc/h2ci-container-update/images.json")
+ROLLBACK_STATE = Path("/var/lib/h2ci-server-update")
+COMPOSE_ROOT = Path("/opt")
+BACKUP_ROOT = Path("/var/backups")
+PIN = re.compile(r"docker\.io/([a-z0-9/-]+):v?([0-9]+\.[0-9]+\.[0-9]+)@(sha256:[0-9a-f]{64})")
+
+
+class RolledBack(Exception):
+    pass
+
+
+def policy(path):
+    if path.is_symlink() or path.stat().st_uid != 0 or path.stat().st_mode & 0o022:
+        raise ValueError("image policy must be root-owned and not group/world writable")
+    pins = json.loads(path.read_text())
+    if set(pins) != set(SERVICES):
+        raise ValueError("image policy must cover all managed services")
+    for name, pin in pins.items():
+        if not isinstance(pin, dict) or not {"image"} <= pin.keys() <= {"image", "from"}:
+            raise ValueError("invalid image policy fields")
+        match = PIN.fullmatch(pin["image"])
+        if not match or match[1] != SERVICES[name][1]:
+            raise ValueError("invalid image pin")
+        if "from" in pin and normalize(pin["from"]).split(":", 1)[0] != match[1]:
+            raise ValueError("rollback pin must use the same repository")
+    return pins
+
+
+def normalize(ref):
+    ref = ref.removeprefix("docker.io/")
+    if "/" not in ref.split("@", 1)[0]:
+        ref = "library/" + ref
+    return ref
+
+
+def run(*args):
+    return subprocess.check_output(args, stdin=subprocess.DEVNULL, text=True, timeout=180).strip()
+
+
+def request(port, path, headers=None):
+    host = "172.17.0.1" if port == 4873 else "127.0.0.1"
+    req = urllib.request.Request(f"http://{host}:{port}{path}", headers=headers or {})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=8) as response:
+        return response.read(4 * 1024 * 1024), response.headers
+
+
+def api(port, path):
+    return json.loads(request(port, path)[0])
+
+
+def grafana_db(path):
+    with contextlib.closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+        if db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            raise RuntimeError("Grafana SQLite integrity check failed")
+        return tuple(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                     for table in ("dashboard", "data_source"))
+
+
+def state(service, source):
+    if service == "prometheus":
+        request(9090, "/-/ready")
+        targets = api(9090, "/api/v1/targets")["data"]["activeTargets"]
+        rules = api(9090, "/api/v1/rules")["data"]["groups"]
+        query = api(9090, "/api/v1/query?query=up")
+        if query["status"] != "success" or not query["data"]["result"]:
+            raise RuntimeError("Prometheus up query has no results")
+        return (collections.Counter((t["scrapePool"], t["health"]) for t in targets),
+                sorted((g["name"], len(g["rules"])) for g in rules))
+    if service == "registry":
+        request(5000, "/v2/")
+        body, headers = request(5000, "/v2/library/alpine/manifests/3.22", {
+            "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json",
+        })
+        digest = "sha256:" + hashlib.sha256(body).hexdigest()
+        if not json.loads(body).get("manifests") or headers.get("Docker-Content-Digest") != digest:
+            raise RuntimeError("Registry proxy did not return a manifest index")
+        return True
+    if service != "grafana":
+        _, _, _, port, path = SERVICES[service]
+        request(port, path)
+        return True
+    health = api(3000, "/api/health")
+    if health["database"] != "ok":
+        raise RuntimeError("Grafana database not ready")
+    request(3000, "/login")
+    return health["version"], grafana_db(source / "grafana.db")
+
+
+def atomic_compose(path, data, template):
+    fd, tmp = tempfile.mkstemp(prefix=".image-update-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(data)
+            metadata = template.stat()
+            os.fchown(output.fileno(), metadata.st_uid, metadata.st_gid)
+            os.fchmod(output.fileno(), metadata.st_mode & 0o777)
+            output.flush()
+            os.fsync(output.fileno())
+        shutil.copystat(template, tmp)
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def compose_image(data, service):
+    section = re.search(rb"(?m)^  " + re.escape(service.encode()) + rb": *\n((?:^(?: {4}[^\n]*| *)\n)*)", data)
+    if not section:
+        raise ValueError("managed Compose service section missing")
+    images = re.findall(rb"(?m)^    image: +([^\s#]+) *$", section[1])
+    if len(images) != 1:
+        raise ValueError("managed Compose service must have one literal image pin")
+    return images[0].decode("ascii")
+
+
+def rollout(service, pin, check):
+    project, repo, destination, _, _ = SERVICES[service]
+    target = pin["image"]
+    old = pin.get("from")
+    digest = PIN.fullmatch(target)[3]
+    directory = COMPOSE_ROOT / project
+    config = directory / "docker-compose.yml"
+    compose = (DOCKER, "compose", "--project-directory", str(directory), "-f", str(config))
+    cid = run(*compose, "ps", "-q", service)
+    image_id, image_ref, running, mounts = run(
+        DOCKER, "inspect", "--format",
+        "{{.Image}}\n{{.Config.Image}}\n{{.State.Running}}\n{{json .Mounts}}", cid,
+    ).splitlines()
+    repos = json.loads(run(DOCKER, "image", "inspect", "--format", "{{json .RepoDigests}}", image_id))
+    if config.is_symlink() or running != "true":
+        raise RuntimeError("unexpected running state or Compose path")
+    original = config.read_bytes()
+    if compose_image(original, service) != image_ref:
+        raise RuntimeError("unexpected running state or Compose image drift")
+    if any(normalize(ref) == f"{repo}@{digest}" for ref in repos or []):
+        return "current"
+    if not old:
+        return "deferred"
+    rollback_marker = ROLLBACK_STATE / f"{service}.rollback"
+    if rollback_marker.exists() and rollback_marker.read_text().strip() == target:
+        return "rolled-back"
+    if check:
+        return "pending"
+    if image_ref != old or running != "true" or config.is_symlink():
+        raise RuntimeError("unexpected running image, state or Compose path")
+    if run(DOCKER, "image", "inspect", "--format", "{{.Id}}", old) != image_id:
+        raise RuntimeError("rollback tag does not identify the running image")
+    for label in ("com.gitlab.gitlab-runner.managed=true", "io.server-init.github-runner=job"):
+        if run(DOCKER, "ps", "-q", "--filter", f"label={label}"):
+            return "deferred"
+    run(DOCKER, "pull", target)
+    target_id = run(DOCKER, "image", "inspect", "--format", "{{.Id}}", target)
+    source = None
+    mounted = json.loads(mounts)
+    if destination:
+        mount, = [m for m in mounted if m["Type"] == "volume" and m["Destination"] == destination]
+        source = Path(mount["Source"])
+        if source != Path("/var/lib/docker/volumes") / mount["Name"] / "_data" or not source.is_dir():
+            raise RuntimeError("unexpected volume source")
+    if service == "prometheus":
+        user = run(DOCKER, "inspect", "--format", "{{.Config.User}}", cid)
+        args = [DOCKER, "run", "--rm", "--pull", "never", "--network", "none",
+                "--read-only", "--cap-drop", "ALL", "--user", user]
+        for m in mounted:
+            if m["Type"] == "bind":
+                args.extend(("-v", f"{m['Source']}:{m['Destination']}:ro"))
+        run(*args, "--entrypoint", "/bin/promtool", target, "check", "config",
+            "/etc/prometheus/prometheus.yml")
+    pattern = rb"(?m)^([ \t]+image: )" + re.escape(old.encode()) + rb"(?=[ \t]*$)"
+    updated, count = re.subn(pattern, lambda m: m[1] + target.encode(), original)
+    if count != 1:
+        raise RuntimeError("expected exactly one original image pin")
+    if service == "registry" and normalize(old).startswith("library/registry:2."):
+        old_mount = b"./config.yml:/etc/docker/registry/config.yml:ro"
+        if updated.count(old_mount) != 1:
+            raise RuntimeError("expected exactly one original registry config mount")
+        updated = updated.replace(old_mount, b"./config.yml:/etc/distribution/config.yml:ro")
+    baseline = state(service, source)
+    base = BACKUP_ROOT / ("monitoring" if service == "grafana" else "h2ci-container-update")
+    base.mkdir(mode=0o700, exist_ok=True)
+    if base.is_symlink() or base.stat().st_uid != os.geteuid() or base.stat().st_mode & 0o077:
+        raise RuntimeError("backup directory is not private and root-owned")
+    if source is not None:
+        apparent_size = int(run("/usr/bin/du", "-sb", str(source)).split()[0])
+        if shutil.disk_usage(base).free < 2 * apparent_size + 256 * 1024 * 1024:
+            raise RuntimeError("insufficient backup and rollback space")
+    backup = Path(tempfile.mkdtemp(prefix=f"{service}-", dir=base))
+    original_file = backup / config.name
+    shutil.copy2(config, original_file)
+    metadata = config.stat()
+    os.chown(original_file, metadata.st_uid, metadata.st_gid)
+    archive = backup / "volume.tar"
+    print(f"{service}: backup directory {backup}", file=sys.stderr, flush=True)
+    if config.read_bytes() != original:
+        raise RuntimeError("Compose changed concurrently")
+    attempted = False
+    try:
+        run(*compose, "stop", "--timeout", "30", service)
+        if source is not None:
+            run("/usr/bin/tar", "--acls", "--xattrs", "--selinux", "--numeric-owner",
+                "-cf", str(archive), "-C", str(source), ".")
+            run("/usr/bin/tar", "-df", str(archive), "-C", str(source))
+        if service == "grafana":
+            run("/usr/bin/tar", "-xf", str(archive), "-C", str(backup), "./grafana.db")
+            if grafana_db(backup / "grafana.db") != baseline[1]:
+                raise RuntimeError("backup Grafana database differs from baseline")
+        atomic_compose(config, updated, original_file)
+        run(*compose, "config", "--quiet")
+        attempted = True
+        run(*compose, "up", "-d", "--no-deps", "--pull", "never", service)
+        for _ in range(36):
+            try:
+                actual = state(service, source)
+                expected = (PIN.fullmatch(target)[2], baseline[1]) if service == "grafana" else baseline
+                if actual == expected:
+                    current = run(*compose, "ps", "-q", service)
+                    if run(DOCKER, "inspect", "--format", "{{.Image}}", current) == target_id:
+                        return "applied"
+            except Exception:
+                pass
+            time.sleep(3)
+        raise RuntimeError("post-upgrade checks did not match baseline")
+    except Exception:
+        if attempted:
+            run(*compose, "stop", "--timeout", "30", service)
+        if attempted and source is not None:
+            quarantine = Path(tempfile.mkdtemp(prefix="post-upgrade-", dir=backup))
+            for entry in source.iterdir():
+                entry.rename(quarantine / entry.name)
+            run("/usr/bin/tar", "--same-owner", "--same-permissions", "--acls", "--xattrs", "--selinux",
+                "-xf", str(archive), "-C", str(source))
+        atomic_compose(config, original, original_file)
+        run(*compose, "up", "-d", "--no-deps", "--pull", "never", service)
+        for _ in range(25):
+            try:
+                current = run(*compose, "ps", "-q", service)
+                if (run(DOCKER, "inspect", "--format", "{{.Image}}", current) == image_id
+                        and state(service, source) == baseline):
+                    with tempfile.NamedTemporaryFile(mode="w", dir=ROLLBACK_STATE, delete=False) as marker:
+                        marker.write(target + "\n")
+                    os.replace(marker.name, rollback_marker)
+                    raise RolledBack("previous image and baseline restored")
+            except RolledBack:
+                raise
+            except Exception:
+                pass
+            time.sleep(3)
+        raise RuntimeError("rollback did not restore baseline")
+
+
+def reconcile(pins, check):
+    results = {}
+    for name, pin in pins.items():
+        try:
+            results[name] = rollout(name, pin, check)
+        except RolledBack:
+            results[name] = "rolled-back"
+        except Exception as exc:
+            print(f"h2ci-container-update: {name}: {type(exc).__name__}", file=sys.stderr)
+            results[name] = "failed"
+    return results
+
+
+if __name__ == "__main__":
+    if os.geteuid() or sys.argv[1:] not in (["reconcile"], ["check"]):
+        sys.exit(2)
+    os.umask(0o077)
+    print(json.dumps(reconcile(policy(POLICY), sys.argv[1] == "check")))

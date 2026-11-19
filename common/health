@@ -1374,13 +1374,16 @@ ago() { # ago EPOCH: "3d4h ago" or "never"
 }
 
 managed_update_status() {
-  local row now stamp outcome reboot changes
+  local row now stamp outcome reboot changes engine images
   if IFS= read -r row < "$MANAGED_UPDATE_STATE" &&
-     [[ "$row" =~ ^time=([1-9][0-9]{0,10})\ outcome=(applied|unchanged|partial|failed|busy|unverified)\ reboot=(required|not-needed|unknown)\ changes=([0-9]+|\?)$ ]]; then
+     [[ "$row" =~ ^time=([1-9][0-9]{0,10})\ outcome=(applied|unchanged|partial|failed|busy|unverified)\ reboot=(required|not-needed|unknown)\ changes=([0-9]+|\?)(\ engine=(applied|current|deferred|not-due|disabled|running|failed|unverified)\ containers=(applied|current|deferred|rolled-back|failed))?$ ]]; then
     stamp=${BASH_REMATCH[1]} outcome=${BASH_REMATCH[2]} reboot=${BASH_REMATCH[3]} changes=${BASH_REMATCH[4]}
+    engine=${BASH_REMATCH[6]:-} images=${BASH_REMATCH[7]:-}
     now=$(date +%s)
     if (( now >= stamp && now - stamp <= 129600 )); then
-      printf '%s (%s package changes recorded); reboot: %s (checked %s)\n' "$outcome" "$changes" "${reboot//-/ }" "$(ago "$stamp")"
+      printf '%s (%s package changes recorded); reboot: %s (checked %s)' "$outcome" "$changes" "${reboot//-/ }" "$(ago "$stamp")"
+      [[ -z "$engine" ]] || printf '; engine: %s, containers: %s' "$engine" "$images"
+      printf '\n'
       return
     fi
     printf 'stale (last managed update %s); reboot: unknown\n' "$(ago "$stamp")"

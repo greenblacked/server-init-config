@@ -1,5 +1,5 @@
 [Unit]
-Description=Apply h2ci OS package updates without rebooting
+Description=Apply h2ci OS and approved container updates without rebooting
 Wants=network-online.target
 After=network-online.target
 

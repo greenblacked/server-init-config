@@ -16,6 +16,10 @@ import uuid
 
 UPDATE_RESULT = Path("/run/h2ci-server-update/result.json")
 HEALTH_STATE = Path("/var/lib/h2ci-server-update/state")
+ENGINE_STATE = HEALTH_STATE.with_name("engine.json")
+CONTAINER_NAMES = {"alloy", "grafana", "loki", "node-exporter", "prometheus", "registry", "verdaccio"}
+CONTAINER_STATES = {"applied", "current", "deferred", "pending", "rolled-back", "failed"}
+ENGINE_STATES = {"applied", "current", "deferred", "not-due", "disabled", "running", "failed", "unverified"}
 DAILY_REPORT = Path("/run/h2ci-daily-maintenance/report.json")
 DELIVERY_RECEIPT = DAILY_REPORT.with_name("delivery.json")
 FRESH_REPORT = Path("/var/lib/server-freshness/report.json")
@@ -56,7 +60,82 @@ def write_health_state(result):
     outcome = result["update"]
     changes = len(result["packages"]) if outcome in {"applied", "unchanged", "partial"} else "?"
     reboot = result["reboot"].replace(" ", "-")
-    write_atomic(HEALTH_STATE, f"time={int(time.time())} outcome={outcome} reboot={reboot} changes={changes}\n", 0o644)
+    suffix = ""
+    if "engine" in result:
+        states = result["containers"].values()
+        image_status = next((state for state in ("failed", "rolled-back", "deferred", "applied")
+                             if state in states), "current")
+        suffix = f" engine={result['engine']} containers={image_status}"
+    write_atomic(HEALTH_STATE, f"time={int(time.time())} outcome={outcome} reboot={reboot} changes={changes}{suffix}\n", 0o644)
+
+
+def containers(check=False):
+    try:
+        data = subprocess.check_output(
+            ("/usr/local/libexec/h2ci-container-update", "check" if check else "reconcile"),
+            stdin=subprocess.DEVNULL, text=True, timeout=1800,
+        )
+        states = json.loads(data)
+        if states.keys() != CONTAINER_NAMES or not set(states.values()) <= CONTAINER_STATES:
+            raise ValueError("invalid container status")
+        return states
+    except (OSError, ValueError, AttributeError, TypeError, subprocess.SubprocessError):
+        log("container update result unavailable")
+        return dict.fromkeys(sorted(CONTAINER_NAMES), "failed")
+
+
+def engine_outcome(rc, output):
+    if rc:
+        return "failed"
+    messages = [line.partition(" ")[2] for line in output.splitlines()]
+    if any(message.startswith("SKIP Docker packages upgraded") for message in messages):
+        return "failed"
+    if any(message.startswith("OK upgraded ") for message in messages):
+        return "applied"
+    if any(message.startswith("OK nothing to upgrade ") for message in messages):
+        return "current"
+    if any(message.startswith("SKIP ") for message in messages):
+        return "deferred"
+    return "unverified"
+
+
+def engine():
+    status = "failed"
+    try:
+        proc = subprocess.run(("/usr/local/bin/runner-engine-update.sh",),
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              text=True, check=False)
+        status = engine_outcome(proc.returncode, proc.stdout)
+    finally:
+        write_json(ENGINE_STATE, {"timestamp": int(time.time()), "status": status})
+        log(f"runner engine={status}")
+    return int(status in {"failed", "unverified"})
+
+
+def engine_status():
+    if run("/usr/bin/systemctl", "is-failed", "--quiet", "runner-engine-update.service") == 0:
+        return "failed"
+    if run("/usr/bin/systemctl", "is-active", "--quiet", "runner-engine-update.timer") != 0:
+        return "disabled"
+    if run("/usr/bin/systemctl", "is-active", "--quiet", "runner-engine-update.service") == 0:
+        return "running"
+    try:
+        record = json.loads(ENGINE_STATE.read_text())
+    except FileNotFoundError:
+        return "not-due"
+    except (OSError, ValueError):
+        return "unverified"
+    try:
+        if record["status"] in ENGINE_STATES and 0 <= time.time() - record["timestamp"] < 8 * 86400:
+            return record["status"]
+    except (KeyError, TypeError):
+        pass
+    return "unverified"
+
+
+def components_ok(result):
+    return (result.get("engine") not in {"failed", "unverified", "disabled"}
+            and not {"failed", "rolled-back"}.intersection(result.get("containers", {}).values()))
 
 
 def rpm_inventory():
@@ -152,7 +231,10 @@ def update():
                 result["reboot"] = reboot_status()
             except (OSError, subprocess.TimeoutExpired):
                 log("reboot check unavailable")
-            return int(result["update"] not in {"applied", "unchanged"})
+            result["engine"] = engine_status()
+            result["containers"] = (containers() if result["update"] in {"applied", "unchanged"}
+                                    else dict.fromkeys(sorted(CONTAINER_NAMES), "deferred"))
+            return int(result["update"] not in {"applied", "unchanged"} or not components_ok(result))
     finally:
         result["finished_ns"] = time.monotonic_ns()
         write_health_state(result)
@@ -207,7 +289,7 @@ def daily(test=False):
         log("freshness result unavailable")
     delivered = deliver(result)
     return int(not delivered or result["freshness"] != "refreshed"
-               or result["update"] not in {"applied", "unchanged"})
+               or result["update"] not in {"applied", "unchanged"} or not components_ok(result))
 
 
 def main():
@@ -215,6 +297,12 @@ def main():
         return 2
     if sys.argv[1] == "update":
         return update()
+    if sys.argv[1] == "engine":
+        return engine()
+    if sys.argv[1] == "verify":
+        result = {"engine": engine_status(), "containers": containers(check=True)}
+        print(json.dumps(result, sort_keys=True))
+        return int(not components_ok(result) or set(result["containers"].values()) != {"current"})
     if sys.argv[1] == "preview":
         return run(*DNF, "--assumeno", "upgrade")
     if sys.argv[1] in {"daily", "test"}:

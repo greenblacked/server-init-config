@@ -66,7 +66,9 @@ def grafana_backup_age(directory, now):
     newest = None
     try:
         for archive in directory.iterdir():
-            if not re.fullmatch(r"grafana-.+-[0-9]{8}-[0-9]{6}\.tar\.gz", archive.name):
+            if re.fullmatch(r"grafana-[a-z0-9_]{8}", archive.name) and not archive.is_symlink():
+                archive = archive / "volume.tar"
+            elif not re.fullmatch(r"grafana-.+-[0-9]{8}-[0-9]{6}\.tar\.gz", archive.name):
                 continue
             try:
                 info = archive.lstat()
@@ -429,6 +431,25 @@ def daily_maintenance(result):
         if len(packages) > 6:
             lines.append(f"- +{len(packages) - 6} more (see DNF history)")
         lines.extend((f"Reboot: {reboot_label}", f"Freshness: {freshness_label}"))
+    if "engine" in result:
+        engine = {
+            "current": "no updates on last scheduled run", "applied": "updated on last scheduled run",
+            "not-due": "waiting for weekly maintenance", "deferred": "deferred on last scheduled run",
+            "running": "weekly maintenance in progress", "disabled": "maintenance timer inactive",
+            "failed": "failed", "unverified": "outcome unavailable",
+        }.get(result["engine"], "outcome unavailable")
+        lines.append("Docker / CI engine: " + engine)
+        if result["engine"] in {"disabled", "failed", "unverified"}:
+            actions.append("Check the Docker / CI engine updater (runner-engine-update.service)")
+    if "containers" in result:
+        images = result["containers"]
+        current = sum(value == "current" for value in images.values())
+        lines.append(f"Container images: {current}/{len(images)} match approved pins without changes")
+        for name, value in sorted(images.items()):
+            if value != "current":
+                lines.append(f"- {name}: {value}")
+            if value in {"failed", "rolled-back"}:
+                actions.append(f"Check the {name} container update ({value})")
     return lines, actions
 
 
