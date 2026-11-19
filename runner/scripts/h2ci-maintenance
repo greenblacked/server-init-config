@@ -1,0 +1,226 @@
+#!/usr/bin/python3
+"""Root-owned h2ci maintenance entry points; no caller-supplied command arguments."""
+
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+UPDATE_RESULT = Path("/run/h2ci-server-update/result.json")
+HEALTH_STATE = Path("/var/lib/h2ci-server-update/state")
+DAILY_REPORT = Path("/run/h2ci-daily-maintenance/report.json")
+DELIVERY_RECEIPT = DAILY_REPORT.with_name("delivery.json")
+FRESH_REPORT = Path("/var/lib/server-freshness/report.json")
+HISTORY = Path("/var/lib/dnf/history.sqlite")
+LOCKS = ("/run/runner-engine-update.lock", "/run/server-update.lock")
+DNF = ("/usr/bin/dnf", "--refresh", "--setopt=gpgcheck=1", "--setopt=*.gpgcheck=1",
+       "--setopt=*.skip_if_unavailable=False", "--setopt=history_record=True",
+       "--exclude=docker-ce*,containerd.io,docker-buildx-plugin,docker-compose-plugin,gitlab-runner*")
+SYSTEMCTL = ("/usr/bin/systemctl", "--no-ask-password", "start")
+PACKAGE_FIELD = re.compile(r"[A-Za-z0-9_+.~^:-]{1,180}")
+
+
+def log(message):
+    print(f"h2ci-maintenance: {message}", file=sys.stderr, flush=True)
+
+
+def run(*args):
+    return subprocess.run(args, stdin=subprocess.DEVNULL, check=False).returncode
+
+
+def write_atomic(path, text, mode):
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as out:
+        name = out.name
+        try:
+            out.write(text)
+            out.flush()
+            os.fchmod(out.fileno(), mode)
+            os.replace(name, path)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+
+def write_json(path, payload):
+    write_atomic(path, json.dumps(payload), 0o600)
+
+
+def write_health_state(result):
+    outcome = result["update"]
+    changes = len(result["packages"]) if outcome in {"applied", "unchanged", "partial"} else "?"
+    reboot = result["reboot"].replace(" ", "-")
+    write_atomic(HEALTH_STATE, f"time={int(time.time())} outcome={outcome} reboot={reboot} changes={changes}\n", 0o644)
+
+
+def rpm_inventory():
+    try:
+        output = subprocess.check_output(
+            ("/usr/bin/rpm", "-qa", "--qf",
+             r"%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{INSTALLTIME}\t%{INSTALLTID}\n"),
+            stdin=subprocess.DEVNULL, timeout=30,
+        )
+        return sorted(output.splitlines()) if output else None
+    except (OSError, subprocess.SubprocessError):
+        log("RPM inventory unavailable")
+        return None
+
+
+def transaction(comment, history=HISTORY):
+    from libdnf import transaction as constants
+
+    with contextlib.closing(sqlite3.connect(f"{history.as_uri()}?mode=ro", uri=True)) as db:
+        matches = db.execute("SELECT id, state FROM trans WHERE comment = ?", (comment,)).fetchall()
+        if not matches:
+            return None, []
+        if len(matches) != 1:
+            raise ValueError("ambiguous transaction comment")
+        transaction_id, state = matches[0]
+        actions = {
+            constants.TransactionItemAction_INSTALL: "Installed",
+            constants.TransactionItemAction_UPGRADE: "Updated",
+            constants.TransactionItemAction_DOWNGRADE: "Downgraded",
+            constants.TransactionItemAction_REINSTALL: "Reinstalled",
+            constants.TransactionItemAction_OBSOLETE: "Installed",
+            constants.TransactionItemAction_OBSOLETED: "Removed",
+            constants.TransactionItemAction_REMOVE: "Removed",
+        }
+        rows = db.execute("""
+            SELECT DISTINCT i.action, r.name, r.epoch, r.version, r.release, r.arch
+            FROM trans_item i JOIN rpm r USING (item_id)
+            WHERE i.trans_id = ? AND i.state = ?
+            ORDER BY r.name, r.arch, i.action, r.epoch, r.version, r.release
+        """, (transaction_id, constants.TransactionItemState_DONE))
+        packages = []
+        for action, name, epoch, version, release, arch in rows:
+            if action not in actions:
+                continue
+            if not all(PACKAGE_FIELD.fullmatch(value) for value in (name, version, release, arch)):
+                raise ValueError("invalid RPM history fields")
+            evr = (f"{epoch}:" if epoch else "") + f"{version}-{release}"
+            packages.append(f"{actions[action]} {name}.{arch} {evr}")
+        return state == constants.TransactionState_DONE, packages
+
+
+def reboot_status():
+    check = subprocess.run(("/usr/bin/dnf", "-q", "-C", "needs-restarting", "-r"),
+                           capture_output=True, text=True, timeout=60, check=False,
+                           env={**os.environ, "LC_ALL": "C"})
+    # A generic DNF error can also exit 1; require the plugin's affirmative output.
+    if check.returncode == 1 and "Reboot is required" in check.stdout:
+        return "required"
+    if check.returncode == 0 and "Reboot should not be necessary" in check.stdout:
+        return "not needed"
+    return "unknown"
+
+
+def update():
+    result = {"update": "failed", "packages": [], "reboot": "unknown"}
+    try:
+        with contextlib.ExitStack() as stack:
+            for name in LOCKS:
+                lock = stack.enter_context(open(name, "a"))
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    result["update"] = "busy"
+                    return 75
+            comment = "h2ci-maintenance:" + uuid.uuid4().hex
+            before = rpm_inventory()
+            rc = run(*DNF, "--assumeyes", f"--comment={comment}", "upgrade")
+            try:
+                complete, packages = transaction(comment)
+                result["packages"] = packages
+                if rc == 0 and complete is True and packages:
+                    result["update"] = "applied"
+                elif rc == 0 and not packages and complete is not False and before is not None and rpm_inventory() == before:
+                    result["update"] = "unchanged"
+                elif packages:
+                    result["update"] = "partial"
+                elif rc == 0:
+                    result["update"] = "unverified"
+            except (OSError, ImportError, sqlite3.Error, ValueError) as exc:
+                log(f"transaction details unavailable ({type(exc).__name__})")
+                result["update"] = "unverified" if rc == 0 else "failed"
+            try:
+                result["reboot"] = reboot_status()
+            except (OSError, subprocess.TimeoutExpired):
+                log("reboot check unavailable")
+            return int(result["update"] not in {"applied", "unchanged"})
+    finally:
+        result["finished_ns"] = time.monotonic_ns()
+        write_health_state(result)
+        write_json(UPDATE_RESULT, result)
+        log(f"update={result['update']} packages={len(result['packages'])} reboot={result['reboot']}")
+
+
+def fingerprint(path):
+    try:
+        info = path.stat()
+        return info.st_ino, info.st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def deliver(result):
+    run_id = uuid.uuid4().hex
+    write_json(DAILY_REPORT, {**result, "run_id": run_id})
+    if run(*SYSTEMCTL, "h2ci-telegram-notify@daily.service") == 0:
+        try:
+            receipt = json.loads(DELIVERY_RECEIPT.read_text())
+            if receipt["run_id"] == run_id and type(receipt["message_id"]) is int and receipt["message_id"] > 0:
+                return True
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    log("Telegram delivery not confirmed for this run")
+    return False
+
+
+def daily(test=False):
+    started = time.monotonic_ns()
+    result = {"update": "failed", "packages": [], "reboot": "unknown"}
+    if test:
+        result = {"update": "applied", "packages": ["Updated example-package.aarch64 2.0-1"],
+                  "reboot": "required", "test": True}
+    else:
+        try:
+            run(*SYSTEMCTL, "h2ci-server-update.service")
+            current = json.loads(UPDATE_RESULT.read_text())
+            if current.pop("finished_ns") >= started:
+                result = current
+        except (OSError, ValueError, KeyError, TypeError):
+            log("no update result for this run")
+    result["freshness"] = "failed"
+    try:
+        before = fingerprint(FRESH_REPORT)
+        rc = run(*SYSTEMCTL, "server-freshness.service")
+        after = fingerprint(FRESH_REPORT)
+        if rc == 0 and after is not None and after != before:
+            result["freshness"] = "refreshed"
+    except OSError:
+        log("freshness result unavailable")
+    delivered = deliver(result)
+    return int(not delivered or result["freshness"] != "refreshed"
+               or result["update"] not in {"applied", "unchanged"})
+
+
+def main():
+    if os.geteuid() or len(sys.argv) != 2:
+        return 2
+    if sys.argv[1] == "update":
+        return update()
+    if sys.argv[1] == "preview":
+        return run(*DNF, "--assumeno", "upgrade")
+    if sys.argv[1] in {"daily", "test"}:
+        return daily(test=sys.argv[1] == "test")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
