@@ -90,10 +90,11 @@ def live_ssh_test(dropin: str, tag: str) -> None:
         os.chmod(d / "authorized_keys", 0o600)
         (d / "dropin.conf").write_text(dropin)
         port = free_port()
+        # With PAM off, sshd can reject even key logins for a password-locked root account.
         (d / "sshd_config").write_text(
             f"Include {d}/dropin.conf\n"
             f"Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\n"
-            f"AuthorizedKeysFile {d}/authorized_keys\nPidFile {d}/sshd.pid\nUsePAM no\nStrictModes no\n"
+            f"AuthorizedKeysFile {d}/authorized_keys\nPidFile {d}/sshd.pid\nUsePAM yes\nStrictModes no\n"
         )
         Path("/run/sshd").mkdir(exist_ok=True)
         r = run([sshd, "-t", "-f", str(d / "sshd_config")])
@@ -104,13 +105,19 @@ def live_ssh_test(dropin: str, tag: str) -> None:
         check("permitrootlogin without-password" in eff or "permitrootlogin prohibit-password" in eff,
               f"{tag}: effective PermitRootLogin keeps root by key")
         check("passwordauthentication no" in eff, f"{tag}: effective PasswordAuthentication no")
-        proc = subprocess.Popen([sshd, "-D", "-f", str(d / "sshd_config"), "-E", str(d / "sshd.log")])
+        daemon_log = d / "sshd.log"
+        proc = subprocess.Popen([sshd, "-D", "-f", str(d / "sshd_config"), "-E", str(daemon_log)])
         try:
             time.sleep(1)
-            base = ["ssh", "-p", str(port), "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            base = ["ssh", "-F", "/dev/null", "-p", str(port), "-o", "IdentitiesOnly=yes",
+                    "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                     "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR"]
             r = run([*base, "-i", str(d / "userkey"), "root@127.0.0.1", "echo ok"], timeout=20)
-            check(r.returncode == 0 and r.stdout.strip() == "ok", f"{tag}: root logs in with the key", r.stderr.strip())
+            key_ok = r.returncode == 0 and r.stdout.strip() == "ok"
+            detail = r.stderr.strip()
+            if not key_ok and daemon_log.exists():
+                detail += "\n" + daemon_log.read_text(errors="replace").strip()[-2000:]
+            check(key_ok, f"{tag}: root logs in with the key", detail.strip())
             r = run([*base, "-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password",
                      "root@127.0.0.1", "true"], timeout=20)
             check(r.returncode != 0, f"{tag}: password login refused")
