@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply h2ci OS package updates without rebooting
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-update --h2ci-managed
+RuntimeDirectory=h2ci-server-update
+RuntimeDirectoryPreserve=yes
+StateDirectory=h2ci-server-update
+StateDirectoryMode=0755
+TimeoutStartSec=45min
+StandardInput=null
+UMask=0022

@@ -112,7 +112,8 @@ BLOCKS = [
           SECURITY, run=["common/security-tools.sh"]),
     Block("register", "Register the runner",
           "Asks for the `glrt-` token (GitLab: Settings > CI/CD > Runners > New runner). Change `DESCRIPTION` if you like.",
-          ["runner/install/register-runner.sh", "runner/install/job-limits.sh"], interactive=["sudo DESCRIPTION=hetzner-cax11 bash {d}/runner/install/register-runner.sh"]),
+          ["runner/install/register-runner.sh", "runner/install/local-cache.awk", "runner/install/job-limits.sh"],
+          interactive=["sudo DESCRIPTION=hetzner-cax11 bash {d}/runner/install/register-runner.sh"]),
     Block("job-limits", "Per-job limits",
           "Adds memory 1536m (no swap), 1.5 CPUs and 256 MB /dev/shm per job, smaller limits for `services:` containers, and a `ci-jobs.slice` (4096 processes, 3 GB memory for all jobs together) to `[runners.docker]` in `config.toml` (a backup is made, values you set yourself are kept). "
           "Needs a registered runner. Change them with `JOB_MEMORY`, `JOB_CPUS`, `JOB_SHM_SIZE`, `JOBS_TASKS_MAX`, `JOBS_MEMORY_MAX` on the last line.",

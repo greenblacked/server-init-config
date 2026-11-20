@@ -486,7 +486,16 @@ check_updates() {
       | awk '{ print $1 }' | grep -E 'zypper|yum-cron|unattended|transactional-update|packagekit-offline' | head -1 || true)
   fi
 
-  if [[ -z "$found" ]]; then
+  if unit_exists h2ci-daily-maintenance.service; then
+    if systemctl is-active --quiet crond.service &&
+       grep -qsFx 'CRON_TZ=Europe/Kyiv' /etc/cron.d/h2ci-telegram-daily &&
+       grep -qsFx '0 11 * * * root /usr/bin/systemctl start h2ci-daily-maintenance.service' /etc/cron.d/h2ci-telegram-daily; then
+      ok "automatic updates: h2ci daily maintenance (cron, 11:00 Europe/Kyiv)"
+      [[ -z "$found" ]] || warn "h2ci daily maintenance and ${found} are both enabled"
+    else
+      warn "h2ci daily maintenance is installed but the expected cron schedule is not active"
+    fi
+  elif [[ -z "$found" ]]; then
     warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
   elif [[ "$found" == server-update.timer ]]; then
     local dup=""
@@ -1350,6 +1359,7 @@ check_trends() {
 # ---- brief mode: a short summary for the login screen and `srv status` -------------------------------------------
 BRIEF_DIR="${HEALTH_BRIEF_DIR:-/var/lib/server-health}"
 UPDATE_STATE="${SERVER_UPDATE_STATE:-/var/lib/server-update}/state"
+MANAGED_UPDATE_STATE="${H2CI_UPDATE_STATUS_FILE:-/var/lib/h2ci-server-update/state}"
 CLEANUP_STATE="${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}"
 
 # kv FILE KEY: value of key=value in a one-line state file (empty when missing)
@@ -1361,6 +1371,22 @@ lvl() {
 }
 ago() { # ago EPOCH: "3d4h ago" or "never"
   if [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]]; then echo "$(human_age $(( $(date +%s) - $1 ))) ago"; else echo never; fi
+}
+
+managed_update_status() {
+  local row now stamp outcome reboot changes
+  if IFS= read -r row < "$MANAGED_UPDATE_STATE" &&
+     [[ "$row" =~ ^time=([1-9][0-9]{0,10})\ outcome=(applied|unchanged|partial|failed|busy|unverified)\ reboot=(required|not-needed|unknown)\ changes=([0-9]+|\?)$ ]]; then
+    stamp=${BASH_REMATCH[1]} outcome=${BASH_REMATCH[2]} reboot=${BASH_REMATCH[3]} changes=${BASH_REMATCH[4]}
+    now=$(date +%s)
+    if (( now >= stamp && now - stamp <= 129600 )); then
+      printf '%s (%s package changes recorded); reboot: %s (checked %s)\n' "$outcome" "$changes" "${reboot//-/ }" "$(ago "$stamp")"
+      return
+    fi
+    printf 'stale (last managed update %s); reboot: unknown\n' "$(ago "$stamp")"
+  else
+    printf 'no verified managed update result; reboot: unknown\n'
+  fi
 }
 
 brief_full() { # run the full report when the last one is older than 6 hours; keep its counts for the summary
@@ -1407,7 +1433,9 @@ brief_render() {
       printf '%sf2b%s   not running %s\n' "$C_B" "$C_N" "$(lvl 1 1 2)"
     fi
   fi
-  if [[ -r "$UPDATE_STATE" ]]; then
+  if [[ -r "$MANAGED_UPDATE_STATE" ]] || unit_exists h2ci-server-update.service; then
+    s="update $(managed_update_status 2>/dev/null)"
+  elif [[ -r "$UPDATE_STATE" ]]; then
     u=$(kv "$UPDATE_STATE" updates); r=$(kv "$UPDATE_STATE" reboot)
     printf '%supd%s   %s update(s) pending, reboot needed: %s%s  (checked %s)\n' "$C_B" "$C_N" "${u:-?}" "$( [[ "$r" == 1 ]] && echo yes || echo no )" \
       "$( [[ "$r" == 1 ]] && lvl 1 1 2 )" "$(ago "$(kv "$UPDATE_STATE" time)")"

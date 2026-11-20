@@ -7,6 +7,13 @@ STATE=${SERVER_UPDATE_STATE:-/var/lib/server-update}
 SBIN=${SERVER_SBIN:-/usr/local/sbin}
 CHECK=0; SECURITY=0; REBOOT=0; SCHEDULED=0
 
+if (( $# == 0 && EUID != 0 )) && [[ -f /etc/systemd/system/h2ci-server-update.service ]]; then
+  exec /usr/bin/systemctl --no-ask-password start h2ci-server-update.service
+fi
+if (( $# == 1 && EUID == 0 )) && [[ $1 == --h2ci-managed ]]; then
+  exec /usr/local/libexec/h2ci-maintenance update
+fi
+
 usage() {
   cat <<'USAGE'
 Usage: server-update [--check | --security] [--reboot]

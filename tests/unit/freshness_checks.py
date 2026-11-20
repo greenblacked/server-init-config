@@ -144,6 +144,35 @@ class FreshnessTests(unittest.TestCase):
             self.assertNotIn("sensitive", json.dumps(findings))
             self.assertEqual((target / "config.yaml").read_text(), "changed")
 
+    def test_diff_compares_rendered_files_without_runtime_or_writes(self):
+        repo = self.root / "repo"
+        source = repo / "runner/stacks/npm-cache"
+        target = self.root / "opt/npm-cache"
+        source.mkdir(parents=True)
+        target.mkdir(parents=True)
+        for name in ("config.yaml", "docker-compose.yml"):
+            (source / name).write_text("listen: 172.17.0.1:4873\n")
+            (target / name).write_text("listen: 172.18.0.1:4873\n")
+        (target / ".env").write_text("fixture-not-for-output")
+        with patch.dict(GLOBALS, {"bridge_address": lambda: "172.18.0.1",
+                                  "runtime_drift": lambda *_: self.fail("called runtime drift")}):
+            self.assertEqual(self.invoke("--drift", "--diff", "--repo", repo, "--root", self.root), (0, "", ""))
+            (target / "config.yaml").write_text("listen: changed")
+            rc, out, err = self.invoke("--drift", "--diff", "--repo", repo, "--root", self.root)
+            self.assertEqual((rc, err), (1, ""))
+            self.assertIn("-listen: 172.18.0.1:4873", out)
+            self.assertIn("+listen: changed\n\\ No newline at end of file", out)
+            self.assertNotIn("fixture-not-for-output", out)
+            self.assertEqual((target / "config.yaml").read_text(), "listen: changed")
+            (target / "config.yaml").write_bytes(b"\x1b[31m")
+            rc, out, err = self.invoke("--diff", "--repo", repo, "--root", self.root)
+            self.assertEqual((rc, out), (2, ""))
+            self.assertIn("diff requires printable UTF-8 text", err)
+            (target / "config.yaml").unlink()
+            rc, out, err = self.invoke("--diff", "--repo", repo, "--root", self.root)
+            self.assertEqual((rc, out), (2, ""))
+            self.assertIn("managed file missing or unreadable", err)
+
     def test_missing_repo_is_error(self):
         findings, _ = fresh.drift(self.root, self.root)
         self.assertEqual(findings[0]["level"], "error")

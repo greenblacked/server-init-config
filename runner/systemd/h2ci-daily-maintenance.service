@@ -1,0 +1,10 @@
+[Unit]
+Description=Update h2ci, refresh maintenance status and report to Telegram
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/h2ci-maintenance daily
+RuntimeDirectory=h2ci-daily-maintenance
+RuntimeDirectoryMode=0700
+TimeoutStartSec=60min
+UMask=0077

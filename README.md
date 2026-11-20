@@ -75,6 +75,20 @@ Root SSH by key remains available through provisioning. If you choose to close i
 | Recover | Open the Hetzner console if SSH is unavailable. See [plain-server rollback](server/README.md#roll-back) for restoring settings or disabling maintenance timers. | Use the rollback command below to restore repo-managed files. For Grafana data, follow the [Grafana recovery procedure](runner/README.md#grafana-upgrade-and-rollback). |
 When using the streamed copy, update it from your workstation. `runner/update.sh --pull` requires a Git clone on the host. Before changing a production machine, record the deployed commit and make sure backups cover the persistent data and configuration you need to recover. If root SSH is closed, pass `--user ops` when running bootstrap from your workstation.
 
+On a runner host, use `sudo config-drift --diff` to show changed lines between the repository baseline and deployed managed files. This is read-only and does not check running containers or expand Compose environment variables. Diff output can contain sensitive configuration; keep it local. Exit codes are 0 for no differences, 1 for differences, and 2 for comparison errors.
+
+On `h2ci`, `ops` can run `server-update` or `freshness --refresh` without `sudo`;
+the commands start fixed, root-owned systemd services. `freshness --check` reads
+the cached report without refreshing it. The 11:00 Europe/Kyiv cron runs the OS
+update, refreshes freshness, then sends the daily Telegram report. It replaces
+the morning `dnf-automatic.timer`; Docker and GitLab Runner remain on the guarded
+Sunday updater. The daily workflow reports reboot requirements without rebooting.
+Investigate failures in `h2ci-server-update.service`, `server-freshness.service`,
+or `h2ci-daily-maintenance.service` in the system journal. When intentionally
+changing managed stack files, update the reviewed root-owned freshness reference
+under `/etc/server-freshness/reference/runner/stacks`; the unprivileged checkout
+is not the scheduled service's drift baseline.
+
 On a runner host, preview the update as `ops`.
 
 ```bash

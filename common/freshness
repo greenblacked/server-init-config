@@ -2,6 +2,7 @@
 """Read cached maintenance status; refresh explicitly, never apply upgrades."""
 import argparse
 import datetime
+import difflib
 import fcntl
 import ipaddress
 import json
@@ -59,7 +60,18 @@ def bridge_address():
     raise CheckError("docker0 IPv4 address unavailable")
 
 
-def compare_file(source, deployed, findings, expected=None):
+def unified_file_diff(source, deployed, expected, actual, rendered=False):
+    want, have = expected.decode("utf-8"), actual.decode("utf-8")
+    for text in (want, have):
+        if any(not char.isprintable() and char not in "\t\n" for char in text.replace("\r\n", "\n")):
+            raise ValueError("unsupported control characters")
+    label = f"{source} (rendered)" if rendered else str(source)
+    lines = difflib.unified_diff(want.splitlines(keepends=True), have.splitlines(keepends=True),
+                                 fromfile=label, tofile=str(deployed), n=0)
+    return "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n" for line in lines)
+
+
+def compare_file(source, deployed, findings, expected=None, file_diffs=None):
     label = str(deployed)
     try:
         want = source.read_bytes() if expected is None else expected
@@ -69,6 +81,11 @@ def compare_file(source, deployed, findings, expected=None):
         return
     if want != have:
         findings.append({"level": "warning", "item": label, "detail": "differs from repository"})
+        if file_diffs is not None:
+            try:
+                file_diffs.append(unified_file_diff(source, deployed, want, have, rendered=expected is not None))
+            except ValueError:
+                findings.append({"level": "error", "item": label, "detail": "diff requires printable UTF-8 text"})
 
 
 def runtime_drift(directory, findings):
@@ -101,7 +118,7 @@ def runtime_drift(directory, findings):
                                  "detail": "running image reference or memory limit differs from deployed Compose"})
 
 
-def drift(repo, root=Path("/")):
+def drift(repo, root=Path("/"), file_diffs=None):
     findings = []
     installed = []
     if not (repo / "runner/stacks").is_dir():
@@ -120,7 +137,7 @@ def drift(repo, root=Path("/")):
                     bridge = bridge or bridge_address()
                     expected = (source / name).read_bytes().replace(b"172.17.0.1:4873",
                                                                   f"{bridge}:4873".encode())
-                compare_file(source / name, directory / name, findings, expected)
+                compare_file(source / name, directory / name, findings, expected, file_diffs)
             if stack == "monitoring":
                 for subtree in ("prometheus", "grafana"):
                     if not (source / subtree).is_dir():
@@ -141,11 +158,12 @@ def drift(repo, root=Path("/")):
                                     if f"job_name: {job}".encode() not in expected:
                                         expected += (f'  - job_name: {job}\n    static_configs:\n'
                                                      f'      - targets: ["{target}"]\n').encode()
-                        compare_file(file, directory / relative, findings, expected)
+                        compare_file(file, directory / relative, findings, expected, file_diffs)
                 if (root / "opt/logging/docker-compose.yml").exists():
                     compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
-                                 directory / "grafana/provisioning/datasources/loki.yml", findings)
-            runtime_drift(directory, findings)
+                                 directory / "grafana/provisioning/datasources/loki.yml", findings, file_diffs=file_diffs)
+            if file_diffs is None:
+                runtime_drift(directory, findings)
         except (CheckError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             detail = str(exc) if isinstance(exc, CheckError) else "cannot inspect managed stack"
             findings.append({"level": "error", "item": stack, "detail": detail})
@@ -318,6 +336,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="read cached report only; no network or writes")
     mode.add_argument("--refresh", action="store_true", help="refresh metadata/network checks and write cached report; never upgrade")
+    mode.add_argument("--diff", action="store_true", help="show local unified diffs for managed files; output may be sensitive")
     parser.add_argument("--drift", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--repo", type=Path, help="repository root (default: /etc/server-freshness/repo)")
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
@@ -327,14 +346,29 @@ def main():
     args = parser.parse_args()
     if args.drift and (args.refresh or args.summary):
         parser.error("--drift requires --check and cannot use --summary")
+    if args.diff and (args.json or args.summary):
+        parser.error("--diff cannot be combined with --json or --summary")
     if args.refresh and os.geteuid() != 0:
+        if sys.argv[1:] == ["--refresh"] and Path(
+                "/etc/systemd/system/server-freshness.service.d/20-h2ci-reference.conf").is_file():
+            return subprocess.call(["/usr/bin/systemctl", "--no-ask-password", "start",
+                                    "server-freshness.service"])
         parser.error("--refresh requires root (package metadata and report writes)")
     try:
-        if args.drift or args.refresh:
+        if args.drift or args.refresh or args.diff:
             repo = args.repo or Path("/etc/server-freshness/repo").read_text().strip()
             repo = Path(repo)
             if not repo.is_absolute():
                 raise CheckError("repository path must be absolute")
+        if args.diff:
+            diffs = []
+            findings, _ = drift(repo, args.root, file_diffs=diffs)
+            for diff in diffs:
+                print(diff, end="")
+            for row in findings:
+                if row["level"] == "error":
+                    print(f"ERROR: {row['item']}: {row['detail']}", file=sys.stderr)
+            return 2 if any(row["level"] == "error" for row in findings) else int(bool(findings))
         if args.drift:
             findings, _ = drift(repo, args.root)
             if args.json:
