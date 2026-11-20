@@ -1,5 +1,5 @@
-# Admin tools (htop, btop, ncdu, mtr, vim, rsync, skopeo, mc, fd-find, ripgrep, fzf, ...) come from EPEL and are installed one by one in
-# runcmd, so a missing one cannot break the package step; it is logged to /var/log/ci-bootstrap-failed.log.
+# Optional admin tools are installed after cloud-final so slow mirrors do not delay Docker or GitLab Runner.
+# Missing tools are logged to /var/log/ci-bootstrap-failed.log.
 package_update: true
 package_upgrade: true
 
@@ -62,10 +62,11 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+@@INCLUDE runner/cloud-init/templates/rocky-optional-tools.yaml.in@@
+
 runcmd:
   - restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /usr/local/bin /usr/local/sbin /etc/systemd/system /etc/yum.repos.d /etc/sysctl.d
   - [sh, -c, "if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi"]
-  - [sh, -c, "dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done"]
   - sed -i -E 's/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/' /etc/dnf/automatic.conf
   - [systemctl, enable, --now, dnf-automatic.timer]
   - [systemctl, restart, systemd-journald]
@@ -85,5 +86,7 @@ runcmd:
   - [systemctl, enable, --now, runner-weekly-cleanup.timer, runner-disk-guard.timer, runner-engine-update.timer, ci-job-isolation.service, registry-cache.service]
   - sed -i -E 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
   - setenforce 1
+  # Queue the service without waiting. An interrupted run is attempted again on the next boot.
+  - [systemctl, enable, --now, --no-block, ci-optional-tools.service]
   # The old image kernel has no kernel-modules (netfilter) after the upgrade, so dockerd fails until the new kernel boots: reboot once, after cloud-init is done.
   - [sh, -c, "systemctl is-active -q docker || [ \"$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\\n' | sort -V | tail -1)\" = \"$(uname -r)\" ] || { journalctl -u docker -n 20 --no-pager > /var/log/ci-docker-reboot.log; systemd-run --no-block -p After=cloud-final.service systemctl reboot; }"]

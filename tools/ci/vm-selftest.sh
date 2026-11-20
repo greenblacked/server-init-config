@@ -121,6 +121,15 @@ group "Rocky runner files: the Docker reboot comes after cloud-init"
 for f in runner/cloud-init/rocky.yaml runner/cloud-init/rocky-x86.yaml runner/cloud-init/rocky-clean.yaml; do
   grep -q 'systemd-run --no-block -p After=cloud-final.service systemctl reboot' "$f" && ! grep -q 'systemctl reboot --no-block' "$f" \
     && pass "$f: reboots from a unit ordered after cloud-final.service" || fail "$f: reboot is not deferred until cloud-final.service is done"
+  if grep -q '^      After=cloud-final.service network-online.target$' "$f" &&
+    grep -q '^      Type=exec$' "$f" &&
+    grep -q '^      WantedBy=cloud-init.target$' "$f" &&
+    grep -q '^  - \[systemctl, enable, --now, --no-block, ci-optional-tools.service\]$' "$f" &&
+    ! sed -n '/^runcmd:/,$p' "$f" | grep -F 'epel-release' >/dev/null; then
+    pass "$f: optional packages are installed after cloud-final without blocking it"
+  else
+    fail "$f: optional package installation can delay cloud-final"
+  fi
   (( $(wc -c < "$f") < 32768 )) && pass "$f: under 32768 bytes" || fail "$f: 32768 bytes or more"
 done
 endgroup

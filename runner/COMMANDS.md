@@ -254,10 +254,44 @@ fi
 __SIC_EOF__
 chmod 644 /etc/profile.d/90-shell-history.sh
 
-restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d /usr/local/sbin /etc/yum.repos.d /etc/sysctl.d
+install -d "$(dirname /usr/local/sbin/ci-install-optional-tools)"
+cat > /usr/local/sbin/ci-install-optional-tools <<'__SIC_EOF__'
+#!/bin/sh
+set -e
+
+install_tool() {
+  dnf -y -q --disablerepo=docker-ce-stable,runner_gitlab-runner install "$1"
+}
+
+warnings=/var/log/ci-bootstrap-failed.log
+install_tool epel-release || echo optional-tool-missing-epel >> "$warnings"
+for package in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do
+  install_tool "$package" || echo "optional-tool-missing-$package" >> "$warnings"
+done
+touch /var/lib/ci-optional-tools/done
+__SIC_EOF__
+chmod 755 /usr/local/sbin/ci-install-optional-tools
+
+install -d "$(dirname /etc/systemd/system/ci-optional-tools.service)"
+cat > /etc/systemd/system/ci-optional-tools.service <<'__SIC_EOF__'
+[Unit]
+Description=Install optional GitLab Runner host tools
+After=cloud-final.service network-online.target
+ConditionPathExists=!/var/lib/ci-optional-tools/done
+
+[Service]
+Type=exec
+StateDirectory=ci-optional-tools
+ExecStart=/usr/local/sbin/ci-install-optional-tools
+
+[Install]
+WantedBy=cloud-init.target
+__SIC_EOF__
+chmod 644 /etc/systemd/system/ci-optional-tools.service
+
+restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d /usr/local/sbin /etc/yum.repos.d /etc/sysctl.d /etc/systemd/system
 sysctl --system
 sh -c 'if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi'
-sh -c 'dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done'
 sh -c 'if [ -f /etc/dnf/automatic.conf ]; then sed -i -E '"'"'s/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/'"'"' /etc/dnf/automatic.conf && systemctl enable --now dnf-automatic.timer; else echo dnf-automatic-config-not-found >> /var/log/ci-bootstrap-failed.log; fi'
 systemctl restart systemd-journald
 timedatectl set-timezone Europe/Kyiv
@@ -269,6 +303,8 @@ dnf -y -q install gitlab-runner
 usermod -aG docker gitlab-runner
 chmod 600 /etc/gitlab-runner/config.toml
 systemctl restart gitlab-runner
+systemctl daemon-reload
+systemctl start ci-optional-tools.service
 sh -c 'for s in sshd docker gitlab-runner; do systemctl is-active --quiet $s || [ $s = docker -a -s /var/log/ci-docker-reboot.log ] || echo bootstrap-check-failed-$s >> /var/log/ci-bootstrap-failed.log; done'
 
 systemctl is-active docker gitlab-runner

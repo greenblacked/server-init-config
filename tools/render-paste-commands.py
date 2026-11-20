@@ -223,6 +223,9 @@ def render_base() -> str:
             continue  # pasted on a live server: lock root only after the admin login is tested
         if "systemctl reboot" in line:
             continue  # pasted in a live SSH session: never reboot under the admin's hands
+        if cmd == ["systemctl", "enable", "--now", "--no-block", "ci-optional-tools.service"]:
+            lines.append("systemctl daemon-reload")
+            line = "systemctl start ci-optional-tools.service"  # this manual install has no cloud-init target to queue it on
         lines.append(line)
     lines += ["", "systemctl is-active docker gitlab-runner", "INSTALL"]
     return ('<a id="base"></a>\n## Base host: Docker, GitLab Runner, tools\n\n'
