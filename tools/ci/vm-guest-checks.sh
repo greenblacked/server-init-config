@@ -136,6 +136,7 @@ runner_checks() {
   ok "INPUT sends job bridges through CI-JOBS-IN" bash -c "iptables -S INPUT | grep -q CI-JOBS-IN"
   ok "sshd: password login is off" bash -c "sshd -T | grep -qi '^passwordauthentication no'"
   if [[ "$KIND" == rocky ]]; then
+    ok "ci-optional-tools.service is enabled" systemctl is-enabled --quiet ci-optional-tools.service
     [[ $(getenforce 2>/dev/null) == Enforcing ]] && pass "SELinux is enforcing" || fail "SELinux is $(getenforce 2>&1)"
   fi
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -q .; then

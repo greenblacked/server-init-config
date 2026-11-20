@@ -254,10 +254,44 @@ fi
 __SIC_EOF__
 chmod 644 /etc/profile.d/90-shell-history.sh
 
-restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d /usr/local/sbin /etc/yum.repos.d /etc/sysctl.d
+install -d "$(dirname /usr/local/sbin/ci-install-optional-tools)"
+cat > /usr/local/sbin/ci-install-optional-tools <<'__SIC_EOF__'
+#!/bin/sh
+set -e
+
+install_tool() {
+  dnf -y -q --disablerepo=docker-ce-stable,runner_gitlab-runner install "$1"
+}
+
+warnings=/var/log/ci-bootstrap-failed.log
+install_tool epel-release || echo optional-tool-missing-epel >> "$warnings"
+for package in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do
+  install_tool "$package" || echo "optional-tool-missing-$package" >> "$warnings"
+done
+touch /var/lib/ci-optional-tools/done
+__SIC_EOF__
+chmod 755 /usr/local/sbin/ci-install-optional-tools
+
+install -d "$(dirname /etc/systemd/system/ci-optional-tools.service)"
+cat > /etc/systemd/system/ci-optional-tools.service <<'__SIC_EOF__'
+[Unit]
+Description=Install optional GitLab Runner host tools
+After=cloud-final.service network-online.target
+ConditionPathExists=!/var/lib/ci-optional-tools/done
+
+[Service]
+Type=exec
+StateDirectory=ci-optional-tools
+ExecStart=/usr/local/sbin/ci-install-optional-tools
+
+[Install]
+WantedBy=cloud-init.target
+__SIC_EOF__
+chmod 644 /etc/systemd/system/ci-optional-tools.service
+
+restorecon -R /etc/ssh/sshd_config.d /etc/docker /etc/gitlab-runner /etc/profile.d /usr/local/sbin /etc/yum.repos.d /etc/sysctl.d /etc/systemd/system
 sysctl --system
 sh -c 'if sshd -t; then systemctl reload sshd; else rm -f /etc/ssh/sshd_config.d/00-ci-hardening.conf; echo ssh-dropin-rejected-defaults-kept >> /var/log/ci-bootstrap-failed.log; fi'
-sh -c 'dnf -y -q install epel-release || echo optional-tool-missing-epel >> /var/log/ci-bootstrap-failed.log; for p in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do dnf -y -q install $p || echo optional-tool-missing-$p >> /var/log/ci-bootstrap-failed.log; done'
 sh -c 'if [ -f /etc/dnf/automatic.conf ]; then sed -i -E '"'"'s/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/'"'"' /etc/dnf/automatic.conf && systemctl enable --now dnf-automatic.timer; else echo dnf-automatic-config-not-found >> /var/log/ci-bootstrap-failed.log; fi'
 systemctl restart systemd-journald
 timedatectl set-timezone Europe/Kyiv
@@ -269,6 +303,8 @@ dnf -y -q install gitlab-runner
 usermod -aG docker gitlab-runner
 chmod 600 /etc/gitlab-runner/config.toml
 systemctl restart gitlab-runner
+systemctl daemon-reload
+systemctl start ci-optional-tools.service
 sh -c 'for s in sshd docker gitlab-runner; do systemctl is-active --quiet $s || [ $s = docker -a -s /var/log/ci-docker-reboot.log ] || echo bootstrap-check-failed-$s >> /var/log/ci-bootstrap-failed.log; done'
 
 systemctl is-active docker gitlab-runner
@@ -1593,13 +1629,13 @@ done
 install -d -m 0755 /etc/server-freshness
 printf '%s\n' "$REPO_ROOT" | install -m 0644 /dev/stdin /etc/server-freshness/repo
 restorecon_if -R /etc/server-freshness
-for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
+for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh h2ci-telegram-notify; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer h2ci-telegram-notify@.service; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
@@ -2118,7 +2154,16 @@ check_updates() {
       | awk '{ print $1 }' | grep -E 'zypper|yum-cron|unattended|transactional-update|packagekit-offline' | head -1 || true)
   fi
 
-  if [[ -z "$found" ]]; then
+  if unit_exists h2ci-daily-maintenance.service; then
+    if systemctl is-active --quiet crond.service &&
+       grep -qsFx 'CRON_TZ=Europe/Kyiv' /etc/cron.d/h2ci-telegram-daily &&
+       grep -qsFx '0 11 * * * root /usr/bin/systemctl start h2ci-daily-maintenance.service' /etc/cron.d/h2ci-telegram-daily; then
+      ok "automatic updates: h2ci daily maintenance (cron, 11:00 Europe/Kyiv)"
+      [[ -z "$found" ]] || warn "h2ci daily maintenance and ${found} are both enabled"
+    else
+      warn "h2ci daily maintenance is installed but the expected cron schedule is not active"
+    fi
+  elif [[ -z "$found" ]]; then
     warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
   elif [[ "$found" == server-update.timer ]]; then
     local dup=""
@@ -2982,6 +3027,7 @@ check_trends() {
 # ---- brief mode: a short summary for the login screen and `srv status` -------------------------------------------
 BRIEF_DIR="${HEALTH_BRIEF_DIR:-/var/lib/server-health}"
 UPDATE_STATE="${SERVER_UPDATE_STATE:-/var/lib/server-update}/state"
+MANAGED_UPDATE_STATE="${H2CI_UPDATE_STATUS_FILE:-/var/lib/h2ci-server-update/state}"
 CLEANUP_STATE="${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}"
 
 # kv FILE KEY: value of key=value in a one-line state file (empty when missing)
@@ -2993,6 +3039,22 @@ lvl() {
 }
 ago() { # ago EPOCH: "3d4h ago" or "never"
   if [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]]; then echo "$(human_age $(( $(date +%s) - $1 ))) ago"; else echo never; fi
+}
+
+managed_update_status() {
+  local row now stamp outcome reboot changes
+  if IFS= read -r row < "$MANAGED_UPDATE_STATE" &&
+     [[ "$row" =~ ^time=([1-9][0-9]{0,10})\ outcome=(applied|unchanged|partial|failed|busy|unverified)\ reboot=(required|not-needed|unknown)\ changes=([0-9]+|\?)$ ]]; then
+    stamp=${BASH_REMATCH[1]} outcome=${BASH_REMATCH[2]} reboot=${BASH_REMATCH[3]} changes=${BASH_REMATCH[4]}
+    now=$(date +%s)
+    if (( now >= stamp && now - stamp <= 129600 )); then
+      printf '%s (%s package changes recorded); reboot: %s (checked %s)\n' "$outcome" "$changes" "${reboot//-/ }" "$(ago "$stamp")"
+      return
+    fi
+    printf 'stale (last managed update %s); reboot: unknown\n' "$(ago "$stamp")"
+  else
+    printf 'no verified managed update result; reboot: unknown\n'
+  fi
 }
 
 brief_full() { # run the full report when the last one is older than 6 hours; keep its counts for the summary
@@ -3039,7 +3101,9 @@ brief_render() {
       printf '%sf2b%s   not running %s\n' "$C_B" "$C_N" "$(lvl 1 1 2)"
     fi
   fi
-  if [[ -r "$UPDATE_STATE" ]]; then
+  if [[ -r "$MANAGED_UPDATE_STATE" ]] || unit_exists h2ci-server-update.service; then
+    s="update $(managed_update_status 2>/dev/null)"
+  elif [[ -r "$UPDATE_STATE" ]]; then
     u=$(kv "$UPDATE_STATE" updates); r=$(kv "$UPDATE_STATE" reboot)
     printf '%supd%s   %s update(s) pending, reboot needed: %s%s  (checked %s)\n' "$C_B" "$C_N" "${u:-?}" "$( [[ "$r" == 1 ]] && echo yes || echo no )" \
       "$( [[ "$r" == 1 ]] && lvl 1 1 2 )" "$(ago "$(kv "$UPDATE_STATE" time)")"
@@ -3114,6 +3178,7 @@ cat > "$R/common/freshness" <<'__SIC_EOF__'
 """Read cached maintenance status; refresh explicitly, never apply upgrades."""
 import argparse
 import datetime
+import difflib
 import fcntl
 import ipaddress
 import json
@@ -3171,7 +3236,18 @@ def bridge_address():
     raise CheckError("docker0 IPv4 address unavailable")
 
 
-def compare_file(source, deployed, findings, expected=None):
+def unified_file_diff(source, deployed, expected, actual, rendered=False):
+    want, have = expected.decode("utf-8"), actual.decode("utf-8")
+    for text in (want, have):
+        if any(not char.isprintable() and char not in "\t\n" for char in text.replace("\r\n", "\n")):
+            raise ValueError("unsupported control characters")
+    label = f"{source} (rendered)" if rendered else str(source)
+    lines = difflib.unified_diff(want.splitlines(keepends=True), have.splitlines(keepends=True),
+                                 fromfile=label, tofile=str(deployed), n=0)
+    return "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n" for line in lines)
+
+
+def compare_file(source, deployed, findings, expected=None, file_diffs=None):
     label = str(deployed)
     try:
         want = source.read_bytes() if expected is None else expected
@@ -3181,6 +3257,11 @@ def compare_file(source, deployed, findings, expected=None):
         return
     if want != have:
         findings.append({"level": "warning", "item": label, "detail": "differs from repository"})
+        if file_diffs is not None:
+            try:
+                file_diffs.append(unified_file_diff(source, deployed, want, have, rendered=expected is not None))
+            except ValueError:
+                findings.append({"level": "error", "item": label, "detail": "diff requires printable UTF-8 text"})
 
 
 def runtime_drift(directory, findings):
@@ -3213,7 +3294,7 @@ def runtime_drift(directory, findings):
                                  "detail": "running image reference or memory limit differs from deployed Compose"})
 
 
-def drift(repo, root=Path("/")):
+def drift(repo, root=Path("/"), file_diffs=None):
     findings = []
     installed = []
     if not (repo / "runner/stacks").is_dir():
@@ -3232,7 +3313,7 @@ def drift(repo, root=Path("/")):
                     bridge = bridge or bridge_address()
                     expected = (source / name).read_bytes().replace(b"172.17.0.1:4873",
                                                                   f"{bridge}:4873".encode())
-                compare_file(source / name, directory / name, findings, expected)
+                compare_file(source / name, directory / name, findings, expected, file_diffs)
             if stack == "monitoring":
                 for subtree in ("prometheus", "grafana"):
                     if not (source / subtree).is_dir():
@@ -3253,11 +3334,12 @@ def drift(repo, root=Path("/")):
                                     if f"job_name: {job}".encode() not in expected:
                                         expected += (f'  - job_name: {job}\n    static_configs:\n'
                                                      f'      - targets: ["{target}"]\n').encode()
-                        compare_file(file, directory / relative, findings, expected)
+                        compare_file(file, directory / relative, findings, expected, file_diffs)
                 if (root / "opt/logging/docker-compose.yml").exists():
                     compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
-                                 directory / "grafana/provisioning/datasources/loki.yml", findings)
-            runtime_drift(directory, findings)
+                                 directory / "grafana/provisioning/datasources/loki.yml", findings, file_diffs=file_diffs)
+            if file_diffs is None:
+                runtime_drift(directory, findings)
         except (CheckError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             detail = str(exc) if isinstance(exc, CheckError) else "cannot inspect managed stack"
             findings.append({"level": "error", "item": stack, "detail": detail})
@@ -3430,6 +3512,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="read cached report only; no network or writes")
     mode.add_argument("--refresh", action="store_true", help="refresh metadata/network checks and write cached report; never upgrade")
+    mode.add_argument("--diff", action="store_true", help="show local unified diffs for managed files; output may be sensitive")
     parser.add_argument("--drift", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--repo", type=Path, help="repository root (default: /etc/server-freshness/repo)")
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
@@ -3439,14 +3522,29 @@ def main():
     args = parser.parse_args()
     if args.drift and (args.refresh or args.summary):
         parser.error("--drift requires --check and cannot use --summary")
+    if args.diff and (args.json or args.summary):
+        parser.error("--diff cannot be combined with --json or --summary")
     if args.refresh and os.geteuid() != 0:
+        if sys.argv[1:] == ["--refresh"] and Path(
+                "/etc/systemd/system/server-freshness.service.d/20-h2ci-reference.conf").is_file():
+            return subprocess.call(["/usr/bin/systemctl", "--no-ask-password", "start",
+                                    "server-freshness.service"])
         parser.error("--refresh requires root (package metadata and report writes)")
     try:
-        if args.drift or args.refresh:
+        if args.drift or args.refresh or args.diff:
             repo = args.repo or Path("/etc/server-freshness/repo").read_text().strip()
             repo = Path(repo)
             if not repo.is_absolute():
                 raise CheckError("repository path must be absolute")
+        if args.diff:
+            diffs = []
+            findings, _ = drift(repo, args.root, file_diffs=diffs)
+            for diff in diffs:
+                print(diff, end="")
+            for row in findings:
+                if row["level"] == "error":
+                    print(f"ERROR: {row['item']}: {row['detail']}", file=sys.stderr)
+            return 2 if any(row["level"] == "error" for row in findings) else int(bool(findings))
         if args.drift:
             findings, _ = drift(repo, args.root)
             if args.json:
@@ -3517,6 +3615,8 @@ Description=Check package freshness and managed stack drift without upgrading
 After=network-online.target docker.service
 Wants=network-online.target
 ConditionPathExists=/etc/server-freshness/repo
+
+OnFailure=h2ci-telegram-notify@server-freshness.service
 
 [Service]
 Type=oneshot
@@ -3671,6 +3771,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
+  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+    logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
+  fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
 fi
 __SIC_EOF__
@@ -3710,6 +3813,8 @@ cat > "$R/runner/systemd/runner-disk-guard.service" <<'__SIC_EOF__'
 [Unit]
 Description=Emergency disk cleanup when usage is high
 After=docker.service
+
+OnFailure=h2ci-telegram-notify@runner-disk-guard.service
 
 [Service]
 Type=oneshot
@@ -5953,6 +6058,18 @@ gitlab-runner register --non-interactive \
   --docker-volumes "/cache" >/dev/null
 unset token
 
+# Local /cache does not need a distributed adapter with an empty Type.
+cache_tmp=$(mktemp "${CFG}.local-cache.XXXXXX")
+chmod 600 "$cache_tmp"
+trap 'rm -f "$cache_tmp"' EXIT
+awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
+if ! cmp -s "$CFG" "$cache_tmp"; then
+  backup "$CFG"
+  cat "$cache_tmp" > "$CFG"
+fi
+rm -f "$cache_tmp"
+trap - EXIT
+
 if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
@@ -5972,6 +6089,31 @@ else
 fi
 __SIC_EOF__
 chmod 755 "$R/runner/install/register-runner.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/local-cache.awk" <<'__SIC_EOF__'
+# Remove only empty distributed-cache placeholders; preserve configured adapters.
+function flush() {
+  if (keep) printf "%s", block
+  block = ""
+  keep = 0
+}
+{
+  line = $0
+  sub(/^[[:space:]]+/, "", line)
+  sub(/[[:space:]]+$/, "", line)
+  header = (line ~ /^\[runners\.cache(\.(s3|gcs|azure))?\]$/)
+  if (line ~ /^\[/ && !header) { flush(); active = 0 }
+  if (header) active = 1
+  if (!active) { print; next }
+  block = block $0 ORS
+  if (header || line == "" || line ~ /^#/) next
+  if (line ~ /^(MaxUploadedArchiveSize|AssumeRoleMaxConcurrency)[[:space:]]*=[[:space:]]*0([[:space:]]*#.*)?$/) next
+  keep = 1
+}
+END { flush() }
+__SIC_EOF__
+chmod 644 "$R/runner/install/local-cache.awk"
 
 install -d "$R/runner/install"
 cat > "$R/runner/install/job-limits.sh" <<'__SIC_EOF__'
@@ -6107,7 +6249,7 @@ awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 
 __SIC_EOF__
 chmod 755 "$R/runner/install/job-limits.sh"
 
-echo "files written to $R: 3"
+echo "files written to $R: 4"
 INSTALL
 sudo DESCRIPTION=hetzner-cax11 bash /root/server-init-config/runner/install/register-runner.sh
 ````
@@ -13014,13 +13156,13 @@ done
 install -d -m 0755 /etc/server-freshness
 printf '%s\n' "$REPO_ROOT" | install -m 0644 /dev/stdin /etc/server-freshness/repo
 restorecon_if -R /etc/server-freshness
-for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
+for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh h2ci-telegram-notify; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer h2ci-telegram-notify@.service; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
@@ -13267,6 +13409,31 @@ fi
 awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|shm_size|cgroup_parent|service_[a-z_]+)[[:space:]]*=/' "$CFG"
 __SIC_EOF__
 chmod 755 "$R/runner/install/job-limits.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/local-cache.awk" <<'__SIC_EOF__'
+# Remove only empty distributed-cache placeholders; preserve configured adapters.
+function flush() {
+  if (keep) printf "%s", block
+  block = ""
+  keep = 0
+}
+{
+  line = $0
+  sub(/^[[:space:]]+/, "", line)
+  sub(/[[:space:]]+$/, "", line)
+  header = (line ~ /^\[runners\.cache(\.(s3|gcs|azure))?\]$/)
+  if (line ~ /^\[/ && !header) { flush(); active = 0 }
+  if (header) active = 1
+  if (!active) { print; next }
+  block = block $0 ORS
+  if (header || line == "" || line ~ /^#/) next
+  if (line ~ /^(MaxUploadedArchiveSize|AssumeRoleMaxConcurrency)[[:space:]]*=[[:space:]]*0([[:space:]]*#.*)?$/) next
+  keep = 1
+}
+END { flush() }
+__SIC_EOF__
+chmod 644 "$R/runner/install/local-cache.awk"
 
 install -d "$R/runner/install"
 cat > "$R/runner/install/lock-root.sh" <<'__SIC_EOF__'
@@ -13724,6 +13891,18 @@ gitlab-runner register --non-interactive \
   --docker-volumes "/cache" >/dev/null
 unset token
 
+# Local /cache does not need a distributed adapter with an empty Type.
+cache_tmp=$(mktemp "${CFG}.local-cache.XXXXXX")
+chmod 600 "$cache_tmp"
+trap 'rm -f "$cache_tmp"' EXIT
+awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
+if ! cmp -s "$CFG" "$cache_tmp"; then
+  backup "$CFG"
+  cat "$cache_tmp" > "$CFG"
+fi
+rm -f "$cache_tmp"
+trap - EXIT
+
 if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
@@ -14148,9 +14327,9 @@ script_path() {
 
 update_host_tools() {
   local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
-  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh h2ci-telegram-notify)
   local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
-                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer)
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer h2ci-telegram-notify@.service)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -14161,9 +14340,9 @@ update_host_tools() {
   # health is shared with plain servers (common/); the other scripts belong to the runner host.
   command -v python3 >/dev/null || die "python3 is required for freshness checks"
   for f in "${scripts[@]}"; do
-    if [[ "$f" == freshness ]]; then
-      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/common/freshness" \
-        || die "syntax error in freshness, nothing changed"
+    if [[ "$f" == freshness || "$f" == h2ci-telegram-notify ]]; then
+      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/$(script_path "$f")" \
+        || die "syntax error in $f, nothing changed"
     else
       bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
     fi
@@ -16107,6 +16286,783 @@ __SIC_EOF__
 chmod 644 "$R/runner/scripts/github-runner-ctl"
 
 install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/h2ci-maintenance" <<'__SIC_EOF__'
+#!/usr/bin/python3
+"""Root-owned h2ci maintenance entry points; no caller-supplied command arguments."""
+
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+UPDATE_RESULT = Path("/run/h2ci-server-update/result.json")
+HEALTH_STATE = Path("/var/lib/h2ci-server-update/state")
+DAILY_REPORT = Path("/run/h2ci-daily-maintenance/report.json")
+DELIVERY_RECEIPT = DAILY_REPORT.with_name("delivery.json")
+FRESH_REPORT = Path("/var/lib/server-freshness/report.json")
+HISTORY = Path("/var/lib/dnf/history.sqlite")
+LOCKS = ("/run/runner-engine-update.lock", "/run/server-update.lock")
+DNF = ("/usr/bin/dnf", "--refresh", "--setopt=gpgcheck=1", "--setopt=*.gpgcheck=1",
+       "--setopt=*.skip_if_unavailable=False", "--setopt=history_record=True",
+       "--exclude=docker-ce*,containerd.io,docker-buildx-plugin,docker-compose-plugin,gitlab-runner*")
+SYSTEMCTL = ("/usr/bin/systemctl", "--no-ask-password", "start")
+PACKAGE_FIELD = re.compile(r"[A-Za-z0-9_+.~^:-]{1,180}")
+
+
+def log(message):
+    print(f"h2ci-maintenance: {message}", file=sys.stderr, flush=True)
+
+
+def run(*args):
+    return subprocess.run(args, stdin=subprocess.DEVNULL, check=False).returncode
+
+
+def write_atomic(path, text, mode):
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as out:
+        name = out.name
+        try:
+            out.write(text)
+            out.flush()
+            os.fchmod(out.fileno(), mode)
+            os.replace(name, path)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+
+def write_json(path, payload):
+    write_atomic(path, json.dumps(payload), 0o600)
+
+
+def write_health_state(result):
+    outcome = result["update"]
+    changes = len(result["packages"]) if outcome in {"applied", "unchanged", "partial"} else "?"
+    reboot = result["reboot"].replace(" ", "-")
+    write_atomic(HEALTH_STATE, f"time={int(time.time())} outcome={outcome} reboot={reboot} changes={changes}\n", 0o644)
+
+
+def rpm_inventory():
+    try:
+        output = subprocess.check_output(
+            ("/usr/bin/rpm", "-qa", "--qf",
+             r"%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{INSTALLTIME}\t%{INSTALLTID}\n"),
+            stdin=subprocess.DEVNULL, timeout=30,
+        )
+        return sorted(output.splitlines()) if output else None
+    except (OSError, subprocess.SubprocessError):
+        log("RPM inventory unavailable")
+        return None
+
+
+def transaction(comment, history=HISTORY):
+    from libdnf import transaction as constants
+
+    with contextlib.closing(sqlite3.connect(f"{history.as_uri()}?mode=ro", uri=True)) as db:
+        matches = db.execute("SELECT id, state FROM trans WHERE comment = ?", (comment,)).fetchall()
+        if not matches:
+            return None, []
+        if len(matches) != 1:
+            raise ValueError("ambiguous transaction comment")
+        transaction_id, state = matches[0]
+        actions = {
+            constants.TransactionItemAction_INSTALL: "Installed",
+            constants.TransactionItemAction_UPGRADE: "Updated",
+            constants.TransactionItemAction_DOWNGRADE: "Downgraded",
+            constants.TransactionItemAction_REINSTALL: "Reinstalled",
+            constants.TransactionItemAction_OBSOLETE: "Installed",
+            constants.TransactionItemAction_OBSOLETED: "Removed",
+            constants.TransactionItemAction_REMOVE: "Removed",
+        }
+        rows = db.execute("""
+            SELECT DISTINCT i.action, r.name, r.epoch, r.version, r.release, r.arch
+            FROM trans_item i JOIN rpm r USING (item_id)
+            WHERE i.trans_id = ? AND i.state = ?
+            ORDER BY r.name, r.arch, i.action, r.epoch, r.version, r.release
+        """, (transaction_id, constants.TransactionItemState_DONE))
+        packages = []
+        for action, name, epoch, version, release, arch in rows:
+            if action not in actions:
+                continue
+            if not all(PACKAGE_FIELD.fullmatch(value) for value in (name, version, release, arch)):
+                raise ValueError("invalid RPM history fields")
+            evr = (f"{epoch}:" if epoch else "") + f"{version}-{release}"
+            packages.append(f"{actions[action]} {name}.{arch} {evr}")
+        return state == constants.TransactionState_DONE, packages
+
+
+def reboot_status():
+    check = subprocess.run(("/usr/bin/dnf", "-q", "-C", "needs-restarting", "-r"),
+                           capture_output=True, text=True, timeout=60, check=False,
+                           env={**os.environ, "LC_ALL": "C"})
+    # A generic DNF error can also exit 1; require the plugin's affirmative output.
+    if check.returncode == 1 and "Reboot is required" in check.stdout:
+        return "required"
+    if check.returncode == 0 and "Reboot should not be necessary" in check.stdout:
+        return "not needed"
+    return "unknown"
+
+
+def update():
+    result = {"update": "failed", "packages": [], "reboot": "unknown"}
+    try:
+        with contextlib.ExitStack() as stack:
+            for name in LOCKS:
+                lock = stack.enter_context(open(name, "a"))
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    result["update"] = "busy"
+                    return 75
+            comment = "h2ci-maintenance:" + uuid.uuid4().hex
+            before = rpm_inventory()
+            rc = run(*DNF, "--assumeyes", f"--comment={comment}", "upgrade")
+            try:
+                complete, packages = transaction(comment)
+                result["packages"] = packages
+                if rc == 0 and complete is True and packages:
+                    result["update"] = "applied"
+                elif rc == 0 and not packages and complete is not False and before is not None and rpm_inventory() == before:
+                    result["update"] = "unchanged"
+                elif packages:
+                    result["update"] = "partial"
+                elif rc == 0:
+                    result["update"] = "unverified"
+            except (OSError, ImportError, sqlite3.Error, ValueError) as exc:
+                log(f"transaction details unavailable ({type(exc).__name__})")
+                result["update"] = "unverified" if rc == 0 else "failed"
+            try:
+                result["reboot"] = reboot_status()
+            except (OSError, subprocess.TimeoutExpired):
+                log("reboot check unavailable")
+            return int(result["update"] not in {"applied", "unchanged"})
+    finally:
+        result["finished_ns"] = time.monotonic_ns()
+        write_health_state(result)
+        write_json(UPDATE_RESULT, result)
+        log(f"update={result['update']} packages={len(result['packages'])} reboot={result['reboot']}")
+
+
+def fingerprint(path):
+    try:
+        info = path.stat()
+        return info.st_ino, info.st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def deliver(result):
+    run_id = uuid.uuid4().hex
+    write_json(DAILY_REPORT, {**result, "run_id": run_id})
+    if run(*SYSTEMCTL, "h2ci-telegram-notify@daily.service") == 0:
+        try:
+            receipt = json.loads(DELIVERY_RECEIPT.read_text())
+            if receipt["run_id"] == run_id and type(receipt["message_id"]) is int and receipt["message_id"] > 0:
+                return True
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    log("Telegram delivery not confirmed for this run")
+    return False
+
+
+def daily(test=False):
+    started = time.monotonic_ns()
+    result = {"update": "failed", "packages": [], "reboot": "unknown"}
+    if test:
+        result = {"update": "applied", "packages": ["Updated example-package.aarch64 2.0-1"],
+                  "reboot": "required", "test": True}
+    else:
+        try:
+            run(*SYSTEMCTL, "h2ci-server-update.service")
+            current = json.loads(UPDATE_RESULT.read_text())
+            if current.pop("finished_ns") >= started:
+                result = current
+        except (OSError, ValueError, KeyError, TypeError):
+            log("no update result for this run")
+    result["freshness"] = "failed"
+    try:
+        before = fingerprint(FRESH_REPORT)
+        rc = run(*SYSTEMCTL, "server-freshness.service")
+        after = fingerprint(FRESH_REPORT)
+        if rc == 0 and after is not None and after != before:
+            result["freshness"] = "refreshed"
+    except OSError:
+        log("freshness result unavailable")
+    delivered = deliver(result)
+    return int(not delivered or result["freshness"] != "refreshed"
+               or result["update"] not in {"applied", "unchanged"})
+
+
+def main():
+    if os.geteuid() or len(sys.argv) != 2:
+        return 2
+    if sys.argv[1] == "update":
+        return update()
+    if sys.argv[1] == "preview":
+        return run(*DNF, "--assumeno", "upgrade")
+    if sys.argv[1] in {"daily", "test"}:
+        return daily(test=sys.argv[1] == "test")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+__SIC_EOF__
+chmod 644 "$R/runner/scripts/h2ci-maintenance"
+
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/h2ci-telegram-notify" <<'__SIC_EOF__'
+#!/usr/bin/python3
+"""Send a fixed monitor event using credentials supplied by systemd."""
+
+from datetime import datetime
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+from urllib.parse import urlencode
+
+EVENTS = {
+    "disk-threshold": "Root filesystem reached the disk guard threshold; emergency cleanup triggered.",
+    "runner-disk-guard": "Disk guard failed. Check: journalctl -u runner-disk-guard.service",
+    "server-freshness": "Freshness check failed. Check: journalctl -u server-freshness.service",
+    "test": "TEST: systemd monitor alert delivery verified.",
+}
+
+
+def read_status(*command):
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=2).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def queue_size(metrics):
+    sizes = []
+    for line in metrics.splitlines():
+        match = re.fullmatch(rb"gitlab_runner_job_queue_size(?:\{.*\})?\s+(\S+)", line)
+        if match:
+            try:
+                size = float(match[1])
+            except ValueError:
+                return None
+            if size < 0 or not size.is_integer():
+                return None
+            sizes.append(int(size))
+    return sizes or None
+
+
+def runner_queue():
+    connection = http.client.HTTPConnection("127.0.0.1", 9252, timeout=1.5)
+    try:
+        connection.request("GET", "/metrics")
+        response = connection.getresponse()
+        if response.status == 200:
+            limit = 1024 * 1024
+            data = response.read(limit + 1)
+            if len(data) <= limit:
+                sizes = queue_size(data)
+                if sizes:
+                    suffix = " (sum across runner series)" if len(sizes) > 1 else ""
+                    return f"{sum(sizes)} queued{suffix}"
+    except (OSError, http.client.HTTPException):
+        pass
+    finally:
+        connection.close()
+    return "unavailable"
+
+
+def grafana_backup_age(directory, now):
+    newest = None
+    try:
+        for archive in directory.iterdir():
+            if not re.fullmatch(r"grafana-.+-[0-9]{8}-[0-9]{6}\.tar\.gz", archive.name):
+                continue
+            try:
+                info = archive.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                newest = info.st_mtime if newest is None else max(newest, info.st_mtime)
+    except FileNotFoundError:
+        return "no local archive found"
+    except OSError:
+        return "unavailable"
+    if newest is None:
+        return "no local archive found"
+    if newest > now:
+        return "unavailable (archive timestamp is in the future)"
+    minutes = int((now - newest) // 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    if days:
+        return f"{days}d {hours}h ago"
+    if hours:
+        return f"{hours}h {minutes}m ago"
+    return f"{minutes}m ago"
+
+
+def confirmed_outcomes(journal):
+    outcomes = {}
+    for record in sorted(journal, key=lambda row: int(row["__REALTIME_TIMESTAMP"])):
+        message = record.get("MESSAGE")
+        # journald encodes Runner's ANSI-colored messages as byte arrays in JSON mode.
+        if isinstance(message, list) and all(type(value) is int and 0 <= value <= 255 for value in message):
+            message = bytes(message).decode("utf-8", errors="replace")
+        if not isinstance(message, str):
+            continue
+        message = re.sub(r"\x1b\[[0-9;]*m", "", message)
+        if not re.match(r"^\s*(?:(?:INFO|WARNING|ERROR):\s+)?Submitting job to coordinator(?=[.\s]|$)", message):
+            continue
+        if not re.search(r"(?:^|\s)code=2[0-9]{2}(?=\s|$)", message):
+            continue
+        outcome = re.search(r"(?:^|\s)job-status=(success|failed|cancell?ed)(?=\s|$)", message)
+        job = re.search(r"(?:^|\s)job=([0-9]+)(?=\s|$)", message)
+        if outcome and job:
+            outcomes[job[1]] = outcome[1]
+    if not outcomes:
+        return None
+    states = tuple(outcomes.values())
+    return states.count("failed"), states.count("success"), sum(s in ("canceled", "cancelled") for s in states)
+
+
+def ci_outcomes_24h():
+    now = int(datetime.now().timestamp())
+    limit = 4096
+    try:
+        result = subprocess.run(
+            ("/usr/bin/journalctl", "--no-pager", "--unit=gitlab-runner.service", "SYSLOG_IDENTIFIER=gitlab-runner",
+             f"--since=@{now - 86400}", f"--until=@{now}", "--output=json", "--output-fields=MESSAGE",
+             "--grep=Submitting job to coordinator", f"--lines={limit + 1}"),
+            capture_output=True, text=True, timeout=2, check=True,
+        )
+        records = result.stdout.splitlines()
+        if result.stderr.strip() or len(records) > limit:
+            return "unavailable (incomplete Runner journal query)"
+        outcomes = confirmed_outcomes(json.loads(line) for line in records)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return "unavailable (Runner journal query did not return outcomes)"
+    return outcomes if outcomes is not None else "unavailable (no confirmed outcomes in Runner journal)"
+
+
+def ci_failure_rate(outcomes):
+    if isinstance(outcomes, str):
+        return outcomes, 0
+    failed, succeeded, canceled = outcomes
+    completed = failed + succeeded
+    if not completed:
+        return f"n/a (0 completed; {canceled} canceled)", failed
+    return f"{failed / completed:.1%} ({failed} failed / {completed} completed; {canceled} canceled)", failed
+
+
+DISK_WARNING_PERCENT = 75
+GIB = 1024 ** 3
+MAINTENANCE_SUMMARY = re.compile(
+    r"OS updates=(?P<updates>[0-9]+|unknown), image release candidates=[0-9]+, "
+    r"drift=(?P<drift>[0-9]+), errors=(?P<errors>[0-9]+), "
+    r"reboot=(?P<reboot>not-required|required|unknown), age=[0-9]+h(?P<stale> \(STALE\))?",
+)
+
+
+def historical_root_free(device):
+    query = 'node_filesystem_avail_bytes{job="node",mountpoint="/"} offset 24h'
+    connection = http.client.HTTPConnection("127.0.0.1", 9090, timeout=1.5)
+    try:
+        connection.request("GET", "/api/v1/query?" + urlencode({"query": query}))
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        payload = json.loads(response.read(65536))
+        data = payload["data"]
+        if payload["status"] != "success" or data["resultType"] != "vector":
+            return None
+        matches = [row for row in data["result"] if row["metric"].get("device") == device]
+        if len(matches) == 1:
+            value = float(matches[0]["value"][1])
+            if value >= 0 and value.is_integer():
+                return int(value)
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, IndexError, AttributeError):
+        pass
+    finally:
+        connection.close()
+    return None
+
+
+def disk_status():
+    raw = read_status("/usr/bin/df", "-B1", "--output=source,avail,pcent", "/").splitlines()
+    fields = raw[-1].split() if len(raw) == 2 else []
+    if len(fields) != 3 or not re.fullmatch(r"[0-9]+", fields[1]) or not re.fullmatch(r"[0-9]+%", fields[2]):
+        return None, "Root disk: unavailable", "Disk trend (24h): unavailable"
+    device, available, usage = fields[0], int(fields[1]), int(fields[2][:-1])
+    disk = f"Root disk: {usage}% used, {available / GIB:.1f} GiB free"
+    previous = historical_root_free(device)
+    if previous is None:
+        trend = "unavailable (no matching baseline)"
+    else:
+        delta = (available - previous) / GIB
+        if abs(delta) < 0.05:
+            trend = "less than 0.1 GiB change in free space"
+        else:
+            direction = "more" if delta > 0 else "less"
+            trend = f"{abs(delta):.1f} GiB {direction} free"
+    return usage, disk, "Disk trend (24h): " + trend
+
+
+def raid_health(root=Path("/sys/block")):
+    lines, actions = [], []
+    try:
+        devices = sorted(p / "md" for p in root.iterdir() if re.fullmatch(r"md[0-9]+", p.name) and (p / "md").is_dir())
+    except OSError:
+        return ["RAID: unavailable (cannot read Linux software RAID status)"], ["Check RAID status manually"]
+    if not devices:
+        return [], []
+    for device in devices:
+        name = device.parent.name
+        try:
+            state = (device / "array_state").read_text().strip()
+            missing = int((device / "degraded").read_text())
+            sync = (device / "sync_action").read_text().strip()
+            if missing < 0 or state not in {"clear", "inactive", "suspended", "readonly", "read-auto", "clean", "active", "write-pending", "active-idle", "broken"}:
+                raise ValueError("unrecognized RAID state")
+        except (OSError, ValueError):
+            lines.append(f"RAID {name}: status unavailable")
+            actions.append(f"Check RAID {name} manually (state unavailable)")
+            continue
+        if missing:
+            lines.append(f"RAID {name}: degraded ({missing} missing member(s))")
+            actions.append(f"Check degraded RAID {name} and identify the missing member(s)")
+        elif state in {"clear", "inactive", "suspended", "readonly", "broken"}:
+            lines.append(f"RAID {name}: {state}")
+            actions.append(f"Check RAID {name} ({state})")
+        elif sync in {"resync", "recover", "check", "repair", "reshape"}:
+            lines.append(f"RAID {name}: no missing members; {sync} in progress")
+        else:
+            lines.append(f"RAID {name}: {state}, no missing members")
+    return lines, actions
+
+
+# Expected loopback targets on h2ci; keep this independent of Prometheus discovery so a removed target is visible.
+PROMETHEUS_TARGETS = {
+    "prometheus": 9090,
+    "node": 9100,
+    "gitlab-runner": 9252,
+    "loki": 3100,
+    "alloy": 12345,
+    "registry-cache": 5001,
+}
+PROMETHEUS_STALE_SECONDS = 60
+
+
+def scrape_state(values, now):
+    if not values:
+        return "missing"
+    previous = -1
+    recent = []
+    for timestamp, up in values:
+        timestamp = float(timestamp)
+        if not previous < timestamp <= now + 5 or up not in ("0", "1"):
+            return "invalid"
+        previous = timestamp
+        if now - timestamp <= PROMETHEUS_STALE_SECONDS:
+            recent.append(up)
+    if not recent:
+        return "stale"
+    if recent[-1] == "1":
+        return "healthy"
+    return "down" if recent[-3:] == ["0", "0", "0"] else "transient"
+
+
+def classify_prometheus_targets(rows, now):
+    states = {}
+    for row in rows:
+        labels = row["metric"]
+        job = labels.get("job")
+        port = PROMETHEUS_TARGETS.get(job)
+        if port is None or labels.get("instance") != f"127.0.0.1:{port}":
+            continue
+        state = "invalid"
+        if job not in states:
+            try:
+                state = scrape_state(row["values"], now)
+            except (KeyError, TypeError, ValueError):
+                pass
+        states[job] = state
+    return {job: states.get(job, "missing") for job in PROMETHEUS_TARGETS}
+
+
+def prometheus_health():
+    jobs = "|".join(PROMETHEUS_TARGETS)
+    query = 'up{job=~"' + jobs + '"}[5m]'
+    connection = http.client.HTTPConnection("127.0.0.1", 9090, timeout=1.5)
+    try:
+        connection.request("GET", "/api/v1/query?" + urlencode({"query": query}))
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError("Prometheus query failed")
+        limit = 256 * 1024
+        body = response.read(limit + 1)
+        if len(body) > limit:
+            raise ValueError("Prometheus response exceeded size limit")
+        payload = json.loads(body)
+        data = payload["data"]
+        if payload["status"] != "success" or data["resultType"] != "matrix" or not isinstance(data["result"], list):
+            raise ValueError("unexpected Prometheus query response")
+        states = classify_prometheus_targets(data["result"], datetime.now().timestamp())
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError):
+        return "Prometheus targets: unavailable", ["Check Prometheus health (target query unavailable)"]
+    finally:
+        connection.close()
+    healthy = sum(state == "healthy" for state in states.values())
+    summary = [f"{healthy}/{len(states)} healthy"]
+    actions = []
+    for status, label, action in (
+        ("missing", "missing", "Check missing Prometheus targets"),
+        ("stale", "stale", "Check stale Prometheus targets (no fresh scrape in 60s)"),
+        ("down", "down", "Check failing Prometheus targets (last 3 scrapes failed)"),
+        ("invalid", "invalid data", "Check invalid Prometheus target data"),
+        ("transient", "recent scrape failures", None),
+    ):
+        affected = [job for job, state in states.items() if state == status]
+        if affected:
+            summary.append(f"{len(affected)} {label}")
+            if action:
+                actions.append(action + ": " + ", ".join(affected))
+    return "Prometheus targets: " + "; ".join(summary), actions
+
+
+def host_anomaly_query():
+    node = '{job="node",instance="127.0.0.1:9100"}'
+    root = '{job="node",instance="127.0.0.1:9100",mountpoint="/"}'
+    readonly = "node_filesystem_readonly" + root
+    files = "node_filesystem_files" + root
+    free = "node_filesystem_files_free" + root
+    oom = "node_vmstat_oom_kill" + node
+
+    def fresh(metric):
+        return f"({metric} and (timestamp({metric}) > time() - {PROMETHEUS_STALE_SECONDS}))"
+
+    # The exporter scrapes every 15s; require 75% coverage for 15m and 90% for 24h.
+    expressions = {
+        "readonly": fresh(readonly),
+        "inode_free_max_ratio": (f"(max_over_time({free}[15m]) / ({fresh(files)} > 0)) "
+                                 f"and {fresh(free)} and (count_over_time({free}[15m]) >= 45)"),
+        "oom_24h": f"increase({oom}[24h]) and {fresh(oom)} and (count_over_time({oom}[24h]) >= 5184)",
+    }
+    return " or ".join(f'label_replace(({expression}), "signal", "{signal}", "", "")'
+                       for signal, expression in expressions.items())
+
+
+def host_anomaly_actions(rows):
+    metrics = {}
+    for row in rows:
+        signal = row["metric"].get("signal")
+        if signal not in ("readonly", "inode_free_max_ratio", "oom_24h"):
+            continue
+        if signal in metrics:
+            metrics[signal] = None
+            continue
+        try:
+            value = float(row["value"][1])
+            metrics[signal] = value if 0 <= value < float("inf") else None
+        except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+            metrics[signal] = None
+    actions = []
+    readonly = metrics.get("readonly")
+    if readonly == 1:
+        actions.append("Investigate read-only root filesystem (Docker storage is on this mount)")
+    elif readonly != 0:
+        actions.append("Verify Docker storage writability (root filesystem metric unavailable)")
+    inode_ratio = metrics.get("inode_free_max_ratio")
+    if inode_ratio is None or inode_ratio > 1:
+        actions.append("Verify root inode headroom (insufficient fresh samples)")
+    elif inode_ratio < 0.10:
+        actions.append("Check root inode usage (under 10% free across the last 15 minutes of samples)")
+    oom = metrics.get("oom_24h")
+    if oom is None:
+        actions.append("Verify host OOM activity (insufficient data for the last 24h)")
+    elif oom > 0:
+        actions.append(f"Check memory pressure and runner limits (about {max(1, round(oom))} host OOM kill(s) in the last 24h)")
+    return actions
+
+
+def host_anomalies():
+    connection = http.client.HTTPConnection("127.0.0.1", 9090, timeout=1.5)
+    try:
+        connection.request("GET", "/api/v1/query?" + urlencode({"query": host_anomaly_query()}))
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError("Prometheus query failed")
+        limit = 65536
+        body = response.read(limit + 1)
+        if len(body) > limit:
+            raise ValueError("Prometheus response exceeded size limit")
+        payload = json.loads(body)
+        data = payload["data"]
+        if payload["status"] != "success" or data["resultType"] != "vector" or not isinstance(data["result"], list):
+            raise ValueError("unexpected Prometheus host query response")
+        return host_anomaly_actions(data["result"])
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError):
+        return ["Check host monitoring (storage and OOM metrics unavailable)"]
+    finally:
+        connection.close()
+
+
+def daily_maintenance(result):
+    update = result.get("update")
+    packages = result.get("packages", [])
+    reboot = result.get("reboot", "unknown")
+    refreshed = result.get("freshness") == "refreshed"
+    update_label = {
+        "applied": f"{len(packages)} package changes applied",
+        "unchanged": "none",
+        "busy": "skipped — another maintenance run holds the lock",
+        "partial": f"failed — {len(packages)} recorded package changes",
+        "unverified": "outcome could not be verified",
+    }.get(update, "failed or unavailable")
+    reboot_label = {"required": "required — not performed", "not needed": "not needed"}.get(reboot, "unknown")
+    freshness_label = "refreshed" if refreshed else "failed or unavailable"
+    actions = []
+    if update not in {"applied", "unchanged"}:
+        actions.append("Check the OS update result (h2ci-server-update.service)")
+    if reboot == "required":
+        actions.append("Schedule the required reboot")
+    elif reboot != "not needed":
+        actions.append("Verify whether a reboot is required")
+    if not refreshed:
+        actions.append("Check the freshness refresh (server-freshness.service)")
+    lines = ["Maintenance:"]
+    if update == "unchanged":
+        lines.append(f"Updates: {update_label} · Reboot: {reboot_label} · Freshness: {freshness_label}")
+    else:
+        lines.append("Updates: " + update_label)
+        lines.extend(f"- {package[:230]}" for package in packages[:6])
+        if len(packages) > 6:
+            lines.append(f"- +{len(packages) - 6} more (see DNF history)")
+        lines.extend((f"Reboot: {reboot_label}", f"Freshness: {freshness_label}"))
+    return lines, actions
+
+
+def daily_status(result=None):
+    result = result if result is not None else {"update": "unverified"}
+    maintenance_lines, actions = daily_maintenance(result)
+    usage, disk, trend = disk_status()
+    if usage is None:
+        actions.append("Check root disk status (reading unavailable)")
+    elif usage >= DISK_WARNING_PERCENT:
+        actions.append(f"Check root disk space ({usage}% used; warning at {DISK_WARNING_PERCENT}%)")
+    raid_lines, raid_actions = raid_health()
+    actions.extend(raid_actions)
+    monitoring, monitoring_actions = prometheus_health()
+    actions.extend(monitoring_actions)
+    actions.extend(host_anomalies())
+    lines = [disk, trend, *raid_lines, monitoring]
+    units = ("gitlab-runner.service", "docker.service")
+    raw_states = read_status("/usr/bin/systemctl", "show", "-p", "Id", "-p", "ActiveState", "-p", "Result", *units)
+    statuses = {}
+    for group in raw_states.split("\n\n"):
+        fields = dict(row.split("=", 1) for row in group.splitlines() if "=" in row)
+        if fields.get("Id") in units:
+            statuses[fields["Id"]] = fields
+    known = {"active", "inactive", "failed", "activating", "deactivating", "reloading", "maintenance"}
+    for label, unit in (("GitLab Runner", units[0]), ("Docker", units[1])):
+        state = statuses.get(unit, {}).get("ActiveState")
+        state = state if state in known else "unknown"
+        lines.append(f"{label}: {state}")
+        if state != "active":
+            actions.append(f"Check {label} ({state})")
+    summary = (read_status("/usr/local/bin/freshness", "--check", "--summary")
+               if result.get("freshness") == "refreshed" else "")
+    maintenance = MAINTENANCE_SUMMARY.fullmatch(summary)
+    if maintenance:
+        if maintenance["stale"]:
+            actions.append("Refresh stale maintenance data")
+        if maintenance["errors"] != "0":
+            actions.append(f"Investigate {maintenance['errors']} maintenance errors")
+    elif result.get("freshness") == "refreshed":
+        actions.append("Check missing maintenance data")
+    if maintenance:
+        maintenance_lines.append("Freshness details: " + summary.rsplit(", reboot=", 1)[0])
+    lines.append("Runner queue: " + runner_queue())
+    rate, failed = ci_failure_rate(ci_outcomes_24h())
+    if failed:
+        actions.append(f"Review {failed} failed CI jobs in GitLab (last 24h)")
+    lines.append("CI failure rate (last 24h): " + rate)
+    backup_age = grafana_backup_age(Path("/var/backups/monitoring"), datetime.now().timestamp())
+    if backup_age != "no local archive found":
+        lines.append("Grafana backup: " + backup_age)
+    header = ["Action needed:", *("- " + action for action in actions), ""] if actions else []
+    title = "TEST · Daily maintenance and health report" if result.get("test") else "Daily maintenance and health report"
+    return "\n".join([title, "", *header, *maintenance_lines, "", "Health:", *lines])
+
+
+def main():
+    if len(sys.argv) != 2 or (sys.argv[1] != "daily" and sys.argv[1] not in EVENTS):
+        print("Unknown Telegram alert event", file=sys.stderr)
+        return 2
+    event = sys.argv[1]
+    try:
+        credential = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "telegram.credentials"
+        token, chat_id = credential.read_text(encoding="ascii").splitlines()
+        if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token) or not re.fullmatch(r"-?[0-9]+", chat_id):
+            print("Invalid Telegram credentials format", file=sys.stderr)
+            return 2
+        os.environ["TELEGRAM_BOT_TOKEN"] = token
+        del token
+        run_id = None
+        if event == "daily":
+            report = credential.with_name("maintenance.json")
+            result = json.loads(report.read_text())
+            run_id = result["run_id"]
+            if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+                raise ValueError("invalid maintenance run ID")
+            text = daily_status(result)
+        else:
+            text = EVENTS[event]
+        body = urlencode({"chat_id": chat_id, "text": "[h2ci] " + text})
+        connection = http.client.HTTPSConnection("api.telegram.org", timeout=8 if event == "daily" else 10)
+        try:
+            connection.request(
+                "POST", "/bot" + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage", body=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            response = connection.getresponse()
+            if response.status != 200:
+                print(f"Telegram rejected {event}: HTTP {response.status}", file=sys.stderr)
+                return 1
+            data = json.loads(response.read(65536))
+        finally:
+            connection.close()
+        if data.get("ok") is True:
+            result = data["result"]
+            if str(result["chat"]["id"]) == chat_id and type(result["message_id"]) is int and result["message_id"] > 0:
+                if run_id is not None:
+                    receipt = Path("/run/h2ci-daily-maintenance/delivery.json")
+                    receipt.write_text(json.dumps({"run_id": run_id, "message_id": result["message_id"]}))
+                print(f"Telegram delivered {event}; message ID {result['message_id']}")
+                return 0
+        print(f"Telegram did not confirm delivery of {event}", file=sys.stderr)
+    except Exception as exc:
+        # Exception details can contain the URL, including the bot token.
+        print(f"Telegram delivery failed for {event}: {type(exc).__name__}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+__SIC_EOF__
+chmod 644 "$R/runner/scripts/h2ci-telegram-notify"
+
+install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-disk-guard.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Emergency cleanup when the root filesystem crosses HARD_LIMIT percent.
@@ -16119,6 +17075,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
+  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+    logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
+  fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
 fi
 __SIC_EOF__
@@ -16568,10 +17527,83 @@ __SIC_EOF__
 chmod 644 "$R/runner/systemd/github-runner-ctl.service"
 
 install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/h2ci-daily-maintenance.service" <<'__SIC_EOF__'
+[Unit]
+Description=Update h2ci, refresh maintenance status and report to Telegram
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/h2ci-maintenance daily
+RuntimeDirectory=h2ci-daily-maintenance
+RuntimeDirectoryMode=0700
+TimeoutStartSec=60min
+UMask=0077
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/h2ci-daily-maintenance.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/h2ci-server-update.service" <<'__SIC_EOF__'
+[Unit]
+Description=Apply h2ci OS package updates without rebooting
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-update --h2ci-managed
+RuntimeDirectory=h2ci-server-update
+RuntimeDirectoryPreserve=yes
+StateDirectory=h2ci-server-update
+StateDirectoryMode=0755
+TimeoutStartSec=45min
+StandardInput=null
+UMask=0022
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/h2ci-server-update.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/h2ci-telegram-notify@.service" <<'__SIC_EOF__'
+[Unit]
+Description=Send Telegram notification for h2ci monitor event %i
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/h2ci-monitor/telegram.credentials
+
+[Service]
+Type=oneshot
+LoadCredential=telegram.credentials:/etc/h2ci-monitor/telegram.credentials
+ExecStart=/usr/local/bin/h2ci-telegram-notify %i
+TimeoutStartSec=20s
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitCORE=0
+UMask=0077
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/h2ci-telegram-notify@.service"
+
+install -d "$R/runner/systemd/h2ci-telegram-notify@daily.service.d"
+cat > "$R/runner/systemd/h2ci-telegram-notify@daily.service.d/20-maintenance.conf" <<'__SIC_EOF__'
+[Unit]
+# Missing credentials must fail the daily job, not skip it successfully.
+ConditionPathExists=
+AssertPathExists=/etc/h2ci-monitor/telegram.credentials
+
+[Service]
+LoadCredential=maintenance.json:/run/h2ci-daily-maintenance/report.json
+ReadWritePaths=/run/h2ci-daily-maintenance
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/h2ci-telegram-notify@daily.service.d/20-maintenance.conf"
+
+install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/runner-disk-guard.service" <<'__SIC_EOF__'
 [Unit]
 Description=Emergency disk cleanup when usage is high
 After=docker.service
+
+OnFailure=h2ci-telegram-notify@runner-disk-guard.service
 
 [Service]
 Type=oneshot
@@ -16658,6 +17690,8 @@ After=network-online.target docker.service
 Wants=network-online.target
 ConditionPathExists=/etc/server-freshness/repo
 
+OnFailure=h2ci-telegram-notify@server-freshness.service
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/freshness --refresh
@@ -16673,6 +17707,15 @@ ProtectSystem=full
 PrivateTmp=true
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/server-freshness.service"
+
+install -d "$R/runner/systemd/server-freshness.service.d"
+cat > "$R/runner/systemd/server-freshness.service.d/20-h2ci-reference.conf" <<'__SIC_EOF__'
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/freshness --refresh --repo /etc/server-freshness/reference
+ProtectHome=true
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/server-freshness.service.d/20-h2ci-reference.conf"
 
 install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/server-freshness.timer" <<'__SIC_EOF__'
@@ -17458,6 +18501,7 @@ cat > "$R/common/freshness" <<'__SIC_EOF__'
 """Read cached maintenance status; refresh explicitly, never apply upgrades."""
 import argparse
 import datetime
+import difflib
 import fcntl
 import ipaddress
 import json
@@ -17515,7 +18559,18 @@ def bridge_address():
     raise CheckError("docker0 IPv4 address unavailable")
 
 
-def compare_file(source, deployed, findings, expected=None):
+def unified_file_diff(source, deployed, expected, actual, rendered=False):
+    want, have = expected.decode("utf-8"), actual.decode("utf-8")
+    for text in (want, have):
+        if any(not char.isprintable() and char not in "\t\n" for char in text.replace("\r\n", "\n")):
+            raise ValueError("unsupported control characters")
+    label = f"{source} (rendered)" if rendered else str(source)
+    lines = difflib.unified_diff(want.splitlines(keepends=True), have.splitlines(keepends=True),
+                                 fromfile=label, tofile=str(deployed), n=0)
+    return "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n" for line in lines)
+
+
+def compare_file(source, deployed, findings, expected=None, file_diffs=None):
     label = str(deployed)
     try:
         want = source.read_bytes() if expected is None else expected
@@ -17525,6 +18580,11 @@ def compare_file(source, deployed, findings, expected=None):
         return
     if want != have:
         findings.append({"level": "warning", "item": label, "detail": "differs from repository"})
+        if file_diffs is not None:
+            try:
+                file_diffs.append(unified_file_diff(source, deployed, want, have, rendered=expected is not None))
+            except ValueError:
+                findings.append({"level": "error", "item": label, "detail": "diff requires printable UTF-8 text"})
 
 
 def runtime_drift(directory, findings):
@@ -17557,7 +18617,7 @@ def runtime_drift(directory, findings):
                                  "detail": "running image reference or memory limit differs from deployed Compose"})
 
 
-def drift(repo, root=Path("/")):
+def drift(repo, root=Path("/"), file_diffs=None):
     findings = []
     installed = []
     if not (repo / "runner/stacks").is_dir():
@@ -17576,7 +18636,7 @@ def drift(repo, root=Path("/")):
                     bridge = bridge or bridge_address()
                     expected = (source / name).read_bytes().replace(b"172.17.0.1:4873",
                                                                   f"{bridge}:4873".encode())
-                compare_file(source / name, directory / name, findings, expected)
+                compare_file(source / name, directory / name, findings, expected, file_diffs)
             if stack == "monitoring":
                 for subtree in ("prometheus", "grafana"):
                     if not (source / subtree).is_dir():
@@ -17597,11 +18657,12 @@ def drift(repo, root=Path("/")):
                                     if f"job_name: {job}".encode() not in expected:
                                         expected += (f'  - job_name: {job}\n    static_configs:\n'
                                                      f'      - targets: ["{target}"]\n').encode()
-                        compare_file(file, directory / relative, findings, expected)
+                        compare_file(file, directory / relative, findings, expected, file_diffs)
                 if (root / "opt/logging/docker-compose.yml").exists():
                     compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
-                                 directory / "grafana/provisioning/datasources/loki.yml", findings)
-            runtime_drift(directory, findings)
+                                 directory / "grafana/provisioning/datasources/loki.yml", findings, file_diffs=file_diffs)
+            if file_diffs is None:
+                runtime_drift(directory, findings)
         except (CheckError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             detail = str(exc) if isinstance(exc, CheckError) else "cannot inspect managed stack"
             findings.append({"level": "error", "item": stack, "detail": detail})
@@ -17774,6 +18835,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="read cached report only; no network or writes")
     mode.add_argument("--refresh", action="store_true", help="refresh metadata/network checks and write cached report; never upgrade")
+    mode.add_argument("--diff", action="store_true", help="show local unified diffs for managed files; output may be sensitive")
     parser.add_argument("--drift", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--repo", type=Path, help="repository root (default: /etc/server-freshness/repo)")
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
@@ -17783,14 +18845,29 @@ def main():
     args = parser.parse_args()
     if args.drift and (args.refresh or args.summary):
         parser.error("--drift requires --check and cannot use --summary")
+    if args.diff and (args.json or args.summary):
+        parser.error("--diff cannot be combined with --json or --summary")
     if args.refresh and os.geteuid() != 0:
+        if sys.argv[1:] == ["--refresh"] and Path(
+                "/etc/systemd/system/server-freshness.service.d/20-h2ci-reference.conf").is_file():
+            return subprocess.call(["/usr/bin/systemctl", "--no-ask-password", "start",
+                                    "server-freshness.service"])
         parser.error("--refresh requires root (package metadata and report writes)")
     try:
-        if args.drift or args.refresh:
+        if args.drift or args.refresh or args.diff:
             repo = args.repo or Path("/etc/server-freshness/repo").read_text().strip()
             repo = Path(repo)
             if not repo.is_absolute():
                 raise CheckError("repository path must be absolute")
+        if args.diff:
+            diffs = []
+            findings, _ = drift(repo, args.root, file_diffs=diffs)
+            for diff in diffs:
+                print(diff, end="")
+            for row in findings:
+                if row["level"] == "error":
+                    print(f"ERROR: {row['item']}: {row['detail']}", file=sys.stderr)
+            return 2 if any(row["level"] == "error" for row in findings) else int(bool(findings))
         if args.drift:
             findings, _ = drift(repo, args.root)
             if args.json:
@@ -18335,7 +19412,16 @@ check_updates() {
       | awk '{ print $1 }' | grep -E 'zypper|yum-cron|unattended|transactional-update|packagekit-offline' | head -1 || true)
   fi
 
-  if [[ -z "$found" ]]; then
+  if unit_exists h2ci-daily-maintenance.service; then
+    if systemctl is-active --quiet crond.service &&
+       grep -qsFx 'CRON_TZ=Europe/Kyiv' /etc/cron.d/h2ci-telegram-daily &&
+       grep -qsFx '0 11 * * * root /usr/bin/systemctl start h2ci-daily-maintenance.service' /etc/cron.d/h2ci-telegram-daily; then
+      ok "automatic updates: h2ci daily maintenance (cron, 11:00 Europe/Kyiv)"
+      [[ -z "$found" ]] || warn "h2ci daily maintenance and ${found} are both enabled"
+    else
+      warn "h2ci daily maintenance is installed but the expected cron schedule is not active"
+    fi
+  elif [[ -z "$found" ]]; then
     warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
   elif [[ "$found" == server-update.timer ]]; then
     local dup=""
@@ -19199,6 +20285,7 @@ check_trends() {
 # ---- brief mode: a short summary for the login screen and `srv status` -------------------------------------------
 BRIEF_DIR="${HEALTH_BRIEF_DIR:-/var/lib/server-health}"
 UPDATE_STATE="${SERVER_UPDATE_STATE:-/var/lib/server-update}/state"
+MANAGED_UPDATE_STATE="${H2CI_UPDATE_STATUS_FILE:-/var/lib/h2ci-server-update/state}"
 CLEANUP_STATE="${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}"
 
 # kv FILE KEY: value of key=value in a one-line state file (empty when missing)
@@ -19210,6 +20297,22 @@ lvl() {
 }
 ago() { # ago EPOCH: "3d4h ago" or "never"
   if [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]]; then echo "$(human_age $(( $(date +%s) - $1 ))) ago"; else echo never; fi
+}
+
+managed_update_status() {
+  local row now stamp outcome reboot changes
+  if IFS= read -r row < "$MANAGED_UPDATE_STATE" &&
+     [[ "$row" =~ ^time=([1-9][0-9]{0,10})\ outcome=(applied|unchanged|partial|failed|busy|unverified)\ reboot=(required|not-needed|unknown)\ changes=([0-9]+|\?)$ ]]; then
+    stamp=${BASH_REMATCH[1]} outcome=${BASH_REMATCH[2]} reboot=${BASH_REMATCH[3]} changes=${BASH_REMATCH[4]}
+    now=$(date +%s)
+    if (( now >= stamp && now - stamp <= 129600 )); then
+      printf '%s (%s package changes recorded); reboot: %s (checked %s)\n' "$outcome" "$changes" "${reboot//-/ }" "$(ago "$stamp")"
+      return
+    fi
+    printf 'stale (last managed update %s); reboot: unknown\n' "$(ago "$stamp")"
+  else
+    printf 'no verified managed update result; reboot: unknown\n'
+  fi
 }
 
 brief_full() { # run the full report when the last one is older than 6 hours; keep its counts for the summary
@@ -19256,7 +20359,9 @@ brief_render() {
       printf '%sf2b%s   not running %s\n' "$C_B" "$C_N" "$(lvl 1 1 2)"
     fi
   fi
-  if [[ -r "$UPDATE_STATE" ]]; then
+  if [[ -r "$MANAGED_UPDATE_STATE" ]] || unit_exists h2ci-server-update.service; then
+    s="update $(managed_update_status 2>/dev/null)"
+  elif [[ -r "$UPDATE_STATE" ]]; then
     u=$(kv "$UPDATE_STATE" updates); r=$(kv "$UPDATE_STATE" reboot)
     printf '%supd%s   %s update(s) pending, reboot needed: %s%s  (checked %s)\n' "$C_B" "$C_N" "${u:-?}" "$( [[ "$r" == 1 ]] && echo yes || echo no )" \
       "$( [[ "$r" == 1 ]] && lvl 1 1 2 )" "$(ago "$(kv "$UPDATE_STATE" time)")"
@@ -19444,7 +20549,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 59"
+echo "files written to $R: 67"
 INSTALL
 sudo bash /root/server-init-config/runner/install/update.sh
 ````
@@ -20288,13 +21393,13 @@ done
 install -d -m 0755 /etc/server-freshness
 printf '%s\n' "$REPO_ROOT" | install -m 0644 /dev/stdin /etc/server-freshness/repo
 restorecon_if -R /etc/server-freshness
-for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh; do
+for f in runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh h2ci-telegram-notify; do
   install -m 0755 "$REPO_ROOT/runner/scripts/$f" "/usr/local/bin/$f"
   restorecon_if "/usr/local/bin/$f"
 done
 ensure_secure_path
 
-for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer; do
+for u in runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer h2ci-telegram-notify@.service; do
   install -m 0644 "$REPO_ROOT/runner/systemd/$u" "/etc/systemd/system/$u"
   restorecon_if "/etc/systemd/system/$u"
 done
@@ -20541,6 +21646,31 @@ fi
 awk '/^[[:space:]]*\[runners\.docker\]/ { s = 1; next } /^[[:space:]]*\[/ { s = 0 } s && /^[[:space:]]*(memory|memory_swap|cpus|shm_size|cgroup_parent|service_[a-z_]+)[[:space:]]*=/' "$CFG"
 __SIC_EOF__
 chmod 755 "$R/runner/install/job-limits.sh"
+
+install -d "$R/runner/install"
+cat > "$R/runner/install/local-cache.awk" <<'__SIC_EOF__'
+# Remove only empty distributed-cache placeholders; preserve configured adapters.
+function flush() {
+  if (keep) printf "%s", block
+  block = ""
+  keep = 0
+}
+{
+  line = $0
+  sub(/^[[:space:]]+/, "", line)
+  sub(/[[:space:]]+$/, "", line)
+  header = (line ~ /^\[runners\.cache(\.(s3|gcs|azure))?\]$/)
+  if (line ~ /^\[/ && !header) { flush(); active = 0 }
+  if (header) active = 1
+  if (!active) { print; next }
+  block = block $0 ORS
+  if (header || line == "" || line ~ /^#/) next
+  if (line ~ /^(MaxUploadedArchiveSize|AssumeRoleMaxConcurrency)[[:space:]]*=[[:space:]]*0([[:space:]]*#.*)?$/) next
+  keep = 1
+}
+END { flush() }
+__SIC_EOF__
+chmod 644 "$R/runner/install/local-cache.awk"
 
 install -d "$R/runner/install"
 cat > "$R/runner/install/lock-root.sh" <<'__SIC_EOF__'
@@ -20998,6 +22128,18 @@ gitlab-runner register --non-interactive \
   --docker-volumes "/cache" >/dev/null
 unset token
 
+# Local /cache does not need a distributed adapter with an empty Type.
+cache_tmp=$(mktemp "${CFG}.local-cache.XXXXXX")
+chmod 600 "$cache_tmp"
+trap 'rm -f "$cache_tmp"' EXIT
+awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
+if ! cmp -s "$CFG" "$cache_tmp"; then
+  backup "$CFG"
+  cat "$cache_tmp" > "$CFG"
+fi
+rm -f "$cache_tmp"
+trap - EXIT
+
 if ! grep -q 'request_concurrency' "$CFG"; then
   sed -i -E "0,/^  name = .*/s//&\n  request_concurrency = ${REQUEST_CONCURRENCY}/" "$CFG"
 fi
@@ -21422,9 +22564,9 @@ script_path() {
 
 update_host_tools() {
   local f u existed units_changed=0 cleanup_changed=0 isolation_changed=0
-  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh)
+  local -a scripts=(health freshness config-drift runner-weekly-cleanup.sh runner-disk-guard.sh runner-engine-update.sh ci-job-isolation.sh h2ci-telegram-notify)
   local -a units=(runner-weekly-cleanup.service runner-weekly-cleanup.timer runner-disk-guard.service runner-disk-guard.timer
-                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer)
+                  runner-engine-update.service runner-engine-update.timer ci-job-isolation.service server-freshness.service server-freshness.timer h2ci-telegram-notify@.service)
   local -a new_timers=() changed_timers=()
 
   if [[ -f /etc/ci-prewarm.conf ]]; then
@@ -21435,9 +22577,9 @@ update_host_tools() {
   # health is shared with plain servers (common/); the other scripts belong to the runner host.
   command -v python3 >/dev/null || die "python3 is required for freshness checks"
   for f in "${scripts[@]}"; do
-    if [[ "$f" == freshness ]]; then
-      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/common/freshness" \
-        || die "syntax error in freshness, nothing changed"
+    if [[ "$f" == freshness || "$f" == h2ci-telegram-notify ]]; then
+      python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${REPO_ROOT}/$(script_path "$f")" \
+        || die "syntax error in $f, nothing changed"
     else
       bash -n "${REPO_ROOT}/$(script_path "$f")" || die "syntax error in $(script_path "$f"), nothing changed"
     fi
@@ -23381,6 +24523,783 @@ __SIC_EOF__
 chmod 644 "$R/runner/scripts/github-runner-ctl"
 
 install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/h2ci-maintenance" <<'__SIC_EOF__'
+#!/usr/bin/python3
+"""Root-owned h2ci maintenance entry points; no caller-supplied command arguments."""
+
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+UPDATE_RESULT = Path("/run/h2ci-server-update/result.json")
+HEALTH_STATE = Path("/var/lib/h2ci-server-update/state")
+DAILY_REPORT = Path("/run/h2ci-daily-maintenance/report.json")
+DELIVERY_RECEIPT = DAILY_REPORT.with_name("delivery.json")
+FRESH_REPORT = Path("/var/lib/server-freshness/report.json")
+HISTORY = Path("/var/lib/dnf/history.sqlite")
+LOCKS = ("/run/runner-engine-update.lock", "/run/server-update.lock")
+DNF = ("/usr/bin/dnf", "--refresh", "--setopt=gpgcheck=1", "--setopt=*.gpgcheck=1",
+       "--setopt=*.skip_if_unavailable=False", "--setopt=history_record=True",
+       "--exclude=docker-ce*,containerd.io,docker-buildx-plugin,docker-compose-plugin,gitlab-runner*")
+SYSTEMCTL = ("/usr/bin/systemctl", "--no-ask-password", "start")
+PACKAGE_FIELD = re.compile(r"[A-Za-z0-9_+.~^:-]{1,180}")
+
+
+def log(message):
+    print(f"h2ci-maintenance: {message}", file=sys.stderr, flush=True)
+
+
+def run(*args):
+    return subprocess.run(args, stdin=subprocess.DEVNULL, check=False).returncode
+
+
+def write_atomic(path, text, mode):
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as out:
+        name = out.name
+        try:
+            out.write(text)
+            out.flush()
+            os.fchmod(out.fileno(), mode)
+            os.replace(name, path)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+
+def write_json(path, payload):
+    write_atomic(path, json.dumps(payload), 0o600)
+
+
+def write_health_state(result):
+    outcome = result["update"]
+    changes = len(result["packages"]) if outcome in {"applied", "unchanged", "partial"} else "?"
+    reboot = result["reboot"].replace(" ", "-")
+    write_atomic(HEALTH_STATE, f"time={int(time.time())} outcome={outcome} reboot={reboot} changes={changes}\n", 0o644)
+
+
+def rpm_inventory():
+    try:
+        output = subprocess.check_output(
+            ("/usr/bin/rpm", "-qa", "--qf",
+             r"%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{INSTALLTIME}\t%{INSTALLTID}\n"),
+            stdin=subprocess.DEVNULL, timeout=30,
+        )
+        return sorted(output.splitlines()) if output else None
+    except (OSError, subprocess.SubprocessError):
+        log("RPM inventory unavailable")
+        return None
+
+
+def transaction(comment, history=HISTORY):
+    from libdnf import transaction as constants
+
+    with contextlib.closing(sqlite3.connect(f"{history.as_uri()}?mode=ro", uri=True)) as db:
+        matches = db.execute("SELECT id, state FROM trans WHERE comment = ?", (comment,)).fetchall()
+        if not matches:
+            return None, []
+        if len(matches) != 1:
+            raise ValueError("ambiguous transaction comment")
+        transaction_id, state = matches[0]
+        actions = {
+            constants.TransactionItemAction_INSTALL: "Installed",
+            constants.TransactionItemAction_UPGRADE: "Updated",
+            constants.TransactionItemAction_DOWNGRADE: "Downgraded",
+            constants.TransactionItemAction_REINSTALL: "Reinstalled",
+            constants.TransactionItemAction_OBSOLETE: "Installed",
+            constants.TransactionItemAction_OBSOLETED: "Removed",
+            constants.TransactionItemAction_REMOVE: "Removed",
+        }
+        rows = db.execute("""
+            SELECT DISTINCT i.action, r.name, r.epoch, r.version, r.release, r.arch
+            FROM trans_item i JOIN rpm r USING (item_id)
+            WHERE i.trans_id = ? AND i.state = ?
+            ORDER BY r.name, r.arch, i.action, r.epoch, r.version, r.release
+        """, (transaction_id, constants.TransactionItemState_DONE))
+        packages = []
+        for action, name, epoch, version, release, arch in rows:
+            if action not in actions:
+                continue
+            if not all(PACKAGE_FIELD.fullmatch(value) for value in (name, version, release, arch)):
+                raise ValueError("invalid RPM history fields")
+            evr = (f"{epoch}:" if epoch else "") + f"{version}-{release}"
+            packages.append(f"{actions[action]} {name}.{arch} {evr}")
+        return state == constants.TransactionState_DONE, packages
+
+
+def reboot_status():
+    check = subprocess.run(("/usr/bin/dnf", "-q", "-C", "needs-restarting", "-r"),
+                           capture_output=True, text=True, timeout=60, check=False,
+                           env={**os.environ, "LC_ALL": "C"})
+    # A generic DNF error can also exit 1; require the plugin's affirmative output.
+    if check.returncode == 1 and "Reboot is required" in check.stdout:
+        return "required"
+    if check.returncode == 0 and "Reboot should not be necessary" in check.stdout:
+        return "not needed"
+    return "unknown"
+
+
+def update():
+    result = {"update": "failed", "packages": [], "reboot": "unknown"}
+    try:
+        with contextlib.ExitStack() as stack:
+            for name in LOCKS:
+                lock = stack.enter_context(open(name, "a"))
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    result["update"] = "busy"
+                    return 75
+            comment = "h2ci-maintenance:" + uuid.uuid4().hex
+            before = rpm_inventory()
+            rc = run(*DNF, "--assumeyes", f"--comment={comment}", "upgrade")
+            try:
+                complete, packages = transaction(comment)
+                result["packages"] = packages
+                if rc == 0 and complete is True and packages:
+                    result["update"] = "applied"
+                elif rc == 0 and not packages and complete is not False and before is not None and rpm_inventory() == before:
+                    result["update"] = "unchanged"
+                elif packages:
+                    result["update"] = "partial"
+                elif rc == 0:
+                    result["update"] = "unverified"
+            except (OSError, ImportError, sqlite3.Error, ValueError) as exc:
+                log(f"transaction details unavailable ({type(exc).__name__})")
+                result["update"] = "unverified" if rc == 0 else "failed"
+            try:
+                result["reboot"] = reboot_status()
+            except (OSError, subprocess.TimeoutExpired):
+                log("reboot check unavailable")
+            return int(result["update"] not in {"applied", "unchanged"})
+    finally:
+        result["finished_ns"] = time.monotonic_ns()
+        write_health_state(result)
+        write_json(UPDATE_RESULT, result)
+        log(f"update={result['update']} packages={len(result['packages'])} reboot={result['reboot']}")
+
+
+def fingerprint(path):
+    try:
+        info = path.stat()
+        return info.st_ino, info.st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def deliver(result):
+    run_id = uuid.uuid4().hex
+    write_json(DAILY_REPORT, {**result, "run_id": run_id})
+    if run(*SYSTEMCTL, "h2ci-telegram-notify@daily.service") == 0:
+        try:
+            receipt = json.loads(DELIVERY_RECEIPT.read_text())
+            if receipt["run_id"] == run_id and type(receipt["message_id"]) is int and receipt["message_id"] > 0:
+                return True
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    log("Telegram delivery not confirmed for this run")
+    return False
+
+
+def daily(test=False):
+    started = time.monotonic_ns()
+    result = {"update": "failed", "packages": [], "reboot": "unknown"}
+    if test:
+        result = {"update": "applied", "packages": ["Updated example-package.aarch64 2.0-1"],
+                  "reboot": "required", "test": True}
+    else:
+        try:
+            run(*SYSTEMCTL, "h2ci-server-update.service")
+            current = json.loads(UPDATE_RESULT.read_text())
+            if current.pop("finished_ns") >= started:
+                result = current
+        except (OSError, ValueError, KeyError, TypeError):
+            log("no update result for this run")
+    result["freshness"] = "failed"
+    try:
+        before = fingerprint(FRESH_REPORT)
+        rc = run(*SYSTEMCTL, "server-freshness.service")
+        after = fingerprint(FRESH_REPORT)
+        if rc == 0 and after is not None and after != before:
+            result["freshness"] = "refreshed"
+    except OSError:
+        log("freshness result unavailable")
+    delivered = deliver(result)
+    return int(not delivered or result["freshness"] != "refreshed"
+               or result["update"] not in {"applied", "unchanged"})
+
+
+def main():
+    if os.geteuid() or len(sys.argv) != 2:
+        return 2
+    if sys.argv[1] == "update":
+        return update()
+    if sys.argv[1] == "preview":
+        return run(*DNF, "--assumeno", "upgrade")
+    if sys.argv[1] in {"daily", "test"}:
+        return daily(test=sys.argv[1] == "test")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+__SIC_EOF__
+chmod 644 "$R/runner/scripts/h2ci-maintenance"
+
+install -d "$R/runner/scripts"
+cat > "$R/runner/scripts/h2ci-telegram-notify" <<'__SIC_EOF__'
+#!/usr/bin/python3
+"""Send a fixed monitor event using credentials supplied by systemd."""
+
+from datetime import datetime
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+from urllib.parse import urlencode
+
+EVENTS = {
+    "disk-threshold": "Root filesystem reached the disk guard threshold; emergency cleanup triggered.",
+    "runner-disk-guard": "Disk guard failed. Check: journalctl -u runner-disk-guard.service",
+    "server-freshness": "Freshness check failed. Check: journalctl -u server-freshness.service",
+    "test": "TEST: systemd monitor alert delivery verified.",
+}
+
+
+def read_status(*command):
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=2).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def queue_size(metrics):
+    sizes = []
+    for line in metrics.splitlines():
+        match = re.fullmatch(rb"gitlab_runner_job_queue_size(?:\{.*\})?\s+(\S+)", line)
+        if match:
+            try:
+                size = float(match[1])
+            except ValueError:
+                return None
+            if size < 0 or not size.is_integer():
+                return None
+            sizes.append(int(size))
+    return sizes or None
+
+
+def runner_queue():
+    connection = http.client.HTTPConnection("127.0.0.1", 9252, timeout=1.5)
+    try:
+        connection.request("GET", "/metrics")
+        response = connection.getresponse()
+        if response.status == 200:
+            limit = 1024 * 1024
+            data = response.read(limit + 1)
+            if len(data) <= limit:
+                sizes = queue_size(data)
+                if sizes:
+                    suffix = " (sum across runner series)" if len(sizes) > 1 else ""
+                    return f"{sum(sizes)} queued{suffix}"
+    except (OSError, http.client.HTTPException):
+        pass
+    finally:
+        connection.close()
+    return "unavailable"
+
+
+def grafana_backup_age(directory, now):
+    newest = None
+    try:
+        for archive in directory.iterdir():
+            if not re.fullmatch(r"grafana-.+-[0-9]{8}-[0-9]{6}\.tar\.gz", archive.name):
+                continue
+            try:
+                info = archive.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                newest = info.st_mtime if newest is None else max(newest, info.st_mtime)
+    except FileNotFoundError:
+        return "no local archive found"
+    except OSError:
+        return "unavailable"
+    if newest is None:
+        return "no local archive found"
+    if newest > now:
+        return "unavailable (archive timestamp is in the future)"
+    minutes = int((now - newest) // 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    if days:
+        return f"{days}d {hours}h ago"
+    if hours:
+        return f"{hours}h {minutes}m ago"
+    return f"{minutes}m ago"
+
+
+def confirmed_outcomes(journal):
+    outcomes = {}
+    for record in sorted(journal, key=lambda row: int(row["__REALTIME_TIMESTAMP"])):
+        message = record.get("MESSAGE")
+        # journald encodes Runner's ANSI-colored messages as byte arrays in JSON mode.
+        if isinstance(message, list) and all(type(value) is int and 0 <= value <= 255 for value in message):
+            message = bytes(message).decode("utf-8", errors="replace")
+        if not isinstance(message, str):
+            continue
+        message = re.sub(r"\x1b\[[0-9;]*m", "", message)
+        if not re.match(r"^\s*(?:(?:INFO|WARNING|ERROR):\s+)?Submitting job to coordinator(?=[.\s]|$)", message):
+            continue
+        if not re.search(r"(?:^|\s)code=2[0-9]{2}(?=\s|$)", message):
+            continue
+        outcome = re.search(r"(?:^|\s)job-status=(success|failed|cancell?ed)(?=\s|$)", message)
+        job = re.search(r"(?:^|\s)job=([0-9]+)(?=\s|$)", message)
+        if outcome and job:
+            outcomes[job[1]] = outcome[1]
+    if not outcomes:
+        return None
+    states = tuple(outcomes.values())
+    return states.count("failed"), states.count("success"), sum(s in ("canceled", "cancelled") for s in states)
+
+
+def ci_outcomes_24h():
+    now = int(datetime.now().timestamp())
+    limit = 4096
+    try:
+        result = subprocess.run(
+            ("/usr/bin/journalctl", "--no-pager", "--unit=gitlab-runner.service", "SYSLOG_IDENTIFIER=gitlab-runner",
+             f"--since=@{now - 86400}", f"--until=@{now}", "--output=json", "--output-fields=MESSAGE",
+             "--grep=Submitting job to coordinator", f"--lines={limit + 1}"),
+            capture_output=True, text=True, timeout=2, check=True,
+        )
+        records = result.stdout.splitlines()
+        if result.stderr.strip() or len(records) > limit:
+            return "unavailable (incomplete Runner journal query)"
+        outcomes = confirmed_outcomes(json.loads(line) for line in records)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return "unavailable (Runner journal query did not return outcomes)"
+    return outcomes if outcomes is not None else "unavailable (no confirmed outcomes in Runner journal)"
+
+
+def ci_failure_rate(outcomes):
+    if isinstance(outcomes, str):
+        return outcomes, 0
+    failed, succeeded, canceled = outcomes
+    completed = failed + succeeded
+    if not completed:
+        return f"n/a (0 completed; {canceled} canceled)", failed
+    return f"{failed / completed:.1%} ({failed} failed / {completed} completed; {canceled} canceled)", failed
+
+
+DISK_WARNING_PERCENT = 75
+GIB = 1024 ** 3
+MAINTENANCE_SUMMARY = re.compile(
+    r"OS updates=(?P<updates>[0-9]+|unknown), image release candidates=[0-9]+, "
+    r"drift=(?P<drift>[0-9]+), errors=(?P<errors>[0-9]+), "
+    r"reboot=(?P<reboot>not-required|required|unknown), age=[0-9]+h(?P<stale> \(STALE\))?",
+)
+
+
+def historical_root_free(device):
+    query = 'node_filesystem_avail_bytes{job="node",mountpoint="/"} offset 24h'
+    connection = http.client.HTTPConnection("127.0.0.1", 9090, timeout=1.5)
+    try:
+        connection.request("GET", "/api/v1/query?" + urlencode({"query": query}))
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        payload = json.loads(response.read(65536))
+        data = payload["data"]
+        if payload["status"] != "success" or data["resultType"] != "vector":
+            return None
+        matches = [row for row in data["result"] if row["metric"].get("device") == device]
+        if len(matches) == 1:
+            value = float(matches[0]["value"][1])
+            if value >= 0 and value.is_integer():
+                return int(value)
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, IndexError, AttributeError):
+        pass
+    finally:
+        connection.close()
+    return None
+
+
+def disk_status():
+    raw = read_status("/usr/bin/df", "-B1", "--output=source,avail,pcent", "/").splitlines()
+    fields = raw[-1].split() if len(raw) == 2 else []
+    if len(fields) != 3 or not re.fullmatch(r"[0-9]+", fields[1]) or not re.fullmatch(r"[0-9]+%", fields[2]):
+        return None, "Root disk: unavailable", "Disk trend (24h): unavailable"
+    device, available, usage = fields[0], int(fields[1]), int(fields[2][:-1])
+    disk = f"Root disk: {usage}% used, {available / GIB:.1f} GiB free"
+    previous = historical_root_free(device)
+    if previous is None:
+        trend = "unavailable (no matching baseline)"
+    else:
+        delta = (available - previous) / GIB
+        if abs(delta) < 0.05:
+            trend = "less than 0.1 GiB change in free space"
+        else:
+            direction = "more" if delta > 0 else "less"
+            trend = f"{abs(delta):.1f} GiB {direction} free"
+    return usage, disk, "Disk trend (24h): " + trend
+
+
+def raid_health(root=Path("/sys/block")):
+    lines, actions = [], []
+    try:
+        devices = sorted(p / "md" for p in root.iterdir() if re.fullmatch(r"md[0-9]+", p.name) and (p / "md").is_dir())
+    except OSError:
+        return ["RAID: unavailable (cannot read Linux software RAID status)"], ["Check RAID status manually"]
+    if not devices:
+        return [], []
+    for device in devices:
+        name = device.parent.name
+        try:
+            state = (device / "array_state").read_text().strip()
+            missing = int((device / "degraded").read_text())
+            sync = (device / "sync_action").read_text().strip()
+            if missing < 0 or state not in {"clear", "inactive", "suspended", "readonly", "read-auto", "clean", "active", "write-pending", "active-idle", "broken"}:
+                raise ValueError("unrecognized RAID state")
+        except (OSError, ValueError):
+            lines.append(f"RAID {name}: status unavailable")
+            actions.append(f"Check RAID {name} manually (state unavailable)")
+            continue
+        if missing:
+            lines.append(f"RAID {name}: degraded ({missing} missing member(s))")
+            actions.append(f"Check degraded RAID {name} and identify the missing member(s)")
+        elif state in {"clear", "inactive", "suspended", "readonly", "broken"}:
+            lines.append(f"RAID {name}: {state}")
+            actions.append(f"Check RAID {name} ({state})")
+        elif sync in {"resync", "recover", "check", "repair", "reshape"}:
+            lines.append(f"RAID {name}: no missing members; {sync} in progress")
+        else:
+            lines.append(f"RAID {name}: {state}, no missing members")
+    return lines, actions
+
+
+# Expected loopback targets on h2ci; keep this independent of Prometheus discovery so a removed target is visible.
+PROMETHEUS_TARGETS = {
+    "prometheus": 9090,
+    "node": 9100,
+    "gitlab-runner": 9252,
+    "loki": 3100,
+    "alloy": 12345,
+    "registry-cache": 5001,
+}
+PROMETHEUS_STALE_SECONDS = 60
+
+
+def scrape_state(values, now):
+    if not values:
+        return "missing"
+    previous = -1
+    recent = []
+    for timestamp, up in values:
+        timestamp = float(timestamp)
+        if not previous < timestamp <= now + 5 or up not in ("0", "1"):
+            return "invalid"
+        previous = timestamp
+        if now - timestamp <= PROMETHEUS_STALE_SECONDS:
+            recent.append(up)
+    if not recent:
+        return "stale"
+    if recent[-1] == "1":
+        return "healthy"
+    return "down" if recent[-3:] == ["0", "0", "0"] else "transient"
+
+
+def classify_prometheus_targets(rows, now):
+    states = {}
+    for row in rows:
+        labels = row["metric"]
+        job = labels.get("job")
+        port = PROMETHEUS_TARGETS.get(job)
+        if port is None or labels.get("instance") != f"127.0.0.1:{port}":
+            continue
+        state = "invalid"
+        if job not in states:
+            try:
+                state = scrape_state(row["values"], now)
+            except (KeyError, TypeError, ValueError):
+                pass
+        states[job] = state
+    return {job: states.get(job, "missing") for job in PROMETHEUS_TARGETS}
+
+
+def prometheus_health():
+    jobs = "|".join(PROMETHEUS_TARGETS)
+    query = 'up{job=~"' + jobs + '"}[5m]'
+    connection = http.client.HTTPConnection("127.0.0.1", 9090, timeout=1.5)
+    try:
+        connection.request("GET", "/api/v1/query?" + urlencode({"query": query}))
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError("Prometheus query failed")
+        limit = 256 * 1024
+        body = response.read(limit + 1)
+        if len(body) > limit:
+            raise ValueError("Prometheus response exceeded size limit")
+        payload = json.loads(body)
+        data = payload["data"]
+        if payload["status"] != "success" or data["resultType"] != "matrix" or not isinstance(data["result"], list):
+            raise ValueError("unexpected Prometheus query response")
+        states = classify_prometheus_targets(data["result"], datetime.now().timestamp())
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError):
+        return "Prometheus targets: unavailable", ["Check Prometheus health (target query unavailable)"]
+    finally:
+        connection.close()
+    healthy = sum(state == "healthy" for state in states.values())
+    summary = [f"{healthy}/{len(states)} healthy"]
+    actions = []
+    for status, label, action in (
+        ("missing", "missing", "Check missing Prometheus targets"),
+        ("stale", "stale", "Check stale Prometheus targets (no fresh scrape in 60s)"),
+        ("down", "down", "Check failing Prometheus targets (last 3 scrapes failed)"),
+        ("invalid", "invalid data", "Check invalid Prometheus target data"),
+        ("transient", "recent scrape failures", None),
+    ):
+        affected = [job for job, state in states.items() if state == status]
+        if affected:
+            summary.append(f"{len(affected)} {label}")
+            if action:
+                actions.append(action + ": " + ", ".join(affected))
+    return "Prometheus targets: " + "; ".join(summary), actions
+
+
+def host_anomaly_query():
+    node = '{job="node",instance="127.0.0.1:9100"}'
+    root = '{job="node",instance="127.0.0.1:9100",mountpoint="/"}'
+    readonly = "node_filesystem_readonly" + root
+    files = "node_filesystem_files" + root
+    free = "node_filesystem_files_free" + root
+    oom = "node_vmstat_oom_kill" + node
+
+    def fresh(metric):
+        return f"({metric} and (timestamp({metric}) > time() - {PROMETHEUS_STALE_SECONDS}))"
+
+    # The exporter scrapes every 15s; require 75% coverage for 15m and 90% for 24h.
+    expressions = {
+        "readonly": fresh(readonly),
+        "inode_free_max_ratio": (f"(max_over_time({free}[15m]) / ({fresh(files)} > 0)) "
+                                 f"and {fresh(free)} and (count_over_time({free}[15m]) >= 45)"),
+        "oom_24h": f"increase({oom}[24h]) and {fresh(oom)} and (count_over_time({oom}[24h]) >= 5184)",
+    }
+    return " or ".join(f'label_replace(({expression}), "signal", "{signal}", "", "")'
+                       for signal, expression in expressions.items())
+
+
+def host_anomaly_actions(rows):
+    metrics = {}
+    for row in rows:
+        signal = row["metric"].get("signal")
+        if signal not in ("readonly", "inode_free_max_ratio", "oom_24h"):
+            continue
+        if signal in metrics:
+            metrics[signal] = None
+            continue
+        try:
+            value = float(row["value"][1])
+            metrics[signal] = value if 0 <= value < float("inf") else None
+        except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+            metrics[signal] = None
+    actions = []
+    readonly = metrics.get("readonly")
+    if readonly == 1:
+        actions.append("Investigate read-only root filesystem (Docker storage is on this mount)")
+    elif readonly != 0:
+        actions.append("Verify Docker storage writability (root filesystem metric unavailable)")
+    inode_ratio = metrics.get("inode_free_max_ratio")
+    if inode_ratio is None or inode_ratio > 1:
+        actions.append("Verify root inode headroom (insufficient fresh samples)")
+    elif inode_ratio < 0.10:
+        actions.append("Check root inode usage (under 10% free across the last 15 minutes of samples)")
+    oom = metrics.get("oom_24h")
+    if oom is None:
+        actions.append("Verify host OOM activity (insufficient data for the last 24h)")
+    elif oom > 0:
+        actions.append(f"Check memory pressure and runner limits (about {max(1, round(oom))} host OOM kill(s) in the last 24h)")
+    return actions
+
+
+def host_anomalies():
+    connection = http.client.HTTPConnection("127.0.0.1", 9090, timeout=1.5)
+    try:
+        connection.request("GET", "/api/v1/query?" + urlencode({"query": host_anomaly_query()}))
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError("Prometheus query failed")
+        limit = 65536
+        body = response.read(limit + 1)
+        if len(body) > limit:
+            raise ValueError("Prometheus response exceeded size limit")
+        payload = json.loads(body)
+        data = payload["data"]
+        if payload["status"] != "success" or data["resultType"] != "vector" or not isinstance(data["result"], list):
+            raise ValueError("unexpected Prometheus host query response")
+        return host_anomaly_actions(data["result"])
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError):
+        return ["Check host monitoring (storage and OOM metrics unavailable)"]
+    finally:
+        connection.close()
+
+
+def daily_maintenance(result):
+    update = result.get("update")
+    packages = result.get("packages", [])
+    reboot = result.get("reboot", "unknown")
+    refreshed = result.get("freshness") == "refreshed"
+    update_label = {
+        "applied": f"{len(packages)} package changes applied",
+        "unchanged": "none",
+        "busy": "skipped — another maintenance run holds the lock",
+        "partial": f"failed — {len(packages)} recorded package changes",
+        "unverified": "outcome could not be verified",
+    }.get(update, "failed or unavailable")
+    reboot_label = {"required": "required — not performed", "not needed": "not needed"}.get(reboot, "unknown")
+    freshness_label = "refreshed" if refreshed else "failed or unavailable"
+    actions = []
+    if update not in {"applied", "unchanged"}:
+        actions.append("Check the OS update result (h2ci-server-update.service)")
+    if reboot == "required":
+        actions.append("Schedule the required reboot")
+    elif reboot != "not needed":
+        actions.append("Verify whether a reboot is required")
+    if not refreshed:
+        actions.append("Check the freshness refresh (server-freshness.service)")
+    lines = ["Maintenance:"]
+    if update == "unchanged":
+        lines.append(f"Updates: {update_label} · Reboot: {reboot_label} · Freshness: {freshness_label}")
+    else:
+        lines.append("Updates: " + update_label)
+        lines.extend(f"- {package[:230]}" for package in packages[:6])
+        if len(packages) > 6:
+            lines.append(f"- +{len(packages) - 6} more (see DNF history)")
+        lines.extend((f"Reboot: {reboot_label}", f"Freshness: {freshness_label}"))
+    return lines, actions
+
+
+def daily_status(result=None):
+    result = result if result is not None else {"update": "unverified"}
+    maintenance_lines, actions = daily_maintenance(result)
+    usage, disk, trend = disk_status()
+    if usage is None:
+        actions.append("Check root disk status (reading unavailable)")
+    elif usage >= DISK_WARNING_PERCENT:
+        actions.append(f"Check root disk space ({usage}% used; warning at {DISK_WARNING_PERCENT}%)")
+    raid_lines, raid_actions = raid_health()
+    actions.extend(raid_actions)
+    monitoring, monitoring_actions = prometheus_health()
+    actions.extend(monitoring_actions)
+    actions.extend(host_anomalies())
+    lines = [disk, trend, *raid_lines, monitoring]
+    units = ("gitlab-runner.service", "docker.service")
+    raw_states = read_status("/usr/bin/systemctl", "show", "-p", "Id", "-p", "ActiveState", "-p", "Result", *units)
+    statuses = {}
+    for group in raw_states.split("\n\n"):
+        fields = dict(row.split("=", 1) for row in group.splitlines() if "=" in row)
+        if fields.get("Id") in units:
+            statuses[fields["Id"]] = fields
+    known = {"active", "inactive", "failed", "activating", "deactivating", "reloading", "maintenance"}
+    for label, unit in (("GitLab Runner", units[0]), ("Docker", units[1])):
+        state = statuses.get(unit, {}).get("ActiveState")
+        state = state if state in known else "unknown"
+        lines.append(f"{label}: {state}")
+        if state != "active":
+            actions.append(f"Check {label} ({state})")
+    summary = (read_status("/usr/local/bin/freshness", "--check", "--summary")
+               if result.get("freshness") == "refreshed" else "")
+    maintenance = MAINTENANCE_SUMMARY.fullmatch(summary)
+    if maintenance:
+        if maintenance["stale"]:
+            actions.append("Refresh stale maintenance data")
+        if maintenance["errors"] != "0":
+            actions.append(f"Investigate {maintenance['errors']} maintenance errors")
+    elif result.get("freshness") == "refreshed":
+        actions.append("Check missing maintenance data")
+    if maintenance:
+        maintenance_lines.append("Freshness details: " + summary.rsplit(", reboot=", 1)[0])
+    lines.append("Runner queue: " + runner_queue())
+    rate, failed = ci_failure_rate(ci_outcomes_24h())
+    if failed:
+        actions.append(f"Review {failed} failed CI jobs in GitLab (last 24h)")
+    lines.append("CI failure rate (last 24h): " + rate)
+    backup_age = grafana_backup_age(Path("/var/backups/monitoring"), datetime.now().timestamp())
+    if backup_age != "no local archive found":
+        lines.append("Grafana backup: " + backup_age)
+    header = ["Action needed:", *("- " + action for action in actions), ""] if actions else []
+    title = "TEST · Daily maintenance and health report" if result.get("test") else "Daily maintenance and health report"
+    return "\n".join([title, "", *header, *maintenance_lines, "", "Health:", *lines])
+
+
+def main():
+    if len(sys.argv) != 2 or (sys.argv[1] != "daily" and sys.argv[1] not in EVENTS):
+        print("Unknown Telegram alert event", file=sys.stderr)
+        return 2
+    event = sys.argv[1]
+    try:
+        credential = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "telegram.credentials"
+        token, chat_id = credential.read_text(encoding="ascii").splitlines()
+        if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token) or not re.fullmatch(r"-?[0-9]+", chat_id):
+            print("Invalid Telegram credentials format", file=sys.stderr)
+            return 2
+        os.environ["TELEGRAM_BOT_TOKEN"] = token
+        del token
+        run_id = None
+        if event == "daily":
+            report = credential.with_name("maintenance.json")
+            result = json.loads(report.read_text())
+            run_id = result["run_id"]
+            if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+                raise ValueError("invalid maintenance run ID")
+            text = daily_status(result)
+        else:
+            text = EVENTS[event]
+        body = urlencode({"chat_id": chat_id, "text": "[h2ci] " + text})
+        connection = http.client.HTTPSConnection("api.telegram.org", timeout=8 if event == "daily" else 10)
+        try:
+            connection.request(
+                "POST", "/bot" + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage", body=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            response = connection.getresponse()
+            if response.status != 200:
+                print(f"Telegram rejected {event}: HTTP {response.status}", file=sys.stderr)
+                return 1
+            data = json.loads(response.read(65536))
+        finally:
+            connection.close()
+        if data.get("ok") is True:
+            result = data["result"]
+            if str(result["chat"]["id"]) == chat_id and type(result["message_id"]) is int and result["message_id"] > 0:
+                if run_id is not None:
+                    receipt = Path("/run/h2ci-daily-maintenance/delivery.json")
+                    receipt.write_text(json.dumps({"run_id": run_id, "message_id": result["message_id"]}))
+                print(f"Telegram delivered {event}; message ID {result['message_id']}")
+                return 0
+        print(f"Telegram did not confirm delivery of {event}", file=sys.stderr)
+    except Exception as exc:
+        # Exception details can contain the URL, including the bot token.
+        print(f"Telegram delivery failed for {event}: {type(exc).__name__}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+__SIC_EOF__
+chmod 644 "$R/runner/scripts/h2ci-telegram-notify"
+
+install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/runner-disk-guard.sh" <<'__SIC_EOF__'
 #!/usr/bin/env bash
 # Emergency cleanup when the root filesystem crosses HARD_LIMIT percent.
@@ -23393,6 +25312,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
+  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+    logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
+  fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
 fi
 __SIC_EOF__
@@ -23842,10 +25764,83 @@ __SIC_EOF__
 chmod 644 "$R/runner/systemd/github-runner-ctl.service"
 
 install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/h2ci-daily-maintenance.service" <<'__SIC_EOF__'
+[Unit]
+Description=Update h2ci, refresh maintenance status and report to Telegram
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/h2ci-maintenance daily
+RuntimeDirectory=h2ci-daily-maintenance
+RuntimeDirectoryMode=0700
+TimeoutStartSec=60min
+UMask=0077
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/h2ci-daily-maintenance.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/h2ci-server-update.service" <<'__SIC_EOF__'
+[Unit]
+Description=Apply h2ci OS package updates without rebooting
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-update --h2ci-managed
+RuntimeDirectory=h2ci-server-update
+RuntimeDirectoryPreserve=yes
+StateDirectory=h2ci-server-update
+StateDirectoryMode=0755
+TimeoutStartSec=45min
+StandardInput=null
+UMask=0022
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/h2ci-server-update.service"
+
+install -d "$R/runner/systemd"
+cat > "$R/runner/systemd/h2ci-telegram-notify@.service" <<'__SIC_EOF__'
+[Unit]
+Description=Send Telegram notification for h2ci monitor event %i
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/h2ci-monitor/telegram.credentials
+
+[Service]
+Type=oneshot
+LoadCredential=telegram.credentials:/etc/h2ci-monitor/telegram.credentials
+ExecStart=/usr/local/bin/h2ci-telegram-notify %i
+TimeoutStartSec=20s
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitCORE=0
+UMask=0077
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/h2ci-telegram-notify@.service"
+
+install -d "$R/runner/systemd/h2ci-telegram-notify@daily.service.d"
+cat > "$R/runner/systemd/h2ci-telegram-notify@daily.service.d/20-maintenance.conf" <<'__SIC_EOF__'
+[Unit]
+# Missing credentials must fail the daily job, not skip it successfully.
+ConditionPathExists=
+AssertPathExists=/etc/h2ci-monitor/telegram.credentials
+
+[Service]
+LoadCredential=maintenance.json:/run/h2ci-daily-maintenance/report.json
+ReadWritePaths=/run/h2ci-daily-maintenance
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/h2ci-telegram-notify@daily.service.d/20-maintenance.conf"
+
+install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/runner-disk-guard.service" <<'__SIC_EOF__'
 [Unit]
 Description=Emergency disk cleanup when usage is high
 After=docker.service
+
+OnFailure=h2ci-telegram-notify@runner-disk-guard.service
 
 [Service]
 Type=oneshot
@@ -23932,6 +25927,8 @@ After=network-online.target docker.service
 Wants=network-online.target
 ConditionPathExists=/etc/server-freshness/repo
 
+OnFailure=h2ci-telegram-notify@server-freshness.service
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/freshness --refresh
@@ -23947,6 +25944,15 @@ ProtectSystem=full
 PrivateTmp=true
 __SIC_EOF__
 chmod 644 "$R/runner/systemd/server-freshness.service"
+
+install -d "$R/runner/systemd/server-freshness.service.d"
+cat > "$R/runner/systemd/server-freshness.service.d/20-h2ci-reference.conf" <<'__SIC_EOF__'
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/freshness --refresh --repo /etc/server-freshness/reference
+ProtectHome=true
+__SIC_EOF__
+chmod 644 "$R/runner/systemd/server-freshness.service.d/20-h2ci-reference.conf"
 
 install -d "$R/runner/systemd"
 cat > "$R/runner/systemd/server-freshness.timer" <<'__SIC_EOF__'
@@ -24732,6 +26738,7 @@ cat > "$R/common/freshness" <<'__SIC_EOF__'
 """Read cached maintenance status; refresh explicitly, never apply upgrades."""
 import argparse
 import datetime
+import difflib
 import fcntl
 import ipaddress
 import json
@@ -24789,7 +26796,18 @@ def bridge_address():
     raise CheckError("docker0 IPv4 address unavailable")
 
 
-def compare_file(source, deployed, findings, expected=None):
+def unified_file_diff(source, deployed, expected, actual, rendered=False):
+    want, have = expected.decode("utf-8"), actual.decode("utf-8")
+    for text in (want, have):
+        if any(not char.isprintable() and char not in "\t\n" for char in text.replace("\r\n", "\n")):
+            raise ValueError("unsupported control characters")
+    label = f"{source} (rendered)" if rendered else str(source)
+    lines = difflib.unified_diff(want.splitlines(keepends=True), have.splitlines(keepends=True),
+                                 fromfile=label, tofile=str(deployed), n=0)
+    return "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n" for line in lines)
+
+
+def compare_file(source, deployed, findings, expected=None, file_diffs=None):
     label = str(deployed)
     try:
         want = source.read_bytes() if expected is None else expected
@@ -24799,6 +26817,11 @@ def compare_file(source, deployed, findings, expected=None):
         return
     if want != have:
         findings.append({"level": "warning", "item": label, "detail": "differs from repository"})
+        if file_diffs is not None:
+            try:
+                file_diffs.append(unified_file_diff(source, deployed, want, have, rendered=expected is not None))
+            except ValueError:
+                findings.append({"level": "error", "item": label, "detail": "diff requires printable UTF-8 text"})
 
 
 def runtime_drift(directory, findings):
@@ -24831,7 +26854,7 @@ def runtime_drift(directory, findings):
                                  "detail": "running image reference or memory limit differs from deployed Compose"})
 
 
-def drift(repo, root=Path("/")):
+def drift(repo, root=Path("/"), file_diffs=None):
     findings = []
     installed = []
     if not (repo / "runner/stacks").is_dir():
@@ -24850,7 +26873,7 @@ def drift(repo, root=Path("/")):
                     bridge = bridge or bridge_address()
                     expected = (source / name).read_bytes().replace(b"172.17.0.1:4873",
                                                                   f"{bridge}:4873".encode())
-                compare_file(source / name, directory / name, findings, expected)
+                compare_file(source / name, directory / name, findings, expected, file_diffs)
             if stack == "monitoring":
                 for subtree in ("prometheus", "grafana"):
                     if not (source / subtree).is_dir():
@@ -24871,11 +26894,12 @@ def drift(repo, root=Path("/")):
                                     if f"job_name: {job}".encode() not in expected:
                                         expected += (f'  - job_name: {job}\n    static_configs:\n'
                                                      f'      - targets: ["{target}"]\n').encode()
-                        compare_file(file, directory / relative, findings, expected)
+                        compare_file(file, directory / relative, findings, expected, file_diffs)
                 if (root / "opt/logging/docker-compose.yml").exists():
                     compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
-                                 directory / "grafana/provisioning/datasources/loki.yml", findings)
-            runtime_drift(directory, findings)
+                                 directory / "grafana/provisioning/datasources/loki.yml", findings, file_diffs=file_diffs)
+            if file_diffs is None:
+                runtime_drift(directory, findings)
         except (CheckError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             detail = str(exc) if isinstance(exc, CheckError) else "cannot inspect managed stack"
             findings.append({"level": "error", "item": stack, "detail": detail})
@@ -25048,6 +27072,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="read cached report only; no network or writes")
     mode.add_argument("--refresh", action="store_true", help="refresh metadata/network checks and write cached report; never upgrade")
+    mode.add_argument("--diff", action="store_true", help="show local unified diffs for managed files; output may be sensitive")
     parser.add_argument("--drift", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--repo", type=Path, help="repository root (default: /etc/server-freshness/repo)")
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
@@ -25057,14 +27082,29 @@ def main():
     args = parser.parse_args()
     if args.drift and (args.refresh or args.summary):
         parser.error("--drift requires --check and cannot use --summary")
+    if args.diff and (args.json or args.summary):
+        parser.error("--diff cannot be combined with --json or --summary")
     if args.refresh and os.geteuid() != 0:
+        if sys.argv[1:] == ["--refresh"] and Path(
+                "/etc/systemd/system/server-freshness.service.d/20-h2ci-reference.conf").is_file():
+            return subprocess.call(["/usr/bin/systemctl", "--no-ask-password", "start",
+                                    "server-freshness.service"])
         parser.error("--refresh requires root (package metadata and report writes)")
     try:
-        if args.drift or args.refresh:
+        if args.drift or args.refresh or args.diff:
             repo = args.repo or Path("/etc/server-freshness/repo").read_text().strip()
             repo = Path(repo)
             if not repo.is_absolute():
                 raise CheckError("repository path must be absolute")
+        if args.diff:
+            diffs = []
+            findings, _ = drift(repo, args.root, file_diffs=diffs)
+            for diff in diffs:
+                print(diff, end="")
+            for row in findings:
+                if row["level"] == "error":
+                    print(f"ERROR: {row['item']}: {row['detail']}", file=sys.stderr)
+            return 2 if any(row["level"] == "error" for row in findings) else int(bool(findings))
         if args.drift:
             findings, _ = drift(repo, args.root)
             if args.json:
@@ -25609,7 +27649,16 @@ check_updates() {
       | awk '{ print $1 }' | grep -E 'zypper|yum-cron|unattended|transactional-update|packagekit-offline' | head -1 || true)
   fi
 
-  if [[ -z "$found" ]]; then
+  if unit_exists h2ci-daily-maintenance.service; then
+    if systemctl is-active --quiet crond.service &&
+       grep -qsFx 'CRON_TZ=Europe/Kyiv' /etc/cron.d/h2ci-telegram-daily &&
+       grep -qsFx '0 11 * * * root /usr/bin/systemctl start h2ci-daily-maintenance.service' /etc/cron.d/h2ci-telegram-daily; then
+      ok "automatic updates: h2ci daily maintenance (cron, 11:00 Europe/Kyiv)"
+      [[ -z "$found" ]] || warn "h2ci daily maintenance and ${found} are both enabled"
+    else
+      warn "h2ci daily maintenance is installed but the expected cron schedule is not active"
+    fi
+  elif [[ -z "$found" ]]; then
     warn "no automatic update timer found (dnf-automatic, unattended-upgrades or zypper)"
   elif [[ "$found" == server-update.timer ]]; then
     local dup=""
@@ -26473,6 +28522,7 @@ check_trends() {
 # ---- brief mode: a short summary for the login screen and `srv status` -------------------------------------------
 BRIEF_DIR="${HEALTH_BRIEF_DIR:-/var/lib/server-health}"
 UPDATE_STATE="${SERVER_UPDATE_STATE:-/var/lib/server-update}/state"
+MANAGED_UPDATE_STATE="${H2CI_UPDATE_STATUS_FILE:-/var/lib/h2ci-server-update/state}"
 CLEANUP_STATE="${SERVER_CLEANUP_STATE:-/var/lib/server-cleanup}"
 
 # kv FILE KEY: value of key=value in a one-line state file (empty when missing)
@@ -26484,6 +28534,22 @@ lvl() {
 }
 ago() { # ago EPOCH: "3d4h ago" or "never"
   if [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]]; then echo "$(human_age $(( $(date +%s) - $1 ))) ago"; else echo never; fi
+}
+
+managed_update_status() {
+  local row now stamp outcome reboot changes
+  if IFS= read -r row < "$MANAGED_UPDATE_STATE" &&
+     [[ "$row" =~ ^time=([1-9][0-9]{0,10})\ outcome=(applied|unchanged|partial|failed|busy|unverified)\ reboot=(required|not-needed|unknown)\ changes=([0-9]+|\?)$ ]]; then
+    stamp=${BASH_REMATCH[1]} outcome=${BASH_REMATCH[2]} reboot=${BASH_REMATCH[3]} changes=${BASH_REMATCH[4]}
+    now=$(date +%s)
+    if (( now >= stamp && now - stamp <= 129600 )); then
+      printf '%s (%s package changes recorded); reboot: %s (checked %s)\n' "$outcome" "$changes" "${reboot//-/ }" "$(ago "$stamp")"
+      return
+    fi
+    printf 'stale (last managed update %s); reboot: unknown\n' "$(ago "$stamp")"
+  else
+    printf 'no verified managed update result; reboot: unknown\n'
+  fi
 }
 
 brief_full() { # run the full report when the last one is older than 6 hours; keep its counts for the summary
@@ -26530,7 +28596,9 @@ brief_render() {
       printf '%sf2b%s   not running %s\n' "$C_B" "$C_N" "$(lvl 1 1 2)"
     fi
   fi
-  if [[ -r "$UPDATE_STATE" ]]; then
+  if [[ -r "$MANAGED_UPDATE_STATE" ]] || unit_exists h2ci-server-update.service; then
+    s="update $(managed_update_status 2>/dev/null)"
+  elif [[ -r "$UPDATE_STATE" ]]; then
     u=$(kv "$UPDATE_STATE" updates); r=$(kv "$UPDATE_STATE" reboot)
     printf '%supd%s   %s update(s) pending, reboot needed: %s%s  (checked %s)\n' "$C_B" "$C_N" "${u:-?}" "$( [[ "$r" == 1 ]] && echo yes || echo no )" \
       "$( [[ "$r" == 1 ]] && lvl 1 1 2 )" "$(ago "$(kv "$UPDATE_STATE" time)")"
@@ -26718,7 +28786,7 @@ net.ipv4.conf.all.log_martians = 1
 __SIC_EOF__
 chmod 644 "$R/common/sysctl-hardening.conf"
 
-echo "files written to $R: 59"
+echo "files written to $R: 67"
 bash "$R/runner/install/users.sh" </dev/null
 bash "$R/common/admin-tools.sh" </dev/null
 bash "$R/runner/install/host-tools.sh" </dev/null
