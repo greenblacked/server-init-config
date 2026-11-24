@@ -105,13 +105,14 @@ def live_ssh_test(dropin: str, tag: str) -> None:
         check("permitrootlogin without-password" in eff or "permitrootlogin prohibit-password" in eff,
               f"{tag}: effective PermitRootLogin keeps root by key")
         check("passwordauthentication no" in eff, f"{tag}: effective PasswordAuthentication no")
+        check("kbdinteractiveauthentication no" in eff, f"{tag}: effective KbdInteractiveAuthentication no")
         daemon_log = d / "sshd.log"
         proc = subprocess.Popen([sshd, "-D", "-f", str(d / "sshd_config"), "-E", str(daemon_log)])
         try:
             time.sleep(1)
-            base = ["ssh", "-F", "/dev/null", "-p", str(port), "-o", "IdentitiesOnly=yes",
-                    "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                    "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR"]
+            common = ["ssh", "-F", "/dev/null", "-p", str(port), "-o", "IdentitiesOnly=yes",
+                      "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5"]
+            base = [*common, "-o", "BatchMode=yes", "-o", "LogLevel=ERROR"]
             r = run([*base, "-i", str(d / "userkey"), "root@127.0.0.1", "echo ok"], timeout=20)
             key_ok = r.returncode == 0 and r.stdout.strip() == "ok"
             detail = r.stderr.strip()
@@ -121,6 +122,24 @@ def live_ssh_test(dropin: str, tag: str) -> None:
             r = run([*base, "-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password",
                      "root@127.0.0.1", "true"], timeout=20)
             check(r.returncode != 0, f"{tag}: password login refused")
+            # BatchMode makes the check above pass even when the server would take a password, so ask the server what it
+            # offers: a deliberately wrong key makes it list the methods that can continue.
+            run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(d / "wrongkey")])
+            r = run([*common, "-v", "-o", "BatchMode=yes", "-i", str(d / "wrongkey"), "root@127.0.0.1", "true"], timeout=20)
+            offered = re.findall(r"Authentications that can continue: (\S+)", r.stderr)
+            methods = set(offered[-1].split(",")) if offered else set()
+            check(r.returncode != 0 and methods == {"publickey"}, f"{tag}: the server offers only publickey",
+                  f"offered {sorted(methods) or 'nothing parsed'}")
+            # With prompts allowed, a password or keyboard-interactive method would call this askpass; it must never run.
+            askpass = d / "askpass.sh"
+            called = d / "askpass.called"
+            askpass.write_text(f"#!/bin/sh\ntouch {called}\necho dummy-password\n")
+            askpass.chmod(0o700)
+            r = run([*common, "-o", "LogLevel=ERROR", "-o", "BatchMode=no", "-o", "PubkeyAuthentication=no",
+                     "-o", "PreferredAuthentications=keyboard-interactive,password", "-o", "NumberOfPasswordPrompts=1",
+                     "root@127.0.0.1", "true"], timeout=20,
+                    env={**os.environ, "SSH_ASKPASS": str(askpass), "SSH_ASKPASS_REQUIRE": "force", "DISPLAY": "none"})
+            check(r.returncode != 0 and not called.exists(), f"{tag}: no password or keyboard-interactive prompt is offered")
         finally:
             proc.terminate()
             proc.wait(timeout=10)
