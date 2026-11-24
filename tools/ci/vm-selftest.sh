@@ -119,10 +119,13 @@ endgroup
 group "Rocky runner files: the Docker reboot comes after cloud-init"
 # A reboot inside runcmd kills cloud-init mid-final-stage ("received SIGTERM", status error: runner-rocky10, run 41306416353).
 for f in runner/cloud-init/rocky.yaml runner/cloud-init/rocky-x86.yaml runner/cloud-init/rocky-clean.yaml; do
-  grep -q 'systemd-run --no-block -p After=cloud-final.service systemctl reboot' "$f" && ! grep -q 'systemctl reboot --no-block' "$f" \
-    && pass "$f: reboots from a unit ordered after cloud-final.service" || fail "$f: reboot is not deferred until cloud-final.service is done"
+  # The reboot also waits for the optional-tools install, so it never interrupts that dnf transaction.
+  grep -q 'systemd-run --no-block -p After=cloud-final.service -p After=ci-optional-tools.service systemctl reboot' "$f" && ! grep -q 'systemctl reboot --no-block' "$f" \
+    && pass "$f: reboots from a unit ordered after cloud-final.service and ci-optional-tools.service" || fail "$f: reboot is not deferred until cloud-final.service and the optional-tools install are done"
+  # oneshot so that After= really waits for the install; bounded so a hung dnf cannot hold the reboot forever.
   if grep -q '^      After=cloud-final.service network-online.target$' "$f" &&
-    grep -q '^      Type=exec$' "$f" &&
+    grep -q '^      Type=oneshot$' "$f" &&
+    sed -n '/ci-optional-tools.service$/,/ExecStart=/p' "$f" | grep -q '^      TimeoutStartSec=20min$' &&
     grep -q '^      WantedBy=cloud-init.target$' "$f" &&
     grep -q '^  - \[systemctl, enable, --now, --no-block, ci-optional-tools.service\]$' "$f" &&
     ! sed -n '/^runcmd:/,$p' "$f" | grep -F 'epel-release' >/dev/null; then
