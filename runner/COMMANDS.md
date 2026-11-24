@@ -10060,29 +10060,37 @@ finish_pod() {
   save_state
 }
 
+VERIFY_MAX_SECONDS=1800
 is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
 
 # check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
 # it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
 # ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
-# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# check is what ends a pod that got the wrong job. A job still not found after 20 complete scans is rejected too (fail closed). Only a
+# complete scan counts as a try (run list and every job list fetched, none cut off by the page limit): GitHub API errors or truncated
+# lists say nothing about this runner, so a busy pod is not killed for the time the API was unhealthy. Incomplete scans cannot keep a
+# pod alive for ever, though (a big matrix or many runs can force truncation, a jobs endpoint can keep failing): a pod that was seen busy
+# more than VERIFY_MAX_SECONDS ago and is still unverified is rejected whatever the scans said.
 # Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
 check_assigned_job() {
-  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  local pod=$1 repo=$2 rid=$3 run verdict tries complete=1 busy_since waited=0 runs_file="${TMP}/assigned-runs.json"
   tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
-  if (( tries >= 20 )); then
+  busy_since=$(cat "$(pod_dir "$pod")/busy" 2>/dev/null || echo 0)
+  if [[ "$busy_since" =~ ^[0-9]+$ ]] && (( busy_since > 0 )); then waited=$(( $(date +%s) - busy_since )); fi
+  if (( tries >= 20 || waited >= VERIFY_MAX_SECONDS )); then
     # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
-    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs" "scans=${tries}" "busy_for=${waited}s"
     : > "$(pod_dir "$pod")/verified"
     kill_pod "$pod" "$repo" "$rid" job_unverified
     return 0
   fi
-  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
-  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 6 || return 1
+  (( PAGED_TRUNCATED )) && complete=0
   cp "$PAGED_FILE" "$runs_file"
   for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
     [[ "$run" =~ ^[0-9]+$ ]] || continue
-    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then complete=0; continue; fi
+    (( PAGED_TRUNCATED )) && complete=0
     verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
       [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
       if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
@@ -10100,6 +10108,7 @@ check_assigned_job() {
     fi
     return 0
   done
+  if (( complete )); then printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"; fi
   return 1
 }
 
@@ -15824,29 +15833,37 @@ finish_pod() {
   save_state
 }
 
+VERIFY_MAX_SECONDS=1800
 is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
 
 # check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
 # it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
 # ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
-# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# check is what ends a pod that got the wrong job. A job still not found after 20 complete scans is rejected too (fail closed). Only a
+# complete scan counts as a try (run list and every job list fetched, none cut off by the page limit): GitHub API errors or truncated
+# lists say nothing about this runner, so a busy pod is not killed for the time the API was unhealthy. Incomplete scans cannot keep a
+# pod alive for ever, though (a big matrix or many runs can force truncation, a jobs endpoint can keep failing): a pod that was seen busy
+# more than VERIFY_MAX_SECONDS ago and is still unverified is rejected whatever the scans said.
 # Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
 check_assigned_job() {
-  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  local pod=$1 repo=$2 rid=$3 run verdict tries complete=1 busy_since waited=0 runs_file="${TMP}/assigned-runs.json"
   tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
-  if (( tries >= 20 )); then
+  busy_since=$(cat "$(pod_dir "$pod")/busy" 2>/dev/null || echo 0)
+  if [[ "$busy_since" =~ ^[0-9]+$ ]] && (( busy_since > 0 )); then waited=$(( $(date +%s) - busy_since )); fi
+  if (( tries >= 20 || waited >= VERIFY_MAX_SECONDS )); then
     # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
-    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs" "scans=${tries}" "busy_for=${waited}s"
     : > "$(pod_dir "$pod")/verified"
     kill_pod "$pod" "$repo" "$rid" job_unverified
     return 0
   fi
-  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
-  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 6 || return 1
+  (( PAGED_TRUNCATED )) && complete=0
   cp "$PAGED_FILE" "$runs_file"
   for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
     [[ "$run" =~ ^[0-9]+$ ]] || continue
-    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then complete=0; continue; fi
+    (( PAGED_TRUNCATED )) && complete=0
     verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
       [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
       if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
@@ -15864,6 +15881,7 @@ check_assigned_job() {
     fi
     return 0
   done
+  if (( complete )); then printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"; fi
   return 1
 }
 
@@ -24139,29 +24157,37 @@ finish_pod() {
   save_state
 }
 
+VERIFY_MAX_SECONDS=1800
 is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
 
 # check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
 # it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
 # ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
-# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# check is what ends a pod that got the wrong job. A job still not found after 20 complete scans is rejected too (fail closed). Only a
+# complete scan counts as a try (run list and every job list fetched, none cut off by the page limit): GitHub API errors or truncated
+# lists say nothing about this runner, so a busy pod is not killed for the time the API was unhealthy. Incomplete scans cannot keep a
+# pod alive for ever, though (a big matrix or many runs can force truncation, a jobs endpoint can keep failing): a pod that was seen busy
+# more than VERIFY_MAX_SECONDS ago and is still unverified is rejected whatever the scans said.
 # Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
 check_assigned_job() {
-  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  local pod=$1 repo=$2 rid=$3 run verdict tries complete=1 busy_since waited=0 runs_file="${TMP}/assigned-runs.json"
   tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
-  if (( tries >= 20 )); then
+  busy_since=$(cat "$(pod_dir "$pod")/busy" 2>/dev/null || echo 0)
+  if [[ "$busy_since" =~ ^[0-9]+$ ]] && (( busy_since > 0 )); then waited=$(( $(date +%s) - busy_since )); fi
+  if (( tries >= 20 || waited >= VERIFY_MAX_SECONDS )); then
     # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
-    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs" "scans=${tries}" "busy_for=${waited}s"
     : > "$(pod_dir "$pod")/verified"
     kill_pod "$pod" "$repo" "$rid" job_unverified
     return 0
   fi
-  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
-  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 6 || return 1
+  (( PAGED_TRUNCATED )) && complete=0
   cp "$PAGED_FILE" "$runs_file"
   for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
     [[ "$run" =~ ^[0-9]+$ ]] || continue
-    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then complete=0; continue; fi
+    (( PAGED_TRUNCATED )) && complete=0
     verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
       [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
       if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
@@ -24179,6 +24205,7 @@ check_assigned_job() {
     fi
     return 0
   done
+  if (( complete )); then printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"; fi
   return 1
 }
 
