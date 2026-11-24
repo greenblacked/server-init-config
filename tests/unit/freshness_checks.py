@@ -195,6 +195,86 @@ class FreshnessTests(unittest.TestCase):
         with patch.dict(GLOBALS, {"runtime_drift": lambda *a: None}):
             self.assertEqual(fresh.drift(repo, self.root)[0], [])
 
+    def monitoring_tree(self, order):
+        repo = self.root / "repo"
+        for name in ("monitoring", "logging", "registry-cache"):
+            source = repo / "runner/stacks" / name
+            source.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(ROOT / "runner/stacks" / name, source)
+            target = self.root / "opt" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, target)
+        ports = {"registry-cache": 5001, "loki": 3100, "alloy": 12345}
+        prom = self.root / "opt/monitoring/prometheus/prometheus.yml"
+        for job in order:
+            with prom.open("a") as stream:
+                stream.write(f'  - job_name: {job}\n    static_configs:\n      - targets: ["127.0.0.1:{ports[job]}"]\n')
+        shutil.copyfile(repo / "runner/stacks/logging/grafana-datasource.yml",
+                        self.root / "opt/monitoring/grafana/provisioning/datasources/loki.yml")
+        return repo
+
+    def test_prometheus_extra_jobs_are_compared_regardless_of_installer_order(self):
+        for order in (("loki", "alloy", "registry-cache"), ("alloy", "registry-cache", "loki"),
+                      ("registry-cache", "loki", "alloy")):
+            with self.subTest(order=order):
+                self.root = Path(self.tmp.name) / "-".join(order)
+                repo = self.monitoring_tree(order)
+                with patch.dict(GLOBALS, {"runtime_drift": lambda *a: None}):
+                    self.assertEqual(fresh.drift(repo, self.root)[0], [])
+
+    def test_prometheus_missing_or_edited_extra_job_is_still_drift(self):
+        repo = self.monitoring_tree(("loki", "registry-cache"))   # alloy was never appended
+        with patch.dict(GLOBALS, {"runtime_drift": lambda *a: None}):
+            findings = fresh.drift(repo, self.root)[0]
+        self.assertEqual([f["item"] for f in findings], [str(self.root / "opt/monitoring/prometheus/prometheus.yml")])
+        prom = self.root / "opt/monitoring/prometheus/prometheus.yml"
+        prom.write_text(prom.read_text() + "  - job_name: alloy\n    static_configs:\n      - targets: [\"127.0.0.1:1\"]\n")
+        with patch.dict(GLOBALS, {"runtime_drift": lambda *a: None}):
+            self.assertEqual(len(fresh.drift(repo, self.root)[0]), 1)
+
+    def test_check_update_joins_wrapped_long_package_names(self):
+        text = ("kernel-core.aarch64                      6.12.0-55.el10          baseos\n"
+                "a-very-long-package-name-that-dnf-wraps-onto-two-lines.noarch\n"
+                "                                         2.0.1-3.el10            appstream\n"
+                "\n"
+                "Obsoleting Packages\n"
+                "new-pkg.aarch64                          2.0-1.el10              baseos\n"
+                "    old-pkg.aarch64                      1.0-1.el10              @anaconda\n")
+        self.assertEqual(fresh.check_update_names(text),
+                         ["a-very-long-package-name-that-dnf-wraps-onto-two-lines", "kernel-core", "new-pkg"])
+        self.assertEqual(fresh.check_update_names(""), [])
+
+    def test_reboot_state_prefers_dnf_needs_restarting_and_unknown_is_not_an_error(self):
+        def which(names):
+            return lambda name: f"/usr/bin/{name}" if name in names else None
+        def runner(results, calls):
+            def command(argv, **kwargs):
+                calls.append(argv)
+                outcome = results[argv[0]]
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return subprocess.CompletedProcess(argv, outcome[0], outcome[1], "")
+            return command
+        no_file = patch.object(GLOBALS["Path"], "exists", return_value=False)
+        cases = [
+            ({"dnf"}, {"dnf": (1, "Reboot is required to ensure that your system benefits")}, "required", ["dnf"]),
+            ({"dnf"}, {"dnf": (0, "No core libraries or services have been updated")}, "not-required", ["dnf"]),
+            ({"dnf"}, {"dnf": (1, "")}, "unknown", ["dnf"]),   # a generic DNF error is not a reboot request
+            ({"dnf"}, {"dnf": fresh.CheckError("timed out")}, "unknown", ["dnf"]),
+            ({"dnf", "needs-restarting"}, {"dnf": (1, "No such command"), "needs-restarting": (1, "Reboot is required")},
+             "required", ["dnf", "needs-restarting"]),
+            ({"needs-restarting"}, {"needs-restarting": (0, "")}, "not-required", ["needs-restarting"]),
+            (set(), {}, "unknown", []),
+        ]
+        for present, results, want, called in cases:
+            calls = []
+            with self.subTest(present=present, want=want), no_file, patch("shutil.which", side_effect=which(present)), \
+                 patch.dict(GLOBALS, {"run": runner(results, calls)}):
+                self.assertEqual(fresh.reboot_state(), want)
+                self.assertEqual([c[0] for c in calls], called)
+                if "dnf" in called:
+                    self.assertEqual(calls[0], ["dnf", "-q", "-C", "needs-restarting", "-r"])
+
     def test_health_reads_cache_and_warns_for_missing_required_timers(self):
         text = (ROOT / "common/health").read_text()
         def function(name):

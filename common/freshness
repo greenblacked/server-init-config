@@ -118,6 +118,26 @@ def runtime_drift(directory, findings):
                                  "detail": "running image reference or memory limit differs from deployed Compose"})
 
 
+# Jobs that the logging and registry-cache installers append to prometheus.yml, in whatever order the installers ran.
+PROMETHEUS_EXTRA_JOBS = (
+    ("registry-cache", "registry-cache", "127.0.0.1:5001"),
+    ("logging", "loki", "127.0.0.1:3100"),
+    ("logging", "alloy", "127.0.0.1:12345"),
+)
+
+
+def prometheus_expected(base, deployed, root):
+    """Repository prometheus.yml plus the extra jobs of the installed components, ordered as in the deployed file."""
+    blocks = {}
+    for component, job, target in PROMETHEUS_EXTRA_JOBS:
+        if (root / "opt" / component / "docker-compose.yml").exists() and f"job_name: {job}".encode() not in base:
+            blocks[job] = (f'  - job_name: {job}\n    static_configs:\n'
+                           f'      - targets: ["{target}"]\n').encode()
+    # A block that is missing from the deployed file goes last (it is reported as a difference either way).
+    position = {job: deployed.find(block) for job, block in blocks.items()}
+    return base + b"".join(blocks[job] for job in sorted(blocks, key=lambda j: (position[j] < 0, position[j])))
+
+
 def drift(repo, root=Path("/"), file_diffs=None):
     findings = []
     installed = []
@@ -148,16 +168,11 @@ def drift(repo, root=Path("/"), file_diffs=None):
                         relative = file.relative_to(source)
                         expected = file.read_bytes()
                         if relative.as_posix() == "prometheus/prometheus.yml":
-                            additions = (
-                                ("registry-cache", "registry-cache", "127.0.0.1:5001"),
-                                ("logging", "loki", "127.0.0.1:3100"),
-                                ("logging", "alloy", "127.0.0.1:12345"),
-                            )
-                            for component, job, target in additions:
-                                if (root / "opt" / component / "docker-compose.yml").exists():
-                                    if f"job_name: {job}".encode() not in expected:
-                                        expected += (f'  - job_name: {job}\n    static_configs:\n'
-                                                     f'      - targets: ["{target}"]\n').encode()
+                            try:
+                                deployed_bytes = (directory / relative).read_bytes()
+                            except OSError:
+                                deployed_bytes = b""   # compare_file reports the missing file
+                            expected = prometheus_expected(expected, deployed_bytes, root)
                         compare_file(file, directory / relative, findings, expected, file_diffs)
                 if (root / "opt/logging/docker-compose.yml").exists():
                     compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
@@ -208,14 +223,25 @@ def hub_tags(image):
             "scope": "100 most recently updated tags; stable x.y.z only, not a support/EOL check"}
 
 
+def check_update_names(text):
+    """Package names from `dnf -q check-update`. DNF wraps a long name: the version and repository continue on an
+    indented line (and the obsoleted package of an obsoleting entry is indented too), so those lines are joined first."""
+    logical = []
+    for line in text.splitlines():
+        if line[:1].isspace() and logical:
+            logical[-1] += " " + line.strip()
+        elif line.strip():
+            logical.append(line.strip())
+    pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src|ppc64le|s390x|armv7hl)\s+(\S+)\s+\S+")
+    return sorted({match.group(1) for line in logical if (match := pattern.match(line))})
+
+
 def packages():
     """Refresh metadata only. This function is never called by --check or health."""
     if shutil.which("dnf"):
         rows = run(["dnf", "-q", "--refresh", "--setopt=*.skip_if_unavailable=False", "check-update"],
                    timeout=150, accepted=(0, 100))
-        pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src)\s+(\S+)\s+\S+")
-        updates = sorted({match.group(1) for line in rows.stdout.splitlines()
-                          if (match := pattern.match(line))})
+        updates = check_update_names(rows.stdout)
         if rows.returncode == 100 and not updates:
             raise CheckError("DNF reports updates but package list could not be parsed")
         security = run(["dnf", "-q", "--cacheonly", "updateinfo", "list", "--security"], timeout=60)
@@ -236,12 +262,23 @@ def packages():
 def reboot_state():
     if Path("/var/run/reboot-required").exists():
         return "required"
+    # `dnf needs-restarting -r` (the plugin that h2ci-maintenance uses) first, the old standalone binary as a fallback.
+    # A host without either, or a failing query, is "unknown": that is not a freshness error.
+    commands = []
+    if shutil.which("dnf"):
+        commands.append(["dnf", "-q", "-C", "needs-restarting", "-r"])
     if shutil.which("needs-restarting"):
-        result = run(["needs-restarting", "-r"], timeout=30, accepted=(0, 1))
+        commands.append(["needs-restarting", "-r"])
+    for argv in commands:
+        try:
+            result = run(argv, timeout=60, accepted=(0, 1))
+        except CheckError:
+            continue
+        # exit 1 can also be a generic DNF error: require the affirmative text
+        if result.returncode == 1 and "reboot is required" in result.stdout.lower():
+            return "required"
         if result.returncode == 0:
             return "not-required"
-        if "reboot is required" in result.stdout.lower():
-            return "required"
     return "unknown"
 
 
