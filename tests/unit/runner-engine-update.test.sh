@@ -2,7 +2,7 @@
 # Test the updater's pure probe/isolation helpers with package-manager and systemd stubs.
 source "$REPO/runner/scripts/runner-engine-update.sh"
 
-note() { printf '%s\n' "$*" >> "$T/messages"; }
+note() { last_note="$*"; printf '%s\n' "$*" >> "$T/messages"; }
 
 setup_dnf() {
   mkdir -p "$T/bin"
@@ -135,20 +135,27 @@ test_isolation_success_requires_verified_active_unit() {
 
 test_exit_cleanup_does_not_restart_services_without_isolation() {
   setup_systemctl
+  HELD_FILE="$T/var/held"
   runner_stopped=1 ctl_stopped=1 restart_allowed=0 isolation_required=0
   cleanup_services
   assert_eq "$(cat "$T/systemctl.calls" 2>/dev/null || true)" '' 'failed isolation leaves both services stopped'
+  assert_ok 'held marker records that the controller was stopped' grep -qx 'ctl_stopped=1' "$HELD_FILE"
+  assert_ok 'held marker has a timestamp' grep -Eq '^time=[0-9]{4}-' "$HELD_FILE"
+  rm -f "$HELD_FILE"
 
   restart_allowed=1
   cleanup_services
   assert_eq "$(cat "$T/systemctl.calls")" $'start --no-block gitlab-runner\nstart --no-block github-runner-ctl' 'verified isolation permits cleanup restart'
+  assert_fail 'a restorable exit writes no marker' test -e "$HELD_FILE"
 }
 
 test_exit_cleanup_rechecks_isolation_before_restarting_services() {
   setup_systemctl
+  HELD_FILE="$T/var/held"
   runner_stopped=1 ctl_stopped=1 restart_allowed=1 isolation_required=1
   ISO_ACTIVE_RC=3
   cleanup_services
+  assert_ok 'inactive isolation at exit writes the held marker' test -s "$HELD_FILE"
   assert_eq "$(cat "$T/systemctl.calls")" 'is-active --quiet ci-job-isolation.service' 'inactive isolation prevents cleanup restart'
   assert_eq "$restart_allowed" 0 'failed isolation recheck disables later restart attempts'
 }

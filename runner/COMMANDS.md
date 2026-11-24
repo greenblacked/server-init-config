@@ -2402,6 +2402,9 @@ check_services() {
     fi
   done
 
+  if is_runner && [[ -e /var/lib/runner-engine-update/held ]]; then
+    warn "CI services are held stopped by a failed engine update ($(sed -n 's/^reason=//p' /var/lib/runner-engine-update/held 2>/dev/null | head -1)); the next runner-engine-update run recovers them, or run: sudo runner-engine-update.sh"
+  fi
   if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
     local upd
     upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
@@ -3842,14 +3845,29 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
 # stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
 # One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
+# When Docker packages were changed and the CI services cannot be restored safely, they stay stopped, the run FAILs (exit 1) and
+# a "held" marker is written; every later run first tries to recover from it (isolation, Docker, no jobs, services back).
 set -Eeuo pipefail
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
+HELD_FILE="${ENGINE_UPDATE_HELD:-/var/lib/runner-engine-update/held}"   # overridable for tests
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+last_note=""
+note() { last_note="$*"; logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+# A run that leaves the CI services stopped records why; the next run recovers or reports it (see recover_held).
+# It runs from the EXIT trap and must never change the exit code of the run (the services stay stopped either way).
+write_held() {
+  local reason=${last_note:-unknown} tmp
+  mkdir -p "$(dirname "$HELD_FILE")" || return 0
+  tmp=$(mktemp "$HELD_FILE.XXXXXX") || return 0
+  printf 'time=%s\nreason=%s\nctl_stopped=%s\n' "$(date -u +%FT%TZ)" "$reason" "${ctl_stopped:-0}" > "$tmp" || { rm -f "$tmp"; return 0; }
+  chmod 0644 "$tmp"   # no secret in it; health prints the reason as a normal user
+  mv -f "$tmp" "$HELD_FILE" || { rm -f "$tmp"; return 0; }
+  note "HELD CI services stay stopped; the next run re-checks isolation and restarts them (marker ${HELD_FILE})"
+}
 
 # Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
 probe_failed() {
@@ -3913,8 +3931,66 @@ runner_back() {
     ctl_back
   fi
 }
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
 cleanup_services() {
-  if (( runner_stopped )); then runner_back; fi
+  if (( runner_stopped )); then
+    if can_restart_services; then runner_back; else write_held || true; fi
+  fi
+}
+# A marker from an earlier fail-closed run means the CI services were left stopped. Restart them only after the checks the normal
+# path needs (isolation rebuilt and active, Docker answers, no job); otherwise stay held and fail so that it is noticed.
+# The services are only stopped, not disabled, so a reboot brings them back: with both running (and the isolation active) the marker
+# is stale and is cleared without touching the isolation rules under live jobs; running without isolation is a loud failure.
+recover_held() {
+  [[ -e "$HELD_FILE" ]] || return 0
+  local reason jobs running=1
+  reason=$(sed -n 's/^reason=//p' "$HELD_FILE" 2>/dev/null | head -1)
+  systemctl is-active --quiet gitlab-runner || running=0
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then running=0; fi
+  if (( running )); then
+    if [[ "$DRY_RUN" == 1 ]]; then
+      note "DRY-RUN held marker is stale: the CI services are already running"
+      return 0
+    fi
+    if systemctl is-active --quiet ci-job-isolation.service; then
+      rm -f "$HELD_FILE"
+      note "OK held marker cleared: services already running (${reason:-unknown})"
+      return 0
+    fi
+    note "FAIL CI services are running but ci-job-isolation.service is not active; marker kept (${reason:-unknown})"
+    return 1
+  fi
+  if [[ "$DRY_RUN" == 1 ]]; then
+    note "DRY-RUN CI services are held since $(sed -n 's/^time=//p' "$HELD_FILE" | head -1) (${reason:-unknown}); a real run would re-check isolation and restart them"
+    return 0
+  fi
+  note "HELD marker found (${reason:-unknown}); trying to restore the CI services"
+  if ! ensure_isolation; then
+    note "FAIL CI services still held: isolation is not restored"
+    return 1
+  fi
+  if ! jobs=$(job_ids 2>/dev/null); then
+    note "FAIL CI services still held: docker does not answer"
+    return 1
+  fi
+  if [[ -n "$jobs" ]]; then
+    note "FAIL CI services still held: $(wc -w <<<"$jobs") CI job(s) running"
+    return 1
+  fi
+  systemctl start gitlab-runner || true
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE"; then systemctl start github-runner-ctl || true; fi
+  sleep 5
+  if ! systemctl is-active --quiet gitlab-runner; then
+    note "FAIL CI services still held: gitlab-runner did not start"
+    return 1
+  fi
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then
+    note "FAIL CI services still held: github-runner-ctl did not start"
+    return 1
+  fi
+  rm -f "$HELD_FILE"
+  note "OK held CI services restored (${reason:-unknown})"
 }
 main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -3925,8 +4001,7 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-# A docker error is not "no jobs".
-job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+recover_held || exit 1
 if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
@@ -4008,19 +4083,19 @@ if (( ${#docker_pkgs[@]} )); then
   isolation_required=1
 fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
-  note "FAIL Docker package upgrade failed, see ${LOG}"
+  note "FAIL Docker package upgrade failed, see ${LOG}; CI services left stopped"
   exit 1
 fi
 # a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
-    exit 0
+    note "FAIL Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted; CI services left stopped"
+    exit 1
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
-  exit 0
+  note "FAIL Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted; CI services left stopped"
+  exit 1
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
@@ -4128,6 +4203,8 @@ cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
 [Unit]
 Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
 After=docker.service network-online.target
+
+OnFailure=h2ci-telegram-notify@runner-engine-update.service
 
 [Service]
 Type=oneshot
@@ -16536,6 +16613,7 @@ EVENTS = {
     "disk-threshold": "Root filesystem reached the disk guard threshold; emergency cleanup triggered.",
     "runner-disk-guard": "Disk guard failed. Check: journalctl -u runner-disk-guard.service",
     "server-freshness": "Freshness check failed. Check: journalctl -u server-freshness.service",
+    "runner-engine-update": "Docker/GitLab Runner update failed; CI services may be held stopped. Check: tail /var/log/runner-engine-update.log; ls /var/lib/runner-engine-update/held",
     "test": "TEST: systemd monitor alert delivery verified.",
 }
 
@@ -17089,14 +17167,29 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
 # stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
 # One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
+# When Docker packages were changed and the CI services cannot be restored safely, they stay stopped, the run FAILs (exit 1) and
+# a "held" marker is written; every later run first tries to recover from it (isolation, Docker, no jobs, services back).
 set -Eeuo pipefail
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
+HELD_FILE="${ENGINE_UPDATE_HELD:-/var/lib/runner-engine-update/held}"   # overridable for tests
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+last_note=""
+note() { last_note="$*"; logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+# A run that leaves the CI services stopped records why; the next run recovers or reports it (see recover_held).
+# It runs from the EXIT trap and must never change the exit code of the run (the services stay stopped either way).
+write_held() {
+  local reason=${last_note:-unknown} tmp
+  mkdir -p "$(dirname "$HELD_FILE")" || return 0
+  tmp=$(mktemp "$HELD_FILE.XXXXXX") || return 0
+  printf 'time=%s\nreason=%s\nctl_stopped=%s\n' "$(date -u +%FT%TZ)" "$reason" "${ctl_stopped:-0}" > "$tmp" || { rm -f "$tmp"; return 0; }
+  chmod 0644 "$tmp"   # no secret in it; health prints the reason as a normal user
+  mv -f "$tmp" "$HELD_FILE" || { rm -f "$tmp"; return 0; }
+  note "HELD CI services stay stopped; the next run re-checks isolation and restarts them (marker ${HELD_FILE})"
+}
 
 # Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
 probe_failed() {
@@ -17160,8 +17253,66 @@ runner_back() {
     ctl_back
   fi
 }
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
 cleanup_services() {
-  if (( runner_stopped )); then runner_back; fi
+  if (( runner_stopped )); then
+    if can_restart_services; then runner_back; else write_held || true; fi
+  fi
+}
+# A marker from an earlier fail-closed run means the CI services were left stopped. Restart them only after the checks the normal
+# path needs (isolation rebuilt and active, Docker answers, no job); otherwise stay held and fail so that it is noticed.
+# The services are only stopped, not disabled, so a reboot brings them back: with both running (and the isolation active) the marker
+# is stale and is cleared without touching the isolation rules under live jobs; running without isolation is a loud failure.
+recover_held() {
+  [[ -e "$HELD_FILE" ]] || return 0
+  local reason jobs running=1
+  reason=$(sed -n 's/^reason=//p' "$HELD_FILE" 2>/dev/null | head -1)
+  systemctl is-active --quiet gitlab-runner || running=0
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then running=0; fi
+  if (( running )); then
+    if [[ "$DRY_RUN" == 1 ]]; then
+      note "DRY-RUN held marker is stale: the CI services are already running"
+      return 0
+    fi
+    if systemctl is-active --quiet ci-job-isolation.service; then
+      rm -f "$HELD_FILE"
+      note "OK held marker cleared: services already running (${reason:-unknown})"
+      return 0
+    fi
+    note "FAIL CI services are running but ci-job-isolation.service is not active; marker kept (${reason:-unknown})"
+    return 1
+  fi
+  if [[ "$DRY_RUN" == 1 ]]; then
+    note "DRY-RUN CI services are held since $(sed -n 's/^time=//p' "$HELD_FILE" | head -1) (${reason:-unknown}); a real run would re-check isolation and restart them"
+    return 0
+  fi
+  note "HELD marker found (${reason:-unknown}); trying to restore the CI services"
+  if ! ensure_isolation; then
+    note "FAIL CI services still held: isolation is not restored"
+    return 1
+  fi
+  if ! jobs=$(job_ids 2>/dev/null); then
+    note "FAIL CI services still held: docker does not answer"
+    return 1
+  fi
+  if [[ -n "$jobs" ]]; then
+    note "FAIL CI services still held: $(wc -w <<<"$jobs") CI job(s) running"
+    return 1
+  fi
+  systemctl start gitlab-runner || true
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE"; then systemctl start github-runner-ctl || true; fi
+  sleep 5
+  if ! systemctl is-active --quiet gitlab-runner; then
+    note "FAIL CI services still held: gitlab-runner did not start"
+    return 1
+  fi
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then
+    note "FAIL CI services still held: github-runner-ctl did not start"
+    return 1
+  fi
+  rm -f "$HELD_FILE"
+  note "OK held CI services restored (${reason:-unknown})"
 }
 main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -17172,8 +17323,7 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-# A docker error is not "no jobs".
-job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+recover_held || exit 1
 if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
@@ -17255,19 +17405,19 @@ if (( ${#docker_pkgs[@]} )); then
   isolation_required=1
 fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
-  note "FAIL Docker package upgrade failed, see ${LOG}"
+  note "FAIL Docker package upgrade failed, see ${LOG}; CI services left stopped"
   exit 1
 fi
 # a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
-    exit 0
+    note "FAIL Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted; CI services left stopped"
+    exit 1
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
-  exit 0
+  note "FAIL Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted; CI services left stopped"
+  exit 1
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
@@ -17630,6 +17780,8 @@ cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
 [Unit]
 Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
 After=docker.service network-online.target
+
+OnFailure=h2ci-telegram-notify@runner-engine-update.service
 
 [Service]
 Type=oneshot
@@ -19660,6 +19812,9 @@ check_services() {
     fi
   done
 
+  if is_runner && [[ -e /var/lib/runner-engine-update/held ]]; then
+    warn "CI services are held stopped by a failed engine update ($(sed -n 's/^reason=//p' /var/lib/runner-engine-update/held 2>/dev/null | head -1)); the next runner-engine-update run recovers them, or run: sudo runner-engine-update.sh"
+  fi
   if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
     local upd
     upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
@@ -24773,6 +24928,7 @@ EVENTS = {
     "disk-threshold": "Root filesystem reached the disk guard threshold; emergency cleanup triggered.",
     "runner-disk-guard": "Disk guard failed. Check: journalctl -u runner-disk-guard.service",
     "server-freshness": "Freshness check failed. Check: journalctl -u server-freshness.service",
+    "runner-engine-update": "Docker/GitLab Runner update failed; CI services may be held stopped. Check: tail /var/log/runner-engine-update.log; ls /var/lib/runner-engine-update/held",
     "test": "TEST: systemd monitor alert delivery verified.",
 }
 
@@ -25326,14 +25482,29 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
 # stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
 # One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
+# When Docker packages were changed and the CI services cannot be restored safely, they stay stopped, the run FAILs (exit 1) and
+# a "held" marker is written; every later run first tries to recover from it (isolation, Docker, no jobs, services back).
 set -Eeuo pipefail
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
+HELD_FILE="${ENGINE_UPDATE_HELD:-/var/lib/runner-engine-update/held}"   # overridable for tests
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+last_note=""
+note() { last_note="$*"; logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+# A run that leaves the CI services stopped records why; the next run recovers or reports it (see recover_held).
+# It runs from the EXIT trap and must never change the exit code of the run (the services stay stopped either way).
+write_held() {
+  local reason=${last_note:-unknown} tmp
+  mkdir -p "$(dirname "$HELD_FILE")" || return 0
+  tmp=$(mktemp "$HELD_FILE.XXXXXX") || return 0
+  printf 'time=%s\nreason=%s\nctl_stopped=%s\n' "$(date -u +%FT%TZ)" "$reason" "${ctl_stopped:-0}" > "$tmp" || { rm -f "$tmp"; return 0; }
+  chmod 0644 "$tmp"   # no secret in it; health prints the reason as a normal user
+  mv -f "$tmp" "$HELD_FILE" || { rm -f "$tmp"; return 0; }
+  note "HELD CI services stay stopped; the next run re-checks isolation and restarts them (marker ${HELD_FILE})"
+}
 
 # Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
 probe_failed() {
@@ -25397,8 +25568,66 @@ runner_back() {
     ctl_back
   fi
 }
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
 cleanup_services() {
-  if (( runner_stopped )); then runner_back; fi
+  if (( runner_stopped )); then
+    if can_restart_services; then runner_back; else write_held || true; fi
+  fi
+}
+# A marker from an earlier fail-closed run means the CI services were left stopped. Restart them only after the checks the normal
+# path needs (isolation rebuilt and active, Docker answers, no job); otherwise stay held and fail so that it is noticed.
+# The services are only stopped, not disabled, so a reboot brings them back: with both running (and the isolation active) the marker
+# is stale and is cleared without touching the isolation rules under live jobs; running without isolation is a loud failure.
+recover_held() {
+  [[ -e "$HELD_FILE" ]] || return 0
+  local reason jobs running=1
+  reason=$(sed -n 's/^reason=//p' "$HELD_FILE" 2>/dev/null | head -1)
+  systemctl is-active --quiet gitlab-runner || running=0
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then running=0; fi
+  if (( running )); then
+    if [[ "$DRY_RUN" == 1 ]]; then
+      note "DRY-RUN held marker is stale: the CI services are already running"
+      return 0
+    fi
+    if systemctl is-active --quiet ci-job-isolation.service; then
+      rm -f "$HELD_FILE"
+      note "OK held marker cleared: services already running (${reason:-unknown})"
+      return 0
+    fi
+    note "FAIL CI services are running but ci-job-isolation.service is not active; marker kept (${reason:-unknown})"
+    return 1
+  fi
+  if [[ "$DRY_RUN" == 1 ]]; then
+    note "DRY-RUN CI services are held since $(sed -n 's/^time=//p' "$HELD_FILE" | head -1) (${reason:-unknown}); a real run would re-check isolation and restart them"
+    return 0
+  fi
+  note "HELD marker found (${reason:-unknown}); trying to restore the CI services"
+  if ! ensure_isolation; then
+    note "FAIL CI services still held: isolation is not restored"
+    return 1
+  fi
+  if ! jobs=$(job_ids 2>/dev/null); then
+    note "FAIL CI services still held: docker does not answer"
+    return 1
+  fi
+  if [[ -n "$jobs" ]]; then
+    note "FAIL CI services still held: $(wc -w <<<"$jobs") CI job(s) running"
+    return 1
+  fi
+  systemctl start gitlab-runner || true
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE"; then systemctl start github-runner-ctl || true; fi
+  sleep 5
+  if ! systemctl is-active --quiet gitlab-runner; then
+    note "FAIL CI services still held: gitlab-runner did not start"
+    return 1
+  fi
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then
+    note "FAIL CI services still held: github-runner-ctl did not start"
+    return 1
+  fi
+  rm -f "$HELD_FILE"
+  note "OK held CI services restored (${reason:-unknown})"
 }
 main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -25409,8 +25638,7 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-# A docker error is not "no jobs".
-job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+recover_held || exit 1
 if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
@@ -25492,19 +25720,19 @@ if (( ${#docker_pkgs[@]} )); then
   isolation_required=1
 fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
-  note "FAIL Docker package upgrade failed, see ${LOG}"
+  note "FAIL Docker package upgrade failed, see ${LOG}; CI services left stopped"
   exit 1
 fi
 # a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
-    exit 0
+    note "FAIL Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted; CI services left stopped"
+    exit 1
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
-  exit 0
+  note "FAIL Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted; CI services left stopped"
+  exit 1
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
@@ -25867,6 +26095,8 @@ cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
 [Unit]
 Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
 After=docker.service network-online.target
+
+OnFailure=h2ci-telegram-notify@runner-engine-update.service
 
 [Service]
 Type=oneshot
@@ -27897,6 +28127,9 @@ check_services() {
     fi
   done
 
+  if is_runner && [[ -e /var/lib/runner-engine-update/held ]]; then
+    warn "CI services are held stopped by a failed engine update ($(sed -n 's/^reason=//p' /var/lib/runner-engine-update/held 2>/dev/null | head -1)); the next runner-engine-update run recovers them, or run: sudo runner-engine-update.sh"
+  fi
   if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
     local upd
     upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)

@@ -2,6 +2,8 @@
 Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
 After=docker.service network-online.target
 
+OnFailure=h2ci-telegram-notify@runner-engine-update.service
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/runner-engine-update.sh

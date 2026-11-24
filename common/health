@@ -734,6 +734,9 @@ check_services() {
     fi
   done
 
+  if is_runner && [[ -e /var/lib/runner-engine-update/held ]]; then
+    warn "CI services are held stopped by a failed engine update ($(sed -n 's/^reason=//p' /var/lib/runner-engine-update/held 2>/dev/null | head -1)); the next runner-engine-update run recovers them, or run: sudo runner-engine-update.sh"
+  fi
   if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
     local upd
     upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)

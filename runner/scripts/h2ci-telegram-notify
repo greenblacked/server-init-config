@@ -16,6 +16,7 @@ EVENTS = {
     "disk-threshold": "Root filesystem reached the disk guard threshold; emergency cleanup triggered.",
     "runner-disk-guard": "Disk guard failed. Check: journalctl -u runner-disk-guard.service",
     "server-freshness": "Freshness check failed. Check: journalctl -u server-freshness.service",
+    "runner-engine-update": "Docker/GitLab Runner update failed; CI services may be held stopped. Check: tail /var/log/runner-engine-update.log; ls /var/lib/runner-engine-update/held",
     "test": "TEST: systemd monitor alert delivery verified.",
 }
 
