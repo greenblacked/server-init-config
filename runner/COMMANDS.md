@@ -259,8 +259,9 @@ cat > /usr/local/sbin/ci-install-optional-tools <<'__SIC_EOF__'
 #!/bin/sh
 set -e
 
+installed=0
 install_tool() {
-  dnf -y -q --disablerepo=docker-ce-stable,runner_gitlab-runner install "$1"
+  dnf -y -q --disablerepo=docker-ce-stable,runner_gitlab-runner install "$1" && installed=$((installed + 1))
 }
 
 warnings=/var/log/ci-bootstrap-failed.log
@@ -268,6 +269,11 @@ install_tool epel-release || echo optional-tool-missing-epel >> "$warnings"
 for package in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do
   install_tool "$package" || echo "optional-tool-missing-$package" >> "$warnings"
 done
+# Nothing installed at all means no repository or network: stay undone so the next boot tries again.
+if [ "$installed" -eq 0 ]; then
+  echo optional-tools-none-installed-retry-next-boot >> "$warnings"
+  exit 1
+fi
 touch /var/lib/ci-optional-tools/done
 __SIC_EOF__
 chmod 755 /usr/local/sbin/ci-install-optional-tools
@@ -280,7 +286,9 @@ After=cloud-final.service network-online.target
 ConditionPathExists=!/var/lib/ci-optional-tools/done
 
 [Service]
-Type=exec
+Type=oneshot
+# oneshot: `systemctl start` and the first-boot reboot (After=) wait for the installs; bound that wait.
+TimeoutStartSec=20min
 StateDirectory=ci-optional-tools
 ExecStart=/usr/local/sbin/ci-install-optional-tools
 
@@ -304,7 +312,8 @@ usermod -aG docker gitlab-runner
 chmod 600 /etc/gitlab-runner/config.toml
 systemctl restart gitlab-runner
 systemctl daemon-reload
-systemctl start ci-optional-tools.service
+# blocks until the optional tools are installed (a few minutes)
+systemctl start ci-optional-tools.service || echo 'optional tools not installed (see /var/log/ci-bootstrap-failed.log); retry: systemctl start ci-optional-tools.service'
 sh -c 'for s in sshd docker gitlab-runner; do systemctl is-active --quiet $s || [ $s = docker -a -s /var/log/ci-docker-reboot.log ] || echo bootstrap-check-failed-$s >> /var/log/ci-bootstrap-failed.log; done'
 
 systemctl is-active docker gitlab-runner

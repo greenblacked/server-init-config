@@ -225,7 +225,11 @@ def render_base() -> str:
             continue  # pasted in a live SSH session: never reboot under the admin's hands
         if cmd == ["systemctl", "enable", "--now", "--no-block", "ci-optional-tools.service"]:
             lines.append("systemctl daemon-reload")
-            line = "systemctl start ci-optional-tools.service"  # this manual install has no cloud-init target to queue it on
+            # this manual install has no cloud-init target to queue it on; the unit is Type=oneshot, so the start waits for the
+            # installs, and it fails when nothing could be installed (no network): that must not stop the rest of the paste
+            lines.append("# blocks until the optional tools are installed (a few minutes)")
+            line = ("systemctl start ci-optional-tools.service || echo 'optional tools not installed (see "
+                    "/var/log/ci-bootstrap-failed.log); retry: systemctl start ci-optional-tools.service'")
         lines.append(line)
     lines += ["", "systemctl is-active docker gitlab-runner", "INSTALL"]
     return ('<a id="base"></a>\n## Base host: Docker, GitLab Runner, tools\n\n'

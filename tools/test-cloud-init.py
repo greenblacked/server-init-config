@@ -126,6 +126,25 @@ def live_ssh_test(dropin: str, tag: str) -> None:
             proc.wait(timeout=10)
 
 
+def test_optional_tools_script(content: str, tag: str) -> None:
+    """ci-install-optional-tools runs against a stub dnf in a temp dir: no done-marker unless something installed."""
+    with tempfile.TemporaryDirectory() as t:
+        d = Path(t)
+        (d / "bin").mkdir()
+        stub = d / "bin" / "dnf"
+        stub.write_text('#!/bin/sh\n[ "$DNF_MODE" = ok ] && exit 0\n[ "$DNF_MODE" = epel-only ] && case "$*" in *epel-release) exit 0 ;; esac\nexit 1\n')
+        stub.chmod(0o755)
+        script = content.replace("/var/lib/ci-optional-tools", str(d / "state")).replace("/var/log/ci-bootstrap-failed.log", str(d / "warn.log"))
+        (d / "state").mkdir()
+        for mode, want_rc0, want_done in (("fail", False, False), ("epel-only", True, True), ("ok", True, True)):
+            (d / "state" / "done").unlink(missing_ok=True)
+            env = {"PATH": f"{d / 'bin'}:/usr/bin:/bin", "DNF_MODE": mode}
+            r = run(["sh", "-c", script], env=env)
+            done = (d / "state" / "done").exists()
+            check((r.returncode == 0) == want_rc0 and done == want_done,
+                  f"{tag}: dnf mode '{mode}' {'marks done' if want_done else 'stays undone'}", f"rc={r.returncode} done={done}")
+
+
 def check_pinned_keys(label: str, text: str) -> None:
     """Every pin-repo-key call must pair a known URL with the fingerprint that URL serves."""
     for url, fp in re.findall(PIN_CALL, text):
@@ -152,6 +171,8 @@ def test_file(rel: str) -> None:
         script = cmd if isinstance(cmd, str) else (cmd[2] if cmd[:2] == ["sh", "-c"] else " ".join(map(str, cmd)))
         r = run(["sh", "-n", "-c", script])
         check(r.returncode == 0, f"runcmd[{i}] parses", r.stderr.strip())
+        if "systemctl reboot" in script and "systemd-run" in script:
+            check("-p After=ci-optional-tools.service" in script, f"runcmd[{i}]: deferred reboot waits for ci-optional-tools.service")
         if "enabled=1" in script and "yum.repos.d" in script:
             # a repo is switched on only by the command that pins its keys, so a failed pin leaves it disabled
             check(re.search(r"pin-repo-key [^;|]*&& sed ", script) is not None, f"runcmd[{i}]: repo enabled only after pin-repo-key succeeded")
@@ -185,6 +206,8 @@ def test_file(rel: str) -> None:
         elif p.endswith(".sh") or content.startswith(("#!/usr/bin/env bash", "#!/bin/bash")):
             r = run(["bash", "-n"], input=content)
             check(r.returncode == 0, f"{p} passes bash -n", r.stderr.strip())
+        if p == "/usr/local/sbin/ci-install-optional-tools":
+            test_optional_tools_script(content, p)
         if p == "/etc/profile.d/90-shell-history.sh":
             check(content == SHELL_HISTORY.read_text(), f"{p} equals common/shell-history.sh")
         if p == "/usr/local/sbin/server-init.sh":

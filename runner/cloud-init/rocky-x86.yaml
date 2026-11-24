@@ -577,8 +577,9 @@ write_files:
       #!/bin/sh
       set -e
 
+      installed=0
       install_tool() {
-        dnf -y -q --disablerepo=docker-ce-stable,runner_gitlab-runner install "$1"
+        dnf -y -q --disablerepo=docker-ce-stable,runner_gitlab-runner install "$1" && installed=$((installed + 1))
       }
 
       warnings=/var/log/ci-bootstrap-failed.log
@@ -586,6 +587,11 @@ write_files:
       for package in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do
         install_tool "$package" || echo "optional-tool-missing-$package" >> "$warnings"
       done
+      # Nothing installed at all means no repository or network: stay undone so the next boot tries again.
+      if [ "$installed" -eq 0 ]; then
+        echo optional-tools-none-installed-retry-next-boot >> "$warnings"
+        exit 1
+      fi
       touch /var/lib/ci-optional-tools/done
 
   - path: /etc/systemd/system/ci-optional-tools.service
@@ -597,7 +603,9 @@ write_files:
       ConditionPathExists=!/var/lib/ci-optional-tools/done
 
       [Service]
-      Type=exec
+      Type=oneshot
+      # oneshot: `systemctl start` and the first-boot reboot (After=) wait for the installs; bound that wait.
+      TimeoutStartSec=20min
       StateDirectory=ci-optional-tools
       ExecStart=/usr/local/sbin/ci-install-optional-tools
 
@@ -626,7 +634,7 @@ runcmd:
   - [systemctl, enable, --now, runner-weekly-cleanup.timer, runner-disk-guard.timer, runner-engine-update.timer, ci-job-isolation.service, registry-cache.service]
   - sed -i -E 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
   - setenforce 1
-  # Queue the service without waiting. An interrupted run is attempted again on the next boot.
+  # Queue the service without waiting. An interrupted run is attempted again on the next boot; the reboot below is ordered after it.
   - [systemctl, enable, --now, --no-block, ci-optional-tools.service]
   # The old image kernel has no kernel-modules (netfilter) after the upgrade, so dockerd fails until the new kernel boots: reboot once, after cloud-init is done.
-  - [sh, -c, "systemctl is-active -q docker || [ \"$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\\n' | sort -V | tail -1)\" = \"$(uname -r)\" ] || { journalctl -u docker -n 20 --no-pager > /var/log/ci-docker-reboot.log; systemd-run --no-block -p After=cloud-final.service systemctl reboot; }"]
+  - [sh, -c, "systemctl is-active -q docker || [ \"$(rpm -q kernel-core --qf '%{VERSION}-%{RELEASE}.%{ARCH}\\n' | sort -V | tail -1)\" = \"$(uname -r)\" ] || { journalctl -u docker -n 20 --no-pager > /var/log/ci-docker-reboot.log; systemd-run --no-block -p After=cloud-final.service -p After=ci-optional-tools.service systemctl reboot; }"]
