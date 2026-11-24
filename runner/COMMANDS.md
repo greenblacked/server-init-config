@@ -434,6 +434,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -1026,6 +1035,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -1465,6 +1483,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -4438,6 +4465,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -4890,6 +4926,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -6005,6 +6050,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -6202,7 +6256,7 @@ trap 'rm -f "$cache_tmp"' EXIT
 awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
 if ! cmp -s "$CFG" "$cache_tmp"; then
   backup "$CFG"
-  cat "$cache_tmp" > "$CFG"
+  replace_file "$cache_tmp" "$CFG"
 fi
 rm -f "$cache_tmp"
 trap - EXIT
@@ -6503,6 +6557,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -6902,6 +6965,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -7287,6 +7359,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -7883,6 +7964,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -8468,6 +8558,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -8909,6 +9008,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -9219,6 +9327,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -10844,6 +10961,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -11275,6 +11401,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -11673,6 +11808,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -11967,6 +12111,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -12575,6 +12728,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -14044,7 +14206,7 @@ trap 'rm -f "$cache_tmp"' EXIT
 awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
 if ! cmp -s "$CFG" "$cache_tmp"; then
   backup "$CFG"
-  cat "$cache_tmp" > "$CFG"
+  replace_file "$cache_tmp" "$CFG"
 fi
 rm -f "$cache_tmp"
 trap - EXIT
@@ -21074,6 +21236,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -22541,7 +22712,7 @@ trap 'rm -f "$cache_tmp"' EXIT
 awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
 if ! cmp -s "$CFG" "$cache_tmp"; then
   backup "$CFG"
-  cat "$cache_tmp" > "$CFG"
+  replace_file "$cache_tmp" "$CFG"
 fi
 rm -f "$cache_tmp"
 trap - EXIT
