@@ -2423,6 +2423,18 @@ check_services() {
       *) info "Docker/GitLab Runner update: ${upd}" ;;
     esac
   fi
+  if is_runner && unit_exists 'h2ci-telegram-notify@.service'; then
+    local tg=/etc/h2ci-monitor/telegram.credentials
+    if (( LIMITED )); then
+      info "Telegram credentials file not checked (its directory is root-only): run health as root or with sudo"
+    elif [[ ! -e "$tg" && ! -L "$tg" ]]; then
+      info "Telegram alerts: ${tg} not created (alerts are logged as a warning, not sent)"
+    elif [[ -f "$tg" && ! -L "$tg" && "$(stat -c '%u %a' "$tg" 2>/dev/null || true)" == "0 600" ]]; then
+      ok "Telegram credentials file is root-owned, mode 0600"
+    else
+      warn "${tg} must be a regular file owned by root with mode 0600 (the notify script refuses it): sudo chown root:root ${tg} && sudo chmod 0600 ${tg}"
+    fi
+  fi
   if is_runner && unit_exists ci-job-isolation.service; then
     if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
   fi
@@ -3783,7 +3795,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
-  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+  # Only hosts with the Telegram units (h2ci) alert; elsewhere a missing unit is normal and not logged on every run.
+  if systemctl cat h2ci-telegram-notify@disk-threshold.service >/dev/null 2>&1 &&
+     ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
     logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
   fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
@@ -16623,7 +16637,7 @@ chmod 644 "$R/runner/scripts/h2ci-maintenance"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/h2ci-telegram-notify" <<'__SIC_EOF__'
 #!/usr/bin/python3
-"""Send a fixed monitor event using credentials supplied by systemd."""
+"""Send a fixed monitor event; the bot token and chat ID come from a root-only 0600 file."""
 
 from datetime import datetime
 import http.client
@@ -16634,6 +16648,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from urllib.parse import urlencode
 
 EVENTS = {
@@ -16645,9 +16660,112 @@ EVENTS = {
 }
 
 
+# Bot token and chat ID: two lines. Only read from this file; the token never goes into the environment or a command line.
+CREDENTIALS_FILE = Path("/etc/h2ci-monitor/telegram.credentials")
+# Repeating alerts are sent at most once per interval and event; the stamps live in /run (RuntimeDirectory= of the unit).
+STAMP_DIR = Path("/run/h2ci-telegram-notify")
+RATE_LIMIT_SECONDS = 6 * 3600
+RATE_LIMITED = frozenset({"disk-threshold", "runner-disk-guard", "server-freshness", "runner-engine-update"})
+SEND_TIMEOUT = 8
+RETRY_DELAY = 2
+RETRY_DELAY_MAX = 10
+# Child processes get no inherited environment (nothing secret can leak into them).
+CHILD_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LC_ALL": "C"}
+
+
+def log_problem(level, message):
+    """One line on stderr; under systemd the <N> prefix sets the journal priority (3 error, 4 warning)."""
+    prefix = f"<{level}>" if os.environ.get("JOURNAL_STREAM") else ""
+    print(prefix + message, file=sys.stderr)
+
+
+def load_credentials(path=None, uid=0):
+    """Return (text, None, None), or (None, kind, message) with kind "missing" or "unsafe".
+
+    The file must be a regular file owned by root with mode exactly 0600, checked on the open descriptor.
+    """
+    path = CREDENTIALS_FILE if path is None else path
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None, "missing", f"{path} does not exist"
+    except OSError as exc:
+        return None, "unsafe", f"{path} cannot be opened ({type(exc).__name__}); it must be a regular file"
+    try:
+        info = os.fstat(fd)
+        mode = stat.S_IMODE(info.st_mode)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or mode != 0o600:
+            return None, "unsafe", (f"{path} must be a regular file owned by root with mode 0600 "
+                                    f"(found uid {info.st_uid}, mode {mode:04o}); fix: chown root:root {path} && chmod 0600 {path}")
+        return os.read(fd, 4096).decode("ascii", errors="replace"), None, None
+    finally:
+        os.close(fd)
+
+
+def rate_limited(event, now=None, directory=None):
+    if event not in RATE_LIMITED:
+        return False
+    directory = STAMP_DIR if directory is None else directory
+    now = time.time() if now is None else now
+    try:
+        age = now - (directory / f"{event}.stamp").stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < RATE_LIMIT_SECONDS
+
+
+def mark_sent(event, directory=None):
+    if event not in RATE_LIMITED:
+        return
+    directory = STAMP_DIR if directory is None else directory
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+        (directory / f"{event}.stamp").touch(mode=0o600)   # also renews the time of an existing stamp
+    except OSError:
+        pass
+
+
+def retry_delay(retry_after):
+    try:
+        wanted = int(retry_after)
+    except (TypeError, ValueError, OverflowError):   # OverflowError: JSON Infinity
+        wanted = RETRY_DELAY
+    return min(max(wanted, 0), RETRY_DELAY_MAX)
+
+
+def send_message(token, chat_id, text, sleep=time.sleep):
+    """POST sendMessage once, and once more after a network error, HTTP 429 or 5xx. Returns (HTTP status or None, JSON or None)."""
+    body = urlencode({"chat_id": chat_id, "text": text})
+    path = "/bot" + token + "/sendMessage"
+    status = data = None
+    for attempt in (1, 2):
+        status, data, wait = None, None, RETRY_DELAY
+        connection = http.client.HTTPSConnection("api.telegram.org", timeout=SEND_TIMEOUT)
+        try:
+            connection.request("POST", path, body=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            response = connection.getresponse()
+            status = response.status
+            wait = response.getheader("Retry-After")
+            payload = response.read(65536)
+            try:
+                data = json.loads(payload)
+                if wait is None:
+                    wait = data["parameters"]["retry_after"]
+            except (ValueError, KeyError, TypeError):
+                pass
+        except (OSError, http.client.HTTPException):
+            pass   # no message text here: it can contain the request URL, including the token
+        finally:
+            connection.close()
+        if status == 200 or attempt == 2 or not (status is None or status == 429 or status >= 500):
+            break
+        sleep(retry_delay(wait))
+    return status, data
+
+
 def read_status(*command):
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=2).stdout.strip()
+        return subprocess.run(command, capture_output=True, text=True, timeout=2, env=CHILD_ENV).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -16749,7 +16867,7 @@ def ci_outcomes_24h():
             ("/usr/bin/journalctl", "--no-pager", "--unit=gitlab-runner.service", "SYSLOG_IDENTIFIER=gitlab-runner",
              f"--since=@{now - 86400}", f"--until=@{now}", "--output=json", "--output-fields=MESSAGE",
              "--grep=Submitting job to coordinator", f"--lines={limit + 1}"),
-            capture_output=True, text=True, timeout=2, check=True,
+            capture_output=True, text=True, timeout=2, check=True, env=CHILD_ENV,
         )
         records = result.stdout.splitlines()
         if result.stderr.strip() or len(records) > limit:
@@ -17116,16 +17234,24 @@ def main():
         return 2
     event = sys.argv[1]
     try:
-        credential = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "telegram.credentials"
-        token, chat_id = credential.read_text(encoding="ascii").splitlines()
+        raw, kind, problem = load_credentials()
+        if kind == "unsafe":
+            log_problem(3, f"Telegram alert {event} not sent: {problem}")
+            return 78
+        if kind == "missing":
+            log_problem(4, f"Telegram alert {event} not sent: {problem}; create it as described in runner/README.md")
+            # Alerts on a host without Telegram are not a failure; the daily report is, so that its absence is noticed.
+            return 1 if event == "daily" else 0
+        if rate_limited(event):
+            print(f"Telegram alert {event} suppressed: sent less than {RATE_LIMIT_SECONDS // 3600} hours ago")
+            return 0
+        token, chat_id = raw.splitlines()
         if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token) or not re.fullmatch(r"-?[0-9]+", chat_id):
             print("Invalid Telegram credentials format", file=sys.stderr)
             return 2
-        os.environ["TELEGRAM_BOT_TOKEN"] = token
-        del token
         run_id = None
         if event == "daily":
-            report = credential.with_name("maintenance.json")
+            report = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "maintenance.json"
             result = json.loads(report.read_text())
             run_id = result["run_id"]
             if not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -17133,26 +17259,20 @@ def main():
             text = daily_status(result)
         else:
             text = EVENTS[event]
-        body = urlencode({"chat_id": chat_id, "text": "[h2ci] " + text})
-        connection = http.client.HTTPSConnection("api.telegram.org", timeout=8 if event == "daily" else 10)
-        try:
-            connection.request(
-                "POST", "/bot" + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage", body=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            response = connection.getresponse()
-            if response.status != 200:
-                print(f"Telegram rejected {event}: HTTP {response.status}", file=sys.stderr)
-                return 1
-            data = json.loads(response.read(65536))
-        finally:
-            connection.close()
-        if data.get("ok") is True:
+        status, data = send_message(token, chat_id, "[h2ci] " + text)
+        if status is None:
+            print(f"Telegram unreachable for {event}", file=sys.stderr)
+            return 1
+        if status != 200:
+            print(f"Telegram rejected {event}: HTTP {status}", file=sys.stderr)
+            return 1
+        if isinstance(data, dict) and data.get("ok") is True:
             result = data["result"]
             if str(result["chat"]["id"]) == chat_id and type(result["message_id"]) is int and result["message_id"] > 0:
                 if run_id is not None:
                     receipt = Path("/run/h2ci-daily-maintenance/delivery.json")
                     receipt.write_text(json.dumps({"run_id": run_id, "message_id": result["message_id"]}))
+                mark_sent(event)
                 print(f"Telegram delivered {event}; message ID {result['message_id']}")
                 return 0
         print(f"Telegram did not confirm delivery of {event}", file=sys.stderr)
@@ -17180,7 +17300,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
-  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+  # Only hosts with the Telegram units (h2ci) alert; elsewhere a missing unit is normal and not logged on every run.
+  if systemctl cat h2ci-telegram-notify@disk-threshold.service >/dev/null 2>&1 &&
+     ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
     logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
   fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
@@ -17744,18 +17866,37 @@ cat > "$R/runner/systemd/h2ci-telegram-notify@.service" <<'__SIC_EOF__'
 Description=Send Telegram notification for h2ci monitor event %i
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/etc/h2ci-monitor/telegram.credentials
 
+# The credentials file /etc/h2ci-monitor/telegram.credentials (root, 0600) is read and checked by the script itself: a missing
+# file is logged as a warning (a Condition would skip the unit silently), a file with the wrong owner or mode is refused.
 [Service]
 Type=oneshot
-LoadCredential=telegram.credentials:/etc/h2ci-monitor/telegram.credentials
 ExecStart=/usr/local/bin/h2ci-telegram-notify %i
-TimeoutStartSec=20s
+# Alerts: two attempts (connect and read 8 s each, plus name lookup) and a wait of at most 10 s. The daily report has a longer
+# limit in its drop-in.
+TimeoutStartSec=60s
+# Stamp files of the rate limit (the same directory for every event).
+RuntimeDirectory=h2ci-telegram-notify
+RuntimeDirectoryPreserve=yes
 NoNewPrivileges=true
 CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 LimitCORE=0
 UMask=0077
 __SIC_EOF__
@@ -17763,12 +17904,9 @@ chmod 644 "$R/runner/systemd/h2ci-telegram-notify@.service"
 
 install -d "$R/runner/systemd/h2ci-telegram-notify@daily.service.d"
 cat > "$R/runner/systemd/h2ci-telegram-notify@daily.service.d/20-maintenance.conf" <<'__SIC_EOF__'
-[Unit]
-# Missing credentials must fail the daily job, not skip it successfully.
-ConditionPathExists=
-AssertPathExists=/etc/h2ci-monitor/telegram.credentials
-
 [Service]
+# The report is built from local queries (up to about 40 s when Prometheus hangs) and then sent with one retry.
+TimeoutStartSec=90s
 LoadCredential=maintenance.json:/run/h2ci-daily-maintenance/report.json
 ReadWritePaths=/run/h2ci-daily-maintenance
 __SIC_EOF__
@@ -19850,6 +19988,18 @@ check_services() {
       "") ;;
       *) info "Docker/GitLab Runner update: ${upd}" ;;
     esac
+  fi
+  if is_runner && unit_exists 'h2ci-telegram-notify@.service'; then
+    local tg=/etc/h2ci-monitor/telegram.credentials
+    if (( LIMITED )); then
+      info "Telegram credentials file not checked (its directory is root-only): run health as root or with sudo"
+    elif [[ ! -e "$tg" && ! -L "$tg" ]]; then
+      info "Telegram alerts: ${tg} not created (alerts are logged as a warning, not sent)"
+    elif [[ -f "$tg" && ! -L "$tg" && "$(stat -c '%u %a' "$tg" 2>/dev/null || true)" == "0 600" ]]; then
+      ok "Telegram credentials file is root-owned, mode 0600"
+    else
+      warn "${tg} must be a regular file owned by root with mode 0600 (the notify script refuses it): sudo chown root:root ${tg} && sudo chmod 0600 ${tg}"
+    fi
   fi
   if is_runner && unit_exists ci-job-isolation.service; then
     if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
@@ -24947,7 +25097,7 @@ chmod 644 "$R/runner/scripts/h2ci-maintenance"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/h2ci-telegram-notify" <<'__SIC_EOF__'
 #!/usr/bin/python3
-"""Send a fixed monitor event using credentials supplied by systemd."""
+"""Send a fixed monitor event; the bot token and chat ID come from a root-only 0600 file."""
 
 from datetime import datetime
 import http.client
@@ -24958,6 +25108,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from urllib.parse import urlencode
 
 EVENTS = {
@@ -24969,9 +25120,112 @@ EVENTS = {
 }
 
 
+# Bot token and chat ID: two lines. Only read from this file; the token never goes into the environment or a command line.
+CREDENTIALS_FILE = Path("/etc/h2ci-monitor/telegram.credentials")
+# Repeating alerts are sent at most once per interval and event; the stamps live in /run (RuntimeDirectory= of the unit).
+STAMP_DIR = Path("/run/h2ci-telegram-notify")
+RATE_LIMIT_SECONDS = 6 * 3600
+RATE_LIMITED = frozenset({"disk-threshold", "runner-disk-guard", "server-freshness", "runner-engine-update"})
+SEND_TIMEOUT = 8
+RETRY_DELAY = 2
+RETRY_DELAY_MAX = 10
+# Child processes get no inherited environment (nothing secret can leak into them).
+CHILD_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LC_ALL": "C"}
+
+
+def log_problem(level, message):
+    """One line on stderr; under systemd the <N> prefix sets the journal priority (3 error, 4 warning)."""
+    prefix = f"<{level}>" if os.environ.get("JOURNAL_STREAM") else ""
+    print(prefix + message, file=sys.stderr)
+
+
+def load_credentials(path=None, uid=0):
+    """Return (text, None, None), or (None, kind, message) with kind "missing" or "unsafe".
+
+    The file must be a regular file owned by root with mode exactly 0600, checked on the open descriptor.
+    """
+    path = CREDENTIALS_FILE if path is None else path
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None, "missing", f"{path} does not exist"
+    except OSError as exc:
+        return None, "unsafe", f"{path} cannot be opened ({type(exc).__name__}); it must be a regular file"
+    try:
+        info = os.fstat(fd)
+        mode = stat.S_IMODE(info.st_mode)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or mode != 0o600:
+            return None, "unsafe", (f"{path} must be a regular file owned by root with mode 0600 "
+                                    f"(found uid {info.st_uid}, mode {mode:04o}); fix: chown root:root {path} && chmod 0600 {path}")
+        return os.read(fd, 4096).decode("ascii", errors="replace"), None, None
+    finally:
+        os.close(fd)
+
+
+def rate_limited(event, now=None, directory=None):
+    if event not in RATE_LIMITED:
+        return False
+    directory = STAMP_DIR if directory is None else directory
+    now = time.time() if now is None else now
+    try:
+        age = now - (directory / f"{event}.stamp").stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < RATE_LIMIT_SECONDS
+
+
+def mark_sent(event, directory=None):
+    if event not in RATE_LIMITED:
+        return
+    directory = STAMP_DIR if directory is None else directory
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+        (directory / f"{event}.stamp").touch(mode=0o600)   # also renews the time of an existing stamp
+    except OSError:
+        pass
+
+
+def retry_delay(retry_after):
+    try:
+        wanted = int(retry_after)
+    except (TypeError, ValueError, OverflowError):   # OverflowError: JSON Infinity
+        wanted = RETRY_DELAY
+    return min(max(wanted, 0), RETRY_DELAY_MAX)
+
+
+def send_message(token, chat_id, text, sleep=time.sleep):
+    """POST sendMessage once, and once more after a network error, HTTP 429 or 5xx. Returns (HTTP status or None, JSON or None)."""
+    body = urlencode({"chat_id": chat_id, "text": text})
+    path = "/bot" + token + "/sendMessage"
+    status = data = None
+    for attempt in (1, 2):
+        status, data, wait = None, None, RETRY_DELAY
+        connection = http.client.HTTPSConnection("api.telegram.org", timeout=SEND_TIMEOUT)
+        try:
+            connection.request("POST", path, body=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            response = connection.getresponse()
+            status = response.status
+            wait = response.getheader("Retry-After")
+            payload = response.read(65536)
+            try:
+                data = json.loads(payload)
+                if wait is None:
+                    wait = data["parameters"]["retry_after"]
+            except (ValueError, KeyError, TypeError):
+                pass
+        except (OSError, http.client.HTTPException):
+            pass   # no message text here: it can contain the request URL, including the token
+        finally:
+            connection.close()
+        if status == 200 or attempt == 2 or not (status is None or status == 429 or status >= 500):
+            break
+        sleep(retry_delay(wait))
+    return status, data
+
+
 def read_status(*command):
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=2).stdout.strip()
+        return subprocess.run(command, capture_output=True, text=True, timeout=2, env=CHILD_ENV).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -25073,7 +25327,7 @@ def ci_outcomes_24h():
             ("/usr/bin/journalctl", "--no-pager", "--unit=gitlab-runner.service", "SYSLOG_IDENTIFIER=gitlab-runner",
              f"--since=@{now - 86400}", f"--until=@{now}", "--output=json", "--output-fields=MESSAGE",
              "--grep=Submitting job to coordinator", f"--lines={limit + 1}"),
-            capture_output=True, text=True, timeout=2, check=True,
+            capture_output=True, text=True, timeout=2, check=True, env=CHILD_ENV,
         )
         records = result.stdout.splitlines()
         if result.stderr.strip() or len(records) > limit:
@@ -25440,16 +25694,24 @@ def main():
         return 2
     event = sys.argv[1]
     try:
-        credential = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "telegram.credentials"
-        token, chat_id = credential.read_text(encoding="ascii").splitlines()
+        raw, kind, problem = load_credentials()
+        if kind == "unsafe":
+            log_problem(3, f"Telegram alert {event} not sent: {problem}")
+            return 78
+        if kind == "missing":
+            log_problem(4, f"Telegram alert {event} not sent: {problem}; create it as described in runner/README.md")
+            # Alerts on a host without Telegram are not a failure; the daily report is, so that its absence is noticed.
+            return 1 if event == "daily" else 0
+        if rate_limited(event):
+            print(f"Telegram alert {event} suppressed: sent less than {RATE_LIMIT_SECONDS // 3600} hours ago")
+            return 0
+        token, chat_id = raw.splitlines()
         if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token) or not re.fullmatch(r"-?[0-9]+", chat_id):
             print("Invalid Telegram credentials format", file=sys.stderr)
             return 2
-        os.environ["TELEGRAM_BOT_TOKEN"] = token
-        del token
         run_id = None
         if event == "daily":
-            report = credential.with_name("maintenance.json")
+            report = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "maintenance.json"
             result = json.loads(report.read_text())
             run_id = result["run_id"]
             if not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -25457,26 +25719,20 @@ def main():
             text = daily_status(result)
         else:
             text = EVENTS[event]
-        body = urlencode({"chat_id": chat_id, "text": "[h2ci] " + text})
-        connection = http.client.HTTPSConnection("api.telegram.org", timeout=8 if event == "daily" else 10)
-        try:
-            connection.request(
-                "POST", "/bot" + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage", body=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            response = connection.getresponse()
-            if response.status != 200:
-                print(f"Telegram rejected {event}: HTTP {response.status}", file=sys.stderr)
-                return 1
-            data = json.loads(response.read(65536))
-        finally:
-            connection.close()
-        if data.get("ok") is True:
+        status, data = send_message(token, chat_id, "[h2ci] " + text)
+        if status is None:
+            print(f"Telegram unreachable for {event}", file=sys.stderr)
+            return 1
+        if status != 200:
+            print(f"Telegram rejected {event}: HTTP {status}", file=sys.stderr)
+            return 1
+        if isinstance(data, dict) and data.get("ok") is True:
             result = data["result"]
             if str(result["chat"]["id"]) == chat_id and type(result["message_id"]) is int and result["message_id"] > 0:
                 if run_id is not None:
                     receipt = Path("/run/h2ci-daily-maintenance/delivery.json")
                     receipt.write_text(json.dumps({"run_id": run_id, "message_id": result["message_id"]}))
+                mark_sent(event)
                 print(f"Telegram delivered {event}; message ID {result['message_id']}")
                 return 0
         print(f"Telegram did not confirm delivery of {event}", file=sys.stderr)
@@ -25504,7 +25760,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
-  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+  # Only hosts with the Telegram units (h2ci) alert; elsewhere a missing unit is normal and not logged on every run.
+  if systemctl cat h2ci-telegram-notify@disk-threshold.service >/dev/null 2>&1 &&
+     ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
     logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
   fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
@@ -26068,18 +26326,37 @@ cat > "$R/runner/systemd/h2ci-telegram-notify@.service" <<'__SIC_EOF__'
 Description=Send Telegram notification for h2ci monitor event %i
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/etc/h2ci-monitor/telegram.credentials
 
+# The credentials file /etc/h2ci-monitor/telegram.credentials (root, 0600) is read and checked by the script itself: a missing
+# file is logged as a warning (a Condition would skip the unit silently), a file with the wrong owner or mode is refused.
 [Service]
 Type=oneshot
-LoadCredential=telegram.credentials:/etc/h2ci-monitor/telegram.credentials
 ExecStart=/usr/local/bin/h2ci-telegram-notify %i
-TimeoutStartSec=20s
+# Alerts: two attempts (connect and read 8 s each, plus name lookup) and a wait of at most 10 s. The daily report has a longer
+# limit in its drop-in.
+TimeoutStartSec=60s
+# Stamp files of the rate limit (the same directory for every event).
+RuntimeDirectory=h2ci-telegram-notify
+RuntimeDirectoryPreserve=yes
 NoNewPrivileges=true
 CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 LimitCORE=0
 UMask=0077
 __SIC_EOF__
@@ -26087,12 +26364,9 @@ chmod 644 "$R/runner/systemd/h2ci-telegram-notify@.service"
 
 install -d "$R/runner/systemd/h2ci-telegram-notify@daily.service.d"
 cat > "$R/runner/systemd/h2ci-telegram-notify@daily.service.d/20-maintenance.conf" <<'__SIC_EOF__'
-[Unit]
-# Missing credentials must fail the daily job, not skip it successfully.
-ConditionPathExists=
-AssertPathExists=/etc/h2ci-monitor/telegram.credentials
-
 [Service]
+# The report is built from local queries (up to about 40 s when Prometheus hangs) and then sent with one retry.
+TimeoutStartSec=90s
 LoadCredential=maintenance.json:/run/h2ci-daily-maintenance/report.json
 ReadWritePaths=/run/h2ci-daily-maintenance
 __SIC_EOF__
@@ -28174,6 +28448,18 @@ check_services() {
       "") ;;
       *) info "Docker/GitLab Runner update: ${upd}" ;;
     esac
+  fi
+  if is_runner && unit_exists 'h2ci-telegram-notify@.service'; then
+    local tg=/etc/h2ci-monitor/telegram.credentials
+    if (( LIMITED )); then
+      info "Telegram credentials file not checked (its directory is root-only): run health as root or with sudo"
+    elif [[ ! -e "$tg" && ! -L "$tg" ]]; then
+      info "Telegram alerts: ${tg} not created (alerts are logged as a warning, not sent)"
+    elif [[ -f "$tg" && ! -L "$tg" && "$(stat -c '%u %a' "$tg" 2>/dev/null || true)" == "0 600" ]]; then
+      ok "Telegram credentials file is root-owned, mode 0600"
+    else
+      warn "${tg} must be a regular file owned by root with mode 0600 (the notify script refuses it): sudo chown root:root ${tg} && sudo chmod 0600 ${tg}"
+    fi
   fi
   if is_runner && unit_exists ci-job-isolation.service; then
     if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi

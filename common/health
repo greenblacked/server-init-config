@@ -746,6 +746,18 @@ check_services() {
       *) info "Docker/GitLab Runner update: ${upd}" ;;
     esac
   fi
+  if is_runner && unit_exists 'h2ci-telegram-notify@.service'; then
+    local tg=/etc/h2ci-monitor/telegram.credentials
+    if (( LIMITED )); then
+      info "Telegram credentials file not checked (its directory is root-only): run health as root or with sudo"
+    elif [[ ! -e "$tg" && ! -L "$tg" ]]; then
+      info "Telegram alerts: ${tg} not created (alerts are logged as a warning, not sent)"
+    elif [[ -f "$tg" && ! -L "$tg" && "$(stat -c '%u %a' "$tg" 2>/dev/null || true)" == "0 600" ]]; then
+      ok "Telegram credentials file is root-owned, mode 0600"
+    else
+      warn "${tg} must be a regular file owned by root with mode 0600 (the notify script refuses it): sudo chown root:root ${tg} && sudo chmod 0600 ${tg}"
+    fi
+  fi
   if is_runner && unit_exists ci-job-isolation.service; then
     if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
   fi
