@@ -285,9 +285,24 @@ The pods of the GitHub Actions runner (`--github-runner`) get one exception: the
 
 ### Updates of Docker and GitLab Runner
 
-`dnf-automatic` (security only) and `unattended-upgrades` do not cover the Docker and GitLab repositories. `runner-engine-update.timer` (Sunday 04:30) upgrades `docker-ce*`, `containerd.io` and `gitlab-runner` only when `docker ps` answers and shows no CI job; otherwise it logs why it skipped and tries again next week. Before upgrading it stops the runner gracefully (no new job, a job already running finishes; the script adds a `KillSignal=SIGQUIT` drop-in for that), looks at the job list again, and only then upgrades; if a job is still there it starts the runner again and changes nothing. It then restarts Docker, starts the runner and checks both are active. The result is one line in `/var/log/runner-engine-update.log`, which `health` shows. Run it now (server, as `ops`, any directory): `sudo runner-engine-update.sh --dry-run`, then `sudo runner-engine-update.sh`.
+`dnf-automatic` (security only) and `unattended-upgrades` do not cover the Docker and GitLab repositories. `runner-engine-update.timer` (Sunday 04:30) upgrades `docker-ce*`, `containerd.io` and `gitlab-runner` only when `docker ps` answers and shows no CI job; otherwise it logs why it skipped and tries again next week. Before upgrading it stops the runner gracefully (no new job, a job already running finishes; the script adds a `KillSignal=SIGQUIT` drop-in for that), looks at the job list again, and only then upgrades; if a job is still there it starts the runner again and changes nothing. It then restarts Docker, starts the runner and checks both are active. The result is one line in `/var/log/runner-engine-update.log`, which `health` shows. Once Docker packages have been upgraded, the CI services are started again only when `ci-job-isolation` is active, Docker answers and no job runs; if that does not hold, the run ends with `FAIL ... CI services left stopped` (exit 1; the `OnFailure=` unit sends a Telegram alert where `h2ci-telegram-notify@.service` is installed), the runner and the GitHub controller stay stopped and the script writes `/var/lib/runner-engine-update/held` (reason and time). The next run (also when there is nothing to upgrade) first re-checks isolation, Docker and the job list, starts both services and removes the marker, or fails again while it is still held; `health` warns while the marker exists. Run it now (server, as `ops`, any directory): `sudo runner-engine-update.sh --dry-run`, then `sudo runner-engine-update.sh`.
 
 `pull_policy = "if-not-present"` reuses images on the host; GitLab allows that only for runners limited to trusted projects. Use `always` if you attach projects you don't control.
+
+### Telegram alerts on h2ci
+
+`h2ci-telegram-notify@.service` (installed by `host-tools.sh` and `update.sh`, not by the cloud-init files) sends the daily report and short alerts (disk guard, freshness, Docker/GitLab Runner update failures). It reads the bot token and the chat ID from `/etc/h2ci-monitor/telegram.credentials`: two lines, the token and then the chat ID. The file must be a regular file owned by root with mode `0600`; the script refuses any other owner or mode (exit 78, a one-line message in the journal) and `health` warns about it. Create it on the server, as `ops`, any directory, without putting the token in the shell history or in a command line.
+
+```bash
+sudo install -d -m 0700 -o root -g root /etc/h2ci-monitor
+read -rsp 'Bot token: ' token; echo
+read -rp 'Chat ID: ' chat
+printf '%s\n%s\n' "$token" "$chat" | sudo install -m 0600 -o root -g root /dev/stdin /etc/h2ci-monitor/telegram.credentials
+unset token chat
+sudo systemctl start h2ci-telegram-notify@test.service && journalctl -u h2ci-telegram-notify@test.service -n 3 --no-pager
+```
+
+Without the file the alerts are not sent: each one logs a warning (`... not sent: /etc/h2ci-monitor/telegram.credentials does not exist`) and the daily report fails, so the missing setup shows up. Repeating alerts (`disk-threshold`, `runner-disk-guard`, `server-freshness`, `runner-engine-update`) are sent at most once per 6 hours each (stamp files in `/run/h2ci-telegram-notify`, which a reboot clears). A send is retried once after a network error, HTTP 429 (waiting for `Retry-After`, at most 10 seconds) or HTTP 5xx. The unit runs with a reduced privilege set (no capabilities, only IP and local sockets, system-call filter, no writable system paths) and the daily report has a 90-second limit, other alerts 60 seconds.
 
 ## GitHub Actions runner (private repositories)
 

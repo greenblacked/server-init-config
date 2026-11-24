@@ -49,7 +49,7 @@ trap 'rm -f "$cache_tmp"' EXIT
 awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
 if ! cmp -s "$CFG" "$cache_tmp"; then
   backup "$CFG"
-  cat "$cache_tmp" > "$CFG"
+  replace_file "$cache_tmp" "$CFG"
 fi
 rm -f "$cache_tmp"
 trap - EXIT

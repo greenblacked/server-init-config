@@ -73,3 +73,13 @@ test_dnf_install_gives_up_after_three_attempts() { each_dnf t_gives_up_after_thr
 test_dnf_install_same_text_in_el10_and_fedora() {
   assert_eq "$(awk '/^dnf_install\(\) \{/,/^}/' "$REPO/server/server-init-fedora.sh")" "$(awk '/^dnf_install\(\) \{/,/^}/' "$REPO/server/server-init-el10.sh")"
 }
+# The retry tests above run once per entry of DNF_FILES (el10 and Fedora). A script that gets the function later must be listed too.
+test_dnf_install_every_script_that_defines_it_is_covered() {
+  local f missing=""
+  for f in "$REPO"/server/server-init-*.sh; do
+    grep -q '^dnf_install() {' "$f" || continue
+    case " ${DNF_FILES[*]} " in *" server/${f##*/} "*) ;; *) missing+=" server/${f##*/}" ;; esac
+  done
+  assert_eq "$missing" "" "scripts with dnf_install() that the retry tests do not run on"
+  assert_ok 'Fedora is covered' grep -q 'server/server-init-fedora.sh' <<<"${DNF_FILES[*]}"
+}

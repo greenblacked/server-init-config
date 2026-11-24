@@ -84,6 +84,35 @@ test_edit_leaves_nothing_outside_the_target_directory() {
   assert_eq "$(ls -A "$T/tmp" | wc -l)" 0 "snapshot is not placed in TMPDIR"
 }
 
+test_replace_file_swaps_by_rename_and_keeps_mode() {
+  echo old > "$T/f"; chmod 0640 "$T/f"
+  echo new > "$T/f.tmp"; chmod 0600 "$T/f.tmp"
+  local ino; ino=$(stat -c %i "$T/f.tmp")
+  replace_file "$T/f.tmp" "$T/f"
+  assert_eq "$(cat "$T/f")" new
+  assert_eq "$(stat -c %a "$T/f")" 640 "mode of the replaced file is kept"
+  assert_eq "$(stat -c %i "$T/f")" "$ino" "the new inode is moved in (a rename, not a rewrite)"
+  assert_fail "temp name is gone" test -e "$T/f.tmp"
+}
+
+test_replace_file_never_exposes_a_half_written_file_to_a_reader() {
+  # A reader that has the old file open (the runner reading config.toml) must still see the complete old content after the swap.
+  # `cat NEW > DEST` truncates and rewrites that same file, so the open handle sees the new or an empty file; a rename does not.
+  printf 'old-line-1\nold-line-2\n' > "$T/f"
+  printf 'new\n' > "$T/f.tmp"
+  exec 3< "$T/f"
+  replace_file "$T/f.tmp" "$T/f"
+  assert_eq "$(cat <&3)" $'old-line-1\nold-line-2' "an open reader keeps the complete old content"
+  exec 3<&-
+  assert_eq "$(cat "$T/f")" new "new readers get the new content"
+}
+
+test_replace_file_with_a_missing_temp_file_fails_and_keeps_the_target() {
+  echo old > "$T/f"
+  assert_fail "missing temp file" replace_file "$T/missing" "$T/f"
+  assert_eq "$(cat "$T/f")" old
+}
+
 test_version_ge() {
   assert_ok "equal" version_ge 2.23.1 2.23.1
   assert_ok "newer patch" version_ge 2.23.2 2.23.1

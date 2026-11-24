@@ -2,17 +2,36 @@
 Description=Send Telegram notification for h2ci monitor event %i
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/etc/h2ci-monitor/telegram.credentials
 
+# The credentials file /etc/h2ci-monitor/telegram.credentials (root, 0600) is read and checked by the script itself: a missing
+# file is logged as a warning (a Condition would skip the unit silently), a file with the wrong owner or mode is refused.
 [Service]
 Type=oneshot
-LoadCredential=telegram.credentials:/etc/h2ci-monitor/telegram.credentials
 ExecStart=/usr/local/bin/h2ci-telegram-notify %i
-TimeoutStartSec=20s
+# Alerts: two attempts (connect and read 8 s each, plus name lookup) and a wait of at most 10 s. The daily report has a longer
+# limit in its drop-in.
+TimeoutStartSec=60s
+# Stamp files of the rate limit (the same directory for every event).
+RuntimeDirectory=h2ci-telegram-notify
+RuntimeDirectoryPreserve=yes
 NoNewPrivileges=true
 CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 LimitCORE=0
 UMask=0077

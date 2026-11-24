@@ -100,6 +100,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {

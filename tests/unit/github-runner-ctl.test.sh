@@ -912,6 +912,91 @@ test_a_job_that_is_not_visible_yet_is_looked_up_again() {
   assert_fail "not marked verified" test -e "$T/state/jobs/$POD/verified"
 }
 
+test_a_failed_job_lookup_does_not_consume_a_verify_try() {
+  setup_ctl; busy_pod_fixture
+  mkdir -p "$T/state/jobs/$POD"; printf '19' > "$T/state/jobs/$POD/verify-tries"
+  fx GET '/repos/octo/ok/actions/runs?status=in_progress&per_page=50&page=1' 500 '{"message":"boom"}'
+  ctl_once
+  assert_eq "$(cat "$T/state/jobs/$POD/verify-tries")" 19 'run list failed: no try used'
+  assert_fail "pod is not killed" grep -q '^kill' "$T/log/docker.log"
+  # the run list works but the jobs of a run cannot be fetched
+  assigned_fx ok 7 '{}'
+  fx GET '/repos/octo/ok/actions/runs/7/jobs?filter=latest&per_page=100&page=1' 502 '{"message":"bad gateway"}'
+  ctl_once
+  assert_eq "$(cat "$T/state/jobs/$POD/verify-tries")" 19 'jobs fetch failed: no try used'
+  assert_fail "pod is not killed after the failed fetches" grep -q '^kill' "$T/log/docker.log"
+  assert_fail "no job_unverified" grep -q 'job_unverified' "$T/out"
+}
+
+test_a_truncated_scan_does_not_consume_a_verify_try() {
+  setup_ctl; busy_pod_fixture
+  mkdir -p "$T/state/jobs/$POD"; printf '19' > "$T/state/jobs/$POD/verify-tries"
+  local n k
+  for n in 1 2 3; do
+    fx GET "/repos/octo/ok/actions/runs?status=in_progress&per_page=50&page=$n" 200 '{"workflow_runs":[]}'
+    k=$(fxkey GET "/repos/octo/ok/actions/runs?status=in_progress&per_page=50&page=$n")
+    printf 'link: <https://api.github.com/x?page=%s>; rel="next"\r\n' $((n + 1)) > "$T/fx/$k.hdr"
+  done
+  ctl_once
+  assert_eq "$(cat "$T/state/jobs/$POD/verify-tries")" 19 'a cut-off run list is not a complete scan'
+  assert_fail "pod is not killed" grep -q '^kill' "$T/log/docker.log"
+  # a run whose job list is cut off by the page limit
+  rm -f "$T"/fx/*.hdr
+  assigned_fx ok 7 '{"jobs":[]}'
+  for n in 1 2 3; do
+    k=$(fxkey GET "/repos/octo/ok/actions/runs/7/jobs?filter=latest&per_page=100&page=$n")
+    fx GET "/repos/octo/ok/actions/runs/7/jobs?filter=latest&per_page=100&page=$n" 200 '{"jobs":[]}'
+    printf 'link: <https://api.github.com/x?page=%s>; rel="next"\r\n' $((n + 1)) > "$T/fx/$k.hdr"
+  done
+  ctl_once
+  assert_eq "$(cat "$T/state/jobs/$POD/verify-tries")" 19 'a cut-off job list is not a complete scan'
+  assert_fail "pod is still not killed" grep -q '^kill' "$T/log/docker.log"
+}
+
+test_incomplete_scans_cannot_keep_an_unverified_pod_alive_past_the_cap() {
+  setup_ctl; busy_pod_fixture
+  # the run list keeps failing: no scan is ever complete, so no try is counted
+  fx GET '/repos/octo/ok/actions/runs?status=in_progress&per_page=50&page=1' 502 '{"message":"bad gateway"}'
+  mkdir -p "$T/state/jobs/$POD"
+  printf '%s' "$(( $(date +%s) - 600 ))" > "$T/state/jobs/$POD/busy"
+  ctl_once
+  assert_fail "busy for 10 minutes: still alive" grep -q '^kill' "$T/log/docker.log"
+  assert_eq "$(cat "$T/state/jobs/$POD/verify-tries" 2>/dev/null || echo 0)" 0 "no try counted"
+  printf '%s' "$(( $(date +%s) - 1900 ))" > "$T/state/jobs/$POD/busy"
+  ctl_once
+  grep -q 'event=job_unverified pod='"$POD" "$T/out" || { cat "$T/out" >&2; return 1; }
+  grep -q 'event=pod_killed pod='"$POD"' repo=octo/ok reason=job_unverified' "$T/out" || { cat "$T/out" >&2; return 1; }
+  grep -q "^kill ghr-${POD}-runner" "$T/log/docker.log" || return 1
+}
+
+test_truncated_scans_forever_are_capped_too() {
+  setup_ctl; busy_pod_fixture
+  local n k
+  for n in 1 2 3 4 5 6; do
+    fx GET "/repos/octo/ok/actions/runs?status=in_progress&per_page=50&page=$n" 200 '{"workflow_runs":[]}'
+    k=$(fxkey GET "/repos/octo/ok/actions/runs?status=in_progress&per_page=50&page=$n")
+    printf 'link: <https://api.github.com/x?page=%s>; rel="next"\r\n' $((n + 1)) > "$T/fx/$k.hdr"
+  done
+  mkdir -p "$T/state/jobs/$POD"; printf '%s' "$(( $(date +%s) - 1900 ))" > "$T/state/jobs/$POD/busy"
+  ctl_once
+  grep -q 'event=job_unverified pod='"$POD" "$T/out" || { cat "$T/out" >&2; return 1; }
+  grep -q "^kill ghr-${POD}-runner" "$T/log/docker.log" || return 1
+}
+
+test_complete_scans_without_the_runner_still_reject_after_twenty_tries() {
+  setup_ctl; busy_pod_fixture
+  assigned_fx ok 7 '{"jobs":[]}'
+  local i
+  for i in $(seq 1 20); do
+    ctl_once
+    assert_eq "$(cat "$T/state/jobs/$POD/verify-tries")" "$i" "complete scan $i counted"
+    assert_fail "alive before the 21st scan" grep -q '^kill' "$T/log/docker.log"
+  done
+  ctl_once
+  grep -q 'event=job_unverified pod='"$POD" "$T/out" || { cat "$T/out" >&2; return 1; }
+  grep -q "^kill ghr-${POD}-runner" "$T/log/docker.log" || return 1
+}
+
 test_a_job_never_found_is_rejected_after_twenty_polls() {
   setup_ctl; busy_pod_fixture
   assigned_fx ok 7 '{"jobs":[]}'

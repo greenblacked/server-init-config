@@ -600,6 +600,7 @@ section "runner-engine-update"
 stub logger 'exit 0'
 export ENGINE_UPDATE_LOG="$T/engine.log"
 export ENGINE_UPDATE_LOCK="$T/runner-engine-update.lock"
+export ENGINE_UPDATE_HELD="$T/engine-held/held"
 stub docker '[[ "$*" == *github-runner* ]] && exit 0; echo abc123'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "a running CI job: skipped, exit 0" '[[ $rc -eq 0 ]] && grep -q "SKIP 1 CI job" <<<"$out"'
@@ -654,7 +655,8 @@ esac
 exit 0'
 rm -f "$T/scriptlet-started" "$T/scriptlet-n"
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
-check "runner back up after the upgrade with a job: docker is not restarted" '[[ $rc -eq 0 ]] && grep -q "SKIP Docker packages upgraded, but a CI job runs" <<<"$out" && ! grep -q "^restart docker" <<<"$(calls systemctl)" && ! grep -q "upgrade gitlab-runner" <<<"$(calls dnf)"'
+check "runner back up after the upgrade with a job: docker is not restarted, services held, exit 1" '[[ $rc -eq 1 ]] && grep -q "FAIL Docker packages upgraded, but a CI job runs.*CI services left stopped" <<<"$out" && ! grep -q "^restart docker" <<<"$(calls systemctl)" && ! grep -q "upgrade gitlab-runner" <<<"$(calls dnf)" && [[ -s "$ENGINE_UPDATE_HELD" ]]'
+rm -rf "$T/engine-held"
 rm -f "$T/scriptlet-started" "$T/scriptlet-n"
 # order: the Docker packages are upgraded (and Docker restarted) before gitlab-runner, in separate dnf transactions
 rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
@@ -698,11 +700,11 @@ rm -f "$T/runner-stopped" "$T/docker-calls"; reset_calls
 stub docker 'if [[ "$*" == *github-runner* ]]; then n=$(cat "'"$T"'/docker-calls" 2>/dev/null || echo 0); echo $((n + 1)) > "'"$T"'/docker-calls"; [[ $n -ge 1 ]] && echo ghpod1; fi; exit 0'
 out=$(bash "$ROOT/runner/scripts/runner-engine-update.sh" 2>&1); rc=$?
 check "a GitHub pod appears after the stop: runner and controller started again, nothing upgraded" '[[ $rc -eq 0 ]] && grep -q "SKIP a CI job appeared" <<<"$out" && grep -q "^start --no-block gitlab-runner" <<<"$(calls systemctl)" && grep -q "^start --no-block github-runner-ctl" <<<"$(calls systemctl)" && ! grep -q "upgrade" <<<"$(calls dnf)"'
-rm -f "$T/bin/docker" "$T/bin/logger" "$T/bin/sleep" "$T/bin/dnf" "$T/bin/rpm" "$T/bin/systemctl" "$T/runner-stopped" "$T/docker-calls"; unset ENGINE_UPDATE_LOG ENGINE_UPDATE_DROPIN ENGINE_UPDATE_LOCK; reset_calls
+rm -f "$T/bin/docker" "$T/bin/logger" "$T/bin/sleep" "$T/bin/dnf" "$T/bin/rpm" "$T/bin/systemctl" "$T/runner-stopped" "$T/docker-calls"; unset ENGINE_UPDATE_LOG ENGINE_UPDATE_DROPIN ENGINE_UPDATE_LOCK ENGINE_UPDATE_HELD; reset_calls
 
 
 out=$("$ROOT/tests/unit/run.sh" "$ROOT/tests/container/runner-engine-update-main.test.sh" 2>&1); rc=$?
-check "runner-engine-update main flow (fully stubbed and hermetic)" '[[ $rc -eq 0 && "$out" == *"== 6 passed, 0 failed"* ]]'
+check "runner-engine-update main flow (fully stubbed and hermetic)" '[[ $rc -eq 0 && "$out" == *"== 14 passed, 0 failed"* ]]'
 
 section "server lock-root"
 LR="$ROOT/server/lock-root.sh"

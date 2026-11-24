@@ -259,8 +259,9 @@ cat > /usr/local/sbin/ci-install-optional-tools <<'__SIC_EOF__'
 #!/bin/sh
 set -e
 
+installed=0
 install_tool() {
-  dnf -y -q --disablerepo=docker-ce-stable,runner_gitlab-runner install "$1"
+  dnf -y -q --disablerepo=docker-ce-stable,runner_gitlab-runner install "$1" && installed=$((installed + 1))
 }
 
 warnings=/var/log/ci-bootstrap-failed.log
@@ -268,6 +269,11 @@ install_tool epel-release || echo optional-tool-missing-epel >> "$warnings"
 for package in htop btop ncdu iotop mtr nano vim-enhanced rsync wget unzip tar bash-completion skopeo dnf-utils mc fd-find ripgrep fzf; do
   install_tool "$package" || echo "optional-tool-missing-$package" >> "$warnings"
 done
+# Nothing installed at all means no repository or network: stay undone so the next boot tries again.
+if [ "$installed" -eq 0 ]; then
+  echo optional-tools-none-installed-retry-next-boot >> "$warnings"
+  exit 1
+fi
 touch /var/lib/ci-optional-tools/done
 __SIC_EOF__
 chmod 755 /usr/local/sbin/ci-install-optional-tools
@@ -280,7 +286,9 @@ After=cloud-final.service network-online.target
 ConditionPathExists=!/var/lib/ci-optional-tools/done
 
 [Service]
-Type=exec
+Type=oneshot
+# oneshot: `systemctl start` and the first-boot reboot (After=) wait for the installs; bound that wait.
+TimeoutStartSec=20min
 StateDirectory=ci-optional-tools
 ExecStart=/usr/local/sbin/ci-install-optional-tools
 
@@ -304,7 +312,8 @@ usermod -aG docker gitlab-runner
 chmod 600 /etc/gitlab-runner/config.toml
 systemctl restart gitlab-runner
 systemctl daemon-reload
-systemctl start ci-optional-tools.service
+# blocks until the optional tools are installed (a few minutes)
+systemctl start ci-optional-tools.service || echo 'optional tools not installed (see /var/log/ci-bootstrap-failed.log); retry: systemctl start ci-optional-tools.service'
 sh -c 'for s in sshd docker gitlab-runner; do systemctl is-active --quiet $s || [ $s = docker -a -s /var/log/ci-docker-reboot.log ] || echo bootstrap-check-failed-$s >> /var/log/ci-bootstrap-failed.log; done'
 
 systemctl is-active docker gitlab-runner
@@ -423,6 +432,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -1017,6 +1035,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -1456,6 +1483,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -2402,6 +2438,9 @@ check_services() {
     fi
   done
 
+  if is_runner && [[ -e /var/lib/runner-engine-update/held ]]; then
+    warn "CI services are held stopped by a failed engine update ($(sed -n 's/^reason=//p' /var/lib/runner-engine-update/held 2>/dev/null | head -1)); the next runner-engine-update run recovers them, or run: sudo runner-engine-update.sh"
+  fi
   if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
     local upd
     upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
@@ -2410,6 +2449,18 @@ check_services() {
       "") ;;
       *) info "Docker/GitLab Runner update: ${upd}" ;;
     esac
+  fi
+  if is_runner && unit_exists 'h2ci-telegram-notify@.service'; then
+    local tg=/etc/h2ci-monitor/telegram.credentials
+    if (( LIMITED )); then
+      info "Telegram credentials file not checked (its directory is root-only): run health as root or with sudo"
+    elif [[ ! -e "$tg" && ! -L "$tg" ]]; then
+      info "Telegram alerts: ${tg} not created (alerts are logged as a warning, not sent)"
+    elif [[ -f "$tg" && ! -L "$tg" && "$(stat -c '%u %a' "$tg" 2>/dev/null || true)" == "0 600" ]]; then
+      ok "Telegram credentials file is root-owned, mode 0600"
+    else
+      warn "${tg} must be a regular file owned by root with mode 0600 (the notify script refuses it): sudo chown root:root ${tg} && sudo chmod 0600 ${tg}"
+    fi
   fi
   if is_runner && unit_exists ci-job-isolation.service; then
     if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
@@ -3294,6 +3345,26 @@ def runtime_drift(directory, findings):
                                  "detail": "running image reference or memory limit differs from deployed Compose"})
 
 
+# Jobs that the logging and registry-cache installers append to prometheus.yml, in whatever order the installers ran.
+PROMETHEUS_EXTRA_JOBS = (
+    ("registry-cache", "registry-cache", "127.0.0.1:5001"),
+    ("logging", "loki", "127.0.0.1:3100"),
+    ("logging", "alloy", "127.0.0.1:12345"),
+)
+
+
+def prometheus_expected(base, deployed, root):
+    """Repository prometheus.yml plus the extra jobs of the installed components, ordered as in the deployed file."""
+    blocks = {}
+    for component, job, target in PROMETHEUS_EXTRA_JOBS:
+        if (root / "opt" / component / "docker-compose.yml").exists() and f"job_name: {job}".encode() not in base:
+            blocks[job] = (f'  - job_name: {job}\n    static_configs:\n'
+                           f'      - targets: ["{target}"]\n').encode()
+    # A block that is missing from the deployed file goes last (it is reported as a difference either way).
+    position = {job: deployed.find(block) for job, block in blocks.items()}
+    return base + b"".join(blocks[job] for job in sorted(blocks, key=lambda j: (position[j] < 0, position[j])))
+
+
 def drift(repo, root=Path("/"), file_diffs=None):
     findings = []
     installed = []
@@ -3324,16 +3395,11 @@ def drift(repo, root=Path("/"), file_diffs=None):
                         relative = file.relative_to(source)
                         expected = file.read_bytes()
                         if relative.as_posix() == "prometheus/prometheus.yml":
-                            additions = (
-                                ("registry-cache", "registry-cache", "127.0.0.1:5001"),
-                                ("logging", "loki", "127.0.0.1:3100"),
-                                ("logging", "alloy", "127.0.0.1:12345"),
-                            )
-                            for component, job, target in additions:
-                                if (root / "opt" / component / "docker-compose.yml").exists():
-                                    if f"job_name: {job}".encode() not in expected:
-                                        expected += (f'  - job_name: {job}\n    static_configs:\n'
-                                                     f'      - targets: ["{target}"]\n').encode()
+                            try:
+                                deployed_bytes = (directory / relative).read_bytes()
+                            except OSError:
+                                deployed_bytes = b""   # compare_file reports the missing file
+                            expected = prometheus_expected(expected, deployed_bytes, root)
                         compare_file(file, directory / relative, findings, expected, file_diffs)
                 if (root / "opt/logging/docker-compose.yml").exists():
                     compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
@@ -3384,14 +3450,25 @@ def hub_tags(image):
             "scope": "100 most recently updated tags; stable x.y.z only, not a support/EOL check"}
 
 
+def check_update_names(text):
+    """Package names from `dnf -q check-update`. DNF wraps a long name: the version and repository continue on an
+    indented line (and the obsoleted package of an obsoleting entry is indented too), so those lines are joined first."""
+    logical = []
+    for line in text.splitlines():
+        if line[:1].isspace() and logical:
+            logical[-1] += " " + line.strip()
+        elif line.strip():
+            logical.append(line.strip())
+    pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src|ppc64le|s390x|armv7hl)\s+(\S+)\s+\S+")
+    return sorted({match.group(1) for line in logical if (match := pattern.match(line))})
+
+
 def packages():
     """Refresh metadata only. This function is never called by --check or health."""
     if shutil.which("dnf"):
         rows = run(["dnf", "-q", "--refresh", "--setopt=*.skip_if_unavailable=False", "check-update"],
                    timeout=150, accepted=(0, 100))
-        pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src)\s+(\S+)\s+\S+")
-        updates = sorted({match.group(1) for line in rows.stdout.splitlines()
-                          if (match := pattern.match(line))})
+        updates = check_update_names(rows.stdout)
         if rows.returncode == 100 and not updates:
             raise CheckError("DNF reports updates but package list could not be parsed")
         security = run(["dnf", "-q", "--cacheonly", "updateinfo", "list", "--security"], timeout=60)
@@ -3412,12 +3489,23 @@ def packages():
 def reboot_state():
     if Path("/var/run/reboot-required").exists():
         return "required"
+    # `dnf needs-restarting -r` (the plugin that h2ci-maintenance uses) first, the old standalone binary as a fallback.
+    # A host without either, or a failing query, is "unknown": that is not a freshness error.
+    commands = []
+    if shutil.which("dnf"):
+        commands.append(["dnf", "-q", "-C", "needs-restarting", "-r"])
     if shutil.which("needs-restarting"):
-        result = run(["needs-restarting", "-r"], timeout=30, accepted=(0, 1))
+        commands.append(["needs-restarting", "-r"])
+    for argv in commands:
+        try:
+            result = run(argv, timeout=60, accepted=(0, 1))
+        except CheckError:
+            continue
+        # exit 1 can also be a generic DNF error: require the affirmative text
+        if result.returncode == 1 and "reboot is required" in result.stdout.lower():
+            return "required"
         if result.returncode == 0:
             return "not-required"
-        if "reboot is required" in result.stdout.lower():
-            return "required"
     return "unknown"
 
 
@@ -3771,7 +3859,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
-  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+  # Only hosts with the Telegram units (h2ci) alert; elsewhere a missing unit is normal and not logged on every run.
+  if systemctl cat h2ci-telegram-notify@disk-threshold.service >/dev/null 2>&1 &&
+     ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
     logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
   fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
@@ -3842,14 +3932,29 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
 # stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
 # One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
+# When Docker packages were changed and the CI services cannot be restored safely, they stay stopped, the run FAILs (exit 1) and
+# a "held" marker is written; every later run first tries to recover from it (isolation, Docker, no jobs, services back).
 set -Eeuo pipefail
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
+HELD_FILE="${ENGINE_UPDATE_HELD:-/var/lib/runner-engine-update/held}"   # overridable for tests
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+last_note=""
+note() { last_note="$*"; logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+# A run that leaves the CI services stopped records why; the next run recovers or reports it (see recover_held).
+# It runs from the EXIT trap and must never change the exit code of the run (the services stay stopped either way).
+write_held() {
+  local reason=${last_note:-unknown} tmp
+  mkdir -p "$(dirname "$HELD_FILE")" || return 0
+  tmp=$(mktemp "$HELD_FILE.XXXXXX") || return 0
+  printf 'time=%s\nreason=%s\nctl_stopped=%s\n' "$(date -u +%FT%TZ)" "$reason" "${ctl_stopped:-0}" > "$tmp" || { rm -f "$tmp"; return 0; }
+  chmod 0644 "$tmp"   # no secret in it; health prints the reason as a normal user
+  mv -f "$tmp" "$HELD_FILE" || { rm -f "$tmp"; return 0; }
+  note "HELD CI services stay stopped; the next run re-checks isolation and restarts them (marker ${HELD_FILE})"
+}
 
 # Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
 probe_failed() {
@@ -3913,8 +4018,66 @@ runner_back() {
     ctl_back
   fi
 }
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
 cleanup_services() {
-  if (( runner_stopped )); then runner_back; fi
+  if (( runner_stopped )); then
+    if can_restart_services; then runner_back; else write_held || true; fi
+  fi
+}
+# A marker from an earlier fail-closed run means the CI services were left stopped. Restart them only after the checks the normal
+# path needs (isolation rebuilt and active, Docker answers, no job); otherwise stay held and fail so that it is noticed.
+# The services are only stopped, not disabled, so a reboot brings them back: with both running (and the isolation active) the marker
+# is stale and is cleared without touching the isolation rules under live jobs; running without isolation is a loud failure.
+recover_held() {
+  [[ -e "$HELD_FILE" ]] || return 0
+  local reason jobs running=1
+  reason=$(sed -n 's/^reason=//p' "$HELD_FILE" 2>/dev/null | head -1)
+  systemctl is-active --quiet gitlab-runner || running=0
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then running=0; fi
+  if (( running )); then
+    if [[ "$DRY_RUN" == 1 ]]; then
+      note "DRY-RUN held marker is stale: the CI services are already running"
+      return 0
+    fi
+    if systemctl is-active --quiet ci-job-isolation.service; then
+      rm -f "$HELD_FILE"
+      note "OK held marker cleared: services already running (${reason:-unknown})"
+      return 0
+    fi
+    note "FAIL CI services are running but ci-job-isolation.service is not active; marker kept (${reason:-unknown})"
+    return 1
+  fi
+  if [[ "$DRY_RUN" == 1 ]]; then
+    note "DRY-RUN CI services are held since $(sed -n 's/^time=//p' "$HELD_FILE" | head -1) (${reason:-unknown}); a real run would re-check isolation and restart them"
+    return 0
+  fi
+  note "HELD marker found (${reason:-unknown}); trying to restore the CI services"
+  if ! ensure_isolation; then
+    note "FAIL CI services still held: isolation is not restored"
+    return 1
+  fi
+  if ! jobs=$(job_ids 2>/dev/null); then
+    note "FAIL CI services still held: docker does not answer"
+    return 1
+  fi
+  if [[ -n "$jobs" ]]; then
+    note "FAIL CI services still held: $(wc -w <<<"$jobs") CI job(s) running"
+    return 1
+  fi
+  systemctl start gitlab-runner || true
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE"; then systemctl start github-runner-ctl || true; fi
+  sleep 5
+  if ! systemctl is-active --quiet gitlab-runner; then
+    note "FAIL CI services still held: gitlab-runner did not start"
+    return 1
+  fi
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then
+    note "FAIL CI services still held: github-runner-ctl did not start"
+    return 1
+  fi
+  rm -f "$HELD_FILE"
+  note "OK held CI services restored (${reason:-unknown})"
 }
 main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -3925,8 +4088,7 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-# A docker error is not "no jobs".
-job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+recover_held || exit 1
 if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
@@ -4008,19 +4170,19 @@ if (( ${#docker_pkgs[@]} )); then
   isolation_required=1
 fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
-  note "FAIL Docker package upgrade failed, see ${LOG}"
+  note "FAIL Docker package upgrade failed, see ${LOG}; CI services left stopped"
   exit 1
 fi
 # a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
-    exit 0
+    note "FAIL Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted; CI services left stopped"
+    exit 1
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
-  exit 0
+  note "FAIL Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted; CI services left stopped"
+  exit 1
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
@@ -4128,6 +4290,8 @@ cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
 [Unit]
 Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
 After=docker.service network-online.target
+
+OnFailure=h2ci-telegram-notify@runner-engine-update.service
 
 [Service]
 Type=oneshot
@@ -4299,6 +4463,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -4753,6 +4926,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -5868,6 +6050,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -6065,7 +6256,7 @@ trap 'rm -f "$cache_tmp"' EXIT
 awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
 if ! cmp -s "$CFG" "$cache_tmp"; then
   backup "$CFG"
-  cat "$cache_tmp" > "$CFG"
+  replace_file "$cache_tmp" "$CFG"
 fi
 rm -f "$cache_tmp"
 trap - EXIT
@@ -6366,6 +6557,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -6765,6 +6965,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -7150,6 +7359,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -7746,6 +7964,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -8331,6 +8558,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -8772,6 +9008,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -9082,6 +9327,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -9983,29 +10237,37 @@ finish_pod() {
   save_state
 }
 
+VERIFY_MAX_SECONDS=1800
 is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
 
 # check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
 # it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
 # ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
-# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# check is what ends a pod that got the wrong job. A job still not found after 20 complete scans is rejected too (fail closed). Only a
+# complete scan counts as a try (run list and every job list fetched, none cut off by the page limit): GitHub API errors or truncated
+# lists say nothing about this runner, so a busy pod is not killed for the time the API was unhealthy. Incomplete scans cannot keep a
+# pod alive for ever, though (a big matrix or many runs can force truncation, a jobs endpoint can keep failing): a pod that was seen busy
+# more than VERIFY_MAX_SECONDS ago and is still unverified is rejected whatever the scans said.
 # Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
 check_assigned_job() {
-  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  local pod=$1 repo=$2 rid=$3 run verdict tries complete=1 busy_since waited=0 runs_file="${TMP}/assigned-runs.json"
   tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
-  if (( tries >= 20 )); then
+  busy_since=$(cat "$(pod_dir "$pod")/busy" 2>/dev/null || echo 0)
+  if [[ "$busy_since" =~ ^[0-9]+$ ]] && (( busy_since > 0 )); then waited=$(( $(date +%s) - busy_since )); fi
+  if (( tries >= 20 || waited >= VERIFY_MAX_SECONDS )); then
     # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
-    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs" "scans=${tries}" "busy_for=${waited}s"
     : > "$(pod_dir "$pod")/verified"
     kill_pod "$pod" "$repo" "$rid" job_unverified
     return 0
   fi
-  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
-  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 6 || return 1
+  (( PAGED_TRUNCATED )) && complete=0
   cp "$PAGED_FILE" "$runs_file"
   for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
     [[ "$run" =~ ^[0-9]+$ ]] || continue
-    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then complete=0; continue; fi
+    (( PAGED_TRUNCATED )) && complete=0
     verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
       [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
       if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
@@ -10023,6 +10285,7 @@ check_assigned_job() {
     fi
     return 0
   done
+  if (( complete )); then printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"; fi
   return 1
 }
 
@@ -10698,6 +10961,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -11129,6 +11401,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -11527,6 +11808,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -11821,6 +12111,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -12429,6 +12728,15 @@ backup() {
     [[ -f "$b" ]] && cmp -s "$f" "$b" && return 0
   done
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
 }
 
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
@@ -13898,7 +14206,7 @@ trap 'rm -f "$cache_tmp"' EXIT
 awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
 if ! cmp -s "$CFG" "$cache_tmp"; then
   backup "$CFG"
-  cat "$cache_tmp" > "$CFG"
+  replace_file "$cache_tmp" "$CFG"
 fi
 rm -f "$cache_tmp"
 trap - EXIT
@@ -15747,29 +16055,37 @@ finish_pod() {
   save_state
 }
 
+VERIFY_MAX_SECONDS=1800
 is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
 
 # check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
 # it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
 # ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
-# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# check is what ends a pod that got the wrong job. A job still not found after 20 complete scans is rejected too (fail closed). Only a
+# complete scan counts as a try (run list and every job list fetched, none cut off by the page limit): GitHub API errors or truncated
+# lists say nothing about this runner, so a busy pod is not killed for the time the API was unhealthy. Incomplete scans cannot keep a
+# pod alive for ever, though (a big matrix or many runs can force truncation, a jobs endpoint can keep failing): a pod that was seen busy
+# more than VERIFY_MAX_SECONDS ago and is still unverified is rejected whatever the scans said.
 # Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
 check_assigned_job() {
-  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  local pod=$1 repo=$2 rid=$3 run verdict tries complete=1 busy_since waited=0 runs_file="${TMP}/assigned-runs.json"
   tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
-  if (( tries >= 20 )); then
+  busy_since=$(cat "$(pod_dir "$pod")/busy" 2>/dev/null || echo 0)
+  if [[ "$busy_since" =~ ^[0-9]+$ ]] && (( busy_since > 0 )); then waited=$(( $(date +%s) - busy_since )); fi
+  if (( tries >= 20 || waited >= VERIFY_MAX_SECONDS )); then
     # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
-    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs" "scans=${tries}" "busy_for=${waited}s"
     : > "$(pod_dir "$pod")/verified"
     kill_pod "$pod" "$repo" "$rid" job_unverified
     return 0
   fi
-  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
-  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 6 || return 1
+  (( PAGED_TRUNCATED )) && complete=0
   cp "$PAGED_FILE" "$runs_file"
   for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
     [[ "$run" =~ ^[0-9]+$ ]] || continue
-    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then complete=0; continue; fi
+    (( PAGED_TRUNCATED )) && complete=0
     verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
       [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
       if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
@@ -15787,6 +16103,7 @@ check_assigned_job() {
     fi
     return 0
   done
+  if (( complete )); then printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"; fi
   return 1
 }
 
@@ -16499,14 +16816,26 @@ def daily(test=False):
                or result["update"] not in {"applied", "unchanged"})
 
 
+def runtime_directory_present(path, unit):
+    """The result files live in the RuntimeDirectory= of a unit; outside that unit there is no such directory."""
+    if path.is_dir():
+        return True
+    log(f"{path} does not exist: this command only works inside its systemd unit; run: sudo systemctl start {unit}")
+    return False
+
+
 def main():
     if os.geteuid() or len(sys.argv) != 2:
         return 2
     if sys.argv[1] == "update":
+        if not runtime_directory_present(UPDATE_RESULT.parent, "h2ci-server-update.service"):
+            return 2
         return update()
     if sys.argv[1] == "preview":
         return run(*DNF, "--assumeno", "upgrade")
     if sys.argv[1] in {"daily", "test"}:
+        if not runtime_directory_present(DAILY_REPORT.parent, "h2ci-daily-maintenance.service"):
+            return 2
         return daily(test=sys.argv[1] == "test")
     return 2
 
@@ -16519,7 +16848,7 @@ chmod 644 "$R/runner/scripts/h2ci-maintenance"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/h2ci-telegram-notify" <<'__SIC_EOF__'
 #!/usr/bin/python3
-"""Send a fixed monitor event using credentials supplied by systemd."""
+"""Send a fixed monitor event; the bot token and chat ID come from a root-only 0600 file."""
 
 from datetime import datetime
 import http.client
@@ -16530,19 +16859,124 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from urllib.parse import urlencode
 
 EVENTS = {
     "disk-threshold": "Root filesystem reached the disk guard threshold; emergency cleanup triggered.",
     "runner-disk-guard": "Disk guard failed. Check: journalctl -u runner-disk-guard.service",
     "server-freshness": "Freshness check failed. Check: journalctl -u server-freshness.service",
+    "runner-engine-update": "Docker/GitLab Runner update failed; CI services may be held stopped. Check: tail /var/log/runner-engine-update.log; ls /var/lib/runner-engine-update/held",
     "test": "TEST: systemd monitor alert delivery verified.",
 }
 
 
+# Bot token and chat ID: two lines. Only read from this file; the token never goes into the environment or a command line.
+CREDENTIALS_FILE = Path("/etc/h2ci-monitor/telegram.credentials")
+# Repeating alerts are sent at most once per interval and event; the stamps live in /run (RuntimeDirectory= of the unit).
+STAMP_DIR = Path("/run/h2ci-telegram-notify")
+RATE_LIMIT_SECONDS = 6 * 3600
+RATE_LIMITED = frozenset({"disk-threshold", "runner-disk-guard", "server-freshness", "runner-engine-update"})
+SEND_TIMEOUT = 8
+RETRY_DELAY = 2
+RETRY_DELAY_MAX = 10
+# Child processes get no inherited environment (nothing secret can leak into them).
+CHILD_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LC_ALL": "C"}
+
+
+def log_problem(level, message):
+    """One line on stderr; under systemd the <N> prefix sets the journal priority (3 error, 4 warning)."""
+    prefix = f"<{level}>" if os.environ.get("JOURNAL_STREAM") else ""
+    print(prefix + message, file=sys.stderr)
+
+
+def load_credentials(path=None, uid=0):
+    """Return (text, None, None), or (None, kind, message) with kind "missing" or "unsafe".
+
+    The file must be a regular file owned by root with mode exactly 0600, checked on the open descriptor.
+    """
+    path = CREDENTIALS_FILE if path is None else path
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None, "missing", f"{path} does not exist"
+    except OSError as exc:
+        return None, "unsafe", f"{path} cannot be opened ({type(exc).__name__}); it must be a regular file"
+    try:
+        info = os.fstat(fd)
+        mode = stat.S_IMODE(info.st_mode)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or mode != 0o600:
+            return None, "unsafe", (f"{path} must be a regular file owned by root with mode 0600 "
+                                    f"(found uid {info.st_uid}, mode {mode:04o}); fix: chown root:root {path} && chmod 0600 {path}")
+        return os.read(fd, 4096).decode("ascii", errors="replace"), None, None
+    finally:
+        os.close(fd)
+
+
+def rate_limited(event, now=None, directory=None):
+    if event not in RATE_LIMITED:
+        return False
+    directory = STAMP_DIR if directory is None else directory
+    now = time.time() if now is None else now
+    try:
+        age = now - (directory / f"{event}.stamp").stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < RATE_LIMIT_SECONDS
+
+
+def mark_sent(event, directory=None):
+    if event not in RATE_LIMITED:
+        return
+    directory = STAMP_DIR if directory is None else directory
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+        (directory / f"{event}.stamp").touch(mode=0o600)   # also renews the time of an existing stamp
+    except OSError:
+        pass
+
+
+def retry_delay(retry_after):
+    try:
+        wanted = int(retry_after)
+    except (TypeError, ValueError, OverflowError):   # OverflowError: JSON Infinity
+        wanted = RETRY_DELAY
+    return min(max(wanted, 0), RETRY_DELAY_MAX)
+
+
+def send_message(token, chat_id, text, sleep=time.sleep):
+    """POST sendMessage once, and once more after a network error, HTTP 429 or 5xx. Returns (HTTP status or None, JSON or None)."""
+    body = urlencode({"chat_id": chat_id, "text": text})
+    path = "/bot" + token + "/sendMessage"
+    status = data = None
+    for attempt in (1, 2):
+        status, data, wait = None, None, RETRY_DELAY
+        connection = http.client.HTTPSConnection("api.telegram.org", timeout=SEND_TIMEOUT)
+        try:
+            connection.request("POST", path, body=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            response = connection.getresponse()
+            status = response.status
+            wait = response.getheader("Retry-After")
+            payload = response.read(65536)
+            try:
+                data = json.loads(payload)
+                if wait is None:
+                    wait = data["parameters"]["retry_after"]
+            except (ValueError, KeyError, TypeError):
+                pass
+        except (OSError, http.client.HTTPException):
+            pass   # no message text here: it can contain the request URL, including the token
+        finally:
+            connection.close()
+        if status == 200 or attempt == 2 or not (status is None or status == 429 or status >= 500):
+            break
+        sleep(retry_delay(wait))
+    return status, data
+
+
 def read_status(*command):
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=2).stdout.strip()
+        return subprocess.run(command, capture_output=True, text=True, timeout=2, env=CHILD_ENV).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -16644,7 +17078,7 @@ def ci_outcomes_24h():
             ("/usr/bin/journalctl", "--no-pager", "--unit=gitlab-runner.service", "SYSLOG_IDENTIFIER=gitlab-runner",
              f"--since=@{now - 86400}", f"--until=@{now}", "--output=json", "--output-fields=MESSAGE",
              "--grep=Submitting job to coordinator", f"--lines={limit + 1}"),
-            capture_output=True, text=True, timeout=2, check=True,
+            capture_output=True, text=True, timeout=2, check=True, env=CHILD_ENV,
         )
         records = result.stdout.splitlines()
         if result.stderr.strip() or len(records) > limit:
@@ -17011,16 +17445,24 @@ def main():
         return 2
     event = sys.argv[1]
     try:
-        credential = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "telegram.credentials"
-        token, chat_id = credential.read_text(encoding="ascii").splitlines()
+        raw, kind, problem = load_credentials()
+        if kind == "unsafe":
+            log_problem(3, f"Telegram alert {event} not sent: {problem}")
+            return 78
+        if kind == "missing":
+            log_problem(4, f"Telegram alert {event} not sent: {problem}; create it as described in runner/README.md")
+            # Alerts on a host without Telegram are not a failure; the daily report is, so that its absence is noticed.
+            return 1 if event == "daily" else 0
+        if rate_limited(event):
+            print(f"Telegram alert {event} suppressed: sent less than {RATE_LIMIT_SECONDS // 3600} hours ago")
+            return 0
+        token, chat_id = raw.splitlines()
         if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token) or not re.fullmatch(r"-?[0-9]+", chat_id):
             print("Invalid Telegram credentials format", file=sys.stderr)
             return 2
-        os.environ["TELEGRAM_BOT_TOKEN"] = token
-        del token
         run_id = None
         if event == "daily":
-            report = credential.with_name("maintenance.json")
+            report = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "maintenance.json"
             result = json.loads(report.read_text())
             run_id = result["run_id"]
             if not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -17028,26 +17470,20 @@ def main():
             text = daily_status(result)
         else:
             text = EVENTS[event]
-        body = urlencode({"chat_id": chat_id, "text": "[h2ci] " + text})
-        connection = http.client.HTTPSConnection("api.telegram.org", timeout=8 if event == "daily" else 10)
-        try:
-            connection.request(
-                "POST", "/bot" + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage", body=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            response = connection.getresponse()
-            if response.status != 200:
-                print(f"Telegram rejected {event}: HTTP {response.status}", file=sys.stderr)
-                return 1
-            data = json.loads(response.read(65536))
-        finally:
-            connection.close()
-        if data.get("ok") is True:
+        status, data = send_message(token, chat_id, "[h2ci] " + text)
+        if status is None:
+            print(f"Telegram unreachable for {event}", file=sys.stderr)
+            return 1
+        if status != 200:
+            print(f"Telegram rejected {event}: HTTP {status}", file=sys.stderr)
+            return 1
+        if isinstance(data, dict) and data.get("ok") is True:
             result = data["result"]
             if str(result["chat"]["id"]) == chat_id and type(result["message_id"]) is int and result["message_id"] > 0:
                 if run_id is not None:
                     receipt = Path("/run/h2ci-daily-maintenance/delivery.json")
                     receipt.write_text(json.dumps({"run_id": run_id, "message_id": result["message_id"]}))
+                mark_sent(event)
                 print(f"Telegram delivered {event}; message ID {result['message_id']}")
                 return 0
         print(f"Telegram did not confirm delivery of {event}", file=sys.stderr)
@@ -17075,7 +17511,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
-  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+  # Only hosts with the Telegram units (h2ci) alert; elsewhere a missing unit is normal and not logged on every run.
+  if systemctl cat h2ci-telegram-notify@disk-threshold.service >/dev/null 2>&1 &&
+     ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
     logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
   fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
@@ -17089,14 +17527,29 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
 # stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
 # One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
+# When Docker packages were changed and the CI services cannot be restored safely, they stay stopped, the run FAILs (exit 1) and
+# a "held" marker is written; every later run first tries to recover from it (isolation, Docker, no jobs, services back).
 set -Eeuo pipefail
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
+HELD_FILE="${ENGINE_UPDATE_HELD:-/var/lib/runner-engine-update/held}"   # overridable for tests
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+last_note=""
+note() { last_note="$*"; logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+# A run that leaves the CI services stopped records why; the next run recovers or reports it (see recover_held).
+# It runs from the EXIT trap and must never change the exit code of the run (the services stay stopped either way).
+write_held() {
+  local reason=${last_note:-unknown} tmp
+  mkdir -p "$(dirname "$HELD_FILE")" || return 0
+  tmp=$(mktemp "$HELD_FILE.XXXXXX") || return 0
+  printf 'time=%s\nreason=%s\nctl_stopped=%s\n' "$(date -u +%FT%TZ)" "$reason" "${ctl_stopped:-0}" > "$tmp" || { rm -f "$tmp"; return 0; }
+  chmod 0644 "$tmp"   # no secret in it; health prints the reason as a normal user
+  mv -f "$tmp" "$HELD_FILE" || { rm -f "$tmp"; return 0; }
+  note "HELD CI services stay stopped; the next run re-checks isolation and restarts them (marker ${HELD_FILE})"
+}
 
 # Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
 probe_failed() {
@@ -17160,8 +17613,66 @@ runner_back() {
     ctl_back
   fi
 }
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
 cleanup_services() {
-  if (( runner_stopped )); then runner_back; fi
+  if (( runner_stopped )); then
+    if can_restart_services; then runner_back; else write_held || true; fi
+  fi
+}
+# A marker from an earlier fail-closed run means the CI services were left stopped. Restart them only after the checks the normal
+# path needs (isolation rebuilt and active, Docker answers, no job); otherwise stay held and fail so that it is noticed.
+# The services are only stopped, not disabled, so a reboot brings them back: with both running (and the isolation active) the marker
+# is stale and is cleared without touching the isolation rules under live jobs; running without isolation is a loud failure.
+recover_held() {
+  [[ -e "$HELD_FILE" ]] || return 0
+  local reason jobs running=1
+  reason=$(sed -n 's/^reason=//p' "$HELD_FILE" 2>/dev/null | head -1)
+  systemctl is-active --quiet gitlab-runner || running=0
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then running=0; fi
+  if (( running )); then
+    if [[ "$DRY_RUN" == 1 ]]; then
+      note "DRY-RUN held marker is stale: the CI services are already running"
+      return 0
+    fi
+    if systemctl is-active --quiet ci-job-isolation.service; then
+      rm -f "$HELD_FILE"
+      note "OK held marker cleared: services already running (${reason:-unknown})"
+      return 0
+    fi
+    note "FAIL CI services are running but ci-job-isolation.service is not active; marker kept (${reason:-unknown})"
+    return 1
+  fi
+  if [[ "$DRY_RUN" == 1 ]]; then
+    note "DRY-RUN CI services are held since $(sed -n 's/^time=//p' "$HELD_FILE" | head -1) (${reason:-unknown}); a real run would re-check isolation and restart them"
+    return 0
+  fi
+  note "HELD marker found (${reason:-unknown}); trying to restore the CI services"
+  if ! ensure_isolation; then
+    note "FAIL CI services still held: isolation is not restored"
+    return 1
+  fi
+  if ! jobs=$(job_ids 2>/dev/null); then
+    note "FAIL CI services still held: docker does not answer"
+    return 1
+  fi
+  if [[ -n "$jobs" ]]; then
+    note "FAIL CI services still held: $(wc -w <<<"$jobs") CI job(s) running"
+    return 1
+  fi
+  systemctl start gitlab-runner || true
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE"; then systemctl start github-runner-ctl || true; fi
+  sleep 5
+  if ! systemctl is-active --quiet gitlab-runner; then
+    note "FAIL CI services still held: gitlab-runner did not start"
+    return 1
+  fi
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then
+    note "FAIL CI services still held: github-runner-ctl did not start"
+    return 1
+  fi
+  rm -f "$HELD_FILE"
+  note "OK held CI services restored (${reason:-unknown})"
 }
 main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -17172,8 +17683,7 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-# A docker error is not "no jobs".
-job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+recover_held || exit 1
 if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
@@ -17255,19 +17765,19 @@ if (( ${#docker_pkgs[@]} )); then
   isolation_required=1
 fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
-  note "FAIL Docker package upgrade failed, see ${LOG}"
+  note "FAIL Docker package upgrade failed, see ${LOG}; CI services left stopped"
   exit 1
 fi
 # a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
-    exit 0
+    note "FAIL Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted; CI services left stopped"
+    exit 1
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
-  exit 0
+  note "FAIL Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted; CI services left stopped"
+  exit 1
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
@@ -17567,18 +18077,37 @@ cat > "$R/runner/systemd/h2ci-telegram-notify@.service" <<'__SIC_EOF__'
 Description=Send Telegram notification for h2ci monitor event %i
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/etc/h2ci-monitor/telegram.credentials
 
+# The credentials file /etc/h2ci-monitor/telegram.credentials (root, 0600) is read and checked by the script itself: a missing
+# file is logged as a warning (a Condition would skip the unit silently), a file with the wrong owner or mode is refused.
 [Service]
 Type=oneshot
-LoadCredential=telegram.credentials:/etc/h2ci-monitor/telegram.credentials
 ExecStart=/usr/local/bin/h2ci-telegram-notify %i
-TimeoutStartSec=20s
+# Alerts: two attempts (connect and read 8 s each, plus name lookup) and a wait of at most 10 s. The daily report has a longer
+# limit in its drop-in.
+TimeoutStartSec=60s
+# Stamp files of the rate limit (the same directory for every event).
+RuntimeDirectory=h2ci-telegram-notify
+RuntimeDirectoryPreserve=yes
 NoNewPrivileges=true
 CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 LimitCORE=0
 UMask=0077
 __SIC_EOF__
@@ -17586,12 +18115,9 @@ chmod 644 "$R/runner/systemd/h2ci-telegram-notify@.service"
 
 install -d "$R/runner/systemd/h2ci-telegram-notify@daily.service.d"
 cat > "$R/runner/systemd/h2ci-telegram-notify@daily.service.d/20-maintenance.conf" <<'__SIC_EOF__'
-[Unit]
-# Missing credentials must fail the daily job, not skip it successfully.
-ConditionPathExists=
-AssertPathExists=/etc/h2ci-monitor/telegram.credentials
-
 [Service]
+# The report is built from local queries (up to about 40 s when Prometheus hangs) and then sent with one retry.
+TimeoutStartSec=90s
 LoadCredential=maintenance.json:/run/h2ci-daily-maintenance/report.json
 ReadWritePaths=/run/h2ci-daily-maintenance
 __SIC_EOF__
@@ -17630,6 +18156,8 @@ cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
 [Unit]
 Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
 After=docker.service network-online.target
+
+OnFailure=h2ci-telegram-notify@runner-engine-update.service
 
 [Service]
 Type=oneshot
@@ -18617,6 +19145,26 @@ def runtime_drift(directory, findings):
                                  "detail": "running image reference or memory limit differs from deployed Compose"})
 
 
+# Jobs that the logging and registry-cache installers append to prometheus.yml, in whatever order the installers ran.
+PROMETHEUS_EXTRA_JOBS = (
+    ("registry-cache", "registry-cache", "127.0.0.1:5001"),
+    ("logging", "loki", "127.0.0.1:3100"),
+    ("logging", "alloy", "127.0.0.1:12345"),
+)
+
+
+def prometheus_expected(base, deployed, root):
+    """Repository prometheus.yml plus the extra jobs of the installed components, ordered as in the deployed file."""
+    blocks = {}
+    for component, job, target in PROMETHEUS_EXTRA_JOBS:
+        if (root / "opt" / component / "docker-compose.yml").exists() and f"job_name: {job}".encode() not in base:
+            blocks[job] = (f'  - job_name: {job}\n    static_configs:\n'
+                           f'      - targets: ["{target}"]\n').encode()
+    # A block that is missing from the deployed file goes last (it is reported as a difference either way).
+    position = {job: deployed.find(block) for job, block in blocks.items()}
+    return base + b"".join(blocks[job] for job in sorted(blocks, key=lambda j: (position[j] < 0, position[j])))
+
+
 def drift(repo, root=Path("/"), file_diffs=None):
     findings = []
     installed = []
@@ -18647,16 +19195,11 @@ def drift(repo, root=Path("/"), file_diffs=None):
                         relative = file.relative_to(source)
                         expected = file.read_bytes()
                         if relative.as_posix() == "prometheus/prometheus.yml":
-                            additions = (
-                                ("registry-cache", "registry-cache", "127.0.0.1:5001"),
-                                ("logging", "loki", "127.0.0.1:3100"),
-                                ("logging", "alloy", "127.0.0.1:12345"),
-                            )
-                            for component, job, target in additions:
-                                if (root / "opt" / component / "docker-compose.yml").exists():
-                                    if f"job_name: {job}".encode() not in expected:
-                                        expected += (f'  - job_name: {job}\n    static_configs:\n'
-                                                     f'      - targets: ["{target}"]\n').encode()
+                            try:
+                                deployed_bytes = (directory / relative).read_bytes()
+                            except OSError:
+                                deployed_bytes = b""   # compare_file reports the missing file
+                            expected = prometheus_expected(expected, deployed_bytes, root)
                         compare_file(file, directory / relative, findings, expected, file_diffs)
                 if (root / "opt/logging/docker-compose.yml").exists():
                     compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
@@ -18707,14 +19250,25 @@ def hub_tags(image):
             "scope": "100 most recently updated tags; stable x.y.z only, not a support/EOL check"}
 
 
+def check_update_names(text):
+    """Package names from `dnf -q check-update`. DNF wraps a long name: the version and repository continue on an
+    indented line (and the obsoleted package of an obsoleting entry is indented too), so those lines are joined first."""
+    logical = []
+    for line in text.splitlines():
+        if line[:1].isspace() and logical:
+            logical[-1] += " " + line.strip()
+        elif line.strip():
+            logical.append(line.strip())
+    pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src|ppc64le|s390x|armv7hl)\s+(\S+)\s+\S+")
+    return sorted({match.group(1) for line in logical if (match := pattern.match(line))})
+
+
 def packages():
     """Refresh metadata only. This function is never called by --check or health."""
     if shutil.which("dnf"):
         rows = run(["dnf", "-q", "--refresh", "--setopt=*.skip_if_unavailable=False", "check-update"],
                    timeout=150, accepted=(0, 100))
-        pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src)\s+(\S+)\s+\S+")
-        updates = sorted({match.group(1) for line in rows.stdout.splitlines()
-                          if (match := pattern.match(line))})
+        updates = check_update_names(rows.stdout)
         if rows.returncode == 100 and not updates:
             raise CheckError("DNF reports updates but package list could not be parsed")
         security = run(["dnf", "-q", "--cacheonly", "updateinfo", "list", "--security"], timeout=60)
@@ -18735,12 +19289,23 @@ def packages():
 def reboot_state():
     if Path("/var/run/reboot-required").exists():
         return "required"
+    # `dnf needs-restarting -r` (the plugin that h2ci-maintenance uses) first, the old standalone binary as a fallback.
+    # A host without either, or a failing query, is "unknown": that is not a freshness error.
+    commands = []
+    if shutil.which("dnf"):
+        commands.append(["dnf", "-q", "-C", "needs-restarting", "-r"])
     if shutil.which("needs-restarting"):
-        result = run(["needs-restarting", "-r"], timeout=30, accepted=(0, 1))
+        commands.append(["needs-restarting", "-r"])
+    for argv in commands:
+        try:
+            result = run(argv, timeout=60, accepted=(0, 1))
+        except CheckError:
+            continue
+        # exit 1 can also be a generic DNF error: require the affirmative text
+        if result.returncode == 1 and "reboot is required" in result.stdout.lower():
+            return "required"
         if result.returncode == 0:
             return "not-required"
-        if "reboot is required" in result.stdout.lower():
-            return "required"
     return "unknown"
 
 
@@ -19660,6 +20225,9 @@ check_services() {
     fi
   done
 
+  if is_runner && [[ -e /var/lib/runner-engine-update/held ]]; then
+    warn "CI services are held stopped by a failed engine update ($(sed -n 's/^reason=//p' /var/lib/runner-engine-update/held 2>/dev/null | head -1)); the next runner-engine-update run recovers them, or run: sudo runner-engine-update.sh"
+  fi
   if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
     local upd
     upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
@@ -19668,6 +20236,18 @@ check_services() {
       "") ;;
       *) info "Docker/GitLab Runner update: ${upd}" ;;
     esac
+  fi
+  if is_runner && unit_exists 'h2ci-telegram-notify@.service'; then
+    local tg=/etc/h2ci-monitor/telegram.credentials
+    if (( LIMITED )); then
+      info "Telegram credentials file not checked (its directory is root-only): run health as root or with sudo"
+    elif [[ ! -e "$tg" && ! -L "$tg" ]]; then
+      info "Telegram alerts: ${tg} not created (alerts are logged as a warning, not sent)"
+    elif [[ -f "$tg" && ! -L "$tg" && "$(stat -c '%u %a' "$tg" 2>/dev/null || true)" == "0 600" ]]; then
+      ok "Telegram credentials file is root-owned, mode 0600"
+    else
+      warn "${tg} must be a regular file owned by root with mode 0600 (the notify script refuses it): sudo chown root:root ${tg} && sudo chmod 0600 ${tg}"
+    fi
   fi
   if is_runner && unit_exists ci-job-isolation.service; then
     if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi
@@ -20668,6 +21248,15 @@ backup() {
   cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
 }
 
+# replace_file NEW DEST  puts NEW (a temp file in the directory of DEST, so the same filesystem) in place of DEST with DEST's mode,
+# owner and SELinux label, by rename: a reader (the runner reloads config.toml by itself) sees the old or the new file, never a
+# half-written one, as it can with `cat NEW > DEST`.
+replace_file() {
+  local new=$1 dest=$2
+  chown --reference="$dest" "$new" && chmod --reference="$dest" "$new" && mv -f "$new" "$dest" || return 1
+  restorecon_if "$dest"
+}
+
 # edit_with_backup FILE CMD...  runs CMD (which edits FILE in place) and keeps a timestamped copy of the previous content,
 # but only when CMD changed the file, so a rerun of an idempotent installer leaves no .bak with the same content as FILE.
 edit_with_backup() {
@@ -22135,7 +22724,7 @@ trap 'rm -f "$cache_tmp"' EXIT
 awk -f "$(dirname "$0")/local-cache.awk" "$CFG" > "$cache_tmp"
 if ! cmp -s "$CFG" "$cache_tmp"; then
   backup "$CFG"
-  cat "$cache_tmp" > "$CFG"
+  replace_file "$cache_tmp" "$CFG"
 fi
 rm -f "$cache_tmp"
 trap - EXIT
@@ -23984,29 +24573,37 @@ finish_pod() {
   save_state
 }
 
+VERIFY_MAX_SECONDS=1800
 is_served() { local r; for r in "${SERVED[@]}"; do [[ "$r" == "$1" ]] && return 0; done; return 1; }
 
 # check_assigned_job POD REPO RID: once a pod is busy, find the job it was given (runner id -> job in an in-progress run) and refuse it when
 # it is not one the controller would have started a pod for: a fork pull request (unless GH_ALLOW_FORK_RUNS=1) or labels that are not
 # ours. An idle runner takes ANY queued job of its repository, so the filters before the start only decide whether a pod starts; this
-# check is what ends a pod that got the wrong job. A job still not found after 20 polls is rejected too (fail closed).
+# check is what ends a pod that got the wrong job. A job still not found after 20 complete scans is rejected too (fail closed). Only a
+# complete scan counts as a try (run list and every job list fetched, none cut off by the page limit): GitHub API errors or truncated
+# lists say nothing about this runner, so a busy pod is not killed for the time the API was unhealthy. Incomplete scans cannot keep a
+# pod alive for ever, though (a big matrix or many runs can force truncation, a jobs endpoint can keep failing): a pod that was seen busy
+# more than VERIFY_MAX_SECONDS ago and is still unverified is rejected whatever the scans said.
 # Returns 0 when decided (ok or rejected), 1 when the job is not visible yet.
 check_assigned_job() {
-  local pod=$1 repo=$2 rid=$3 run verdict tries runs_file="${TMP}/assigned-runs.json"
+  local pod=$1 repo=$2 rid=$3 run verdict tries complete=1 busy_since waited=0 runs_file="${TMP}/assigned-runs.json"
   tries=$(cat "$(pod_dir "$pod")/verify-tries" 2>/dev/null || echo 0)
-  if (( tries >= 20 )); then
+  busy_since=$(cat "$(pod_dir "$pod")/busy" 2>/dev/null || echo 0)
+  if [[ "$busy_since" =~ ^[0-9]+$ ]] && (( busy_since > 0 )); then waited=$(( $(date +%s) - busy_since )); fi
+  if (( tries >= 20 || waited >= VERIFY_MAX_SECONDS )); then
     # Fail closed: a job that cannot be matched to a run is not known to be ours (labels, fork), so its pod is not left running.
-    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs"
+    say warn job_unverified "pod=${pod}" "repo=${repo}" "hint=the job of this runner was not found in the in-progress runs" "scans=${tries}" "busy_for=${waited}s"
     : > "$(pod_dir "$pod")/verified"
     kill_pod "$pod" "$repo" "$rid" job_unverified
     return 0
   fi
-  printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"
-  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 3 || return 1
+  get_paged "/repos/${repo}/actions/runs?status=in_progress" workflow_runs 50 6 || return 1
+  (( PAGED_TRUNCATED )) && complete=0
   cp "$PAGED_FILE" "$runs_file"
   for run in $(jq -r '.workflow_runs[].id' "$runs_file"); do
     [[ "$run" =~ ^[0-9]+$ ]] || continue
-    get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 3 || continue
+    if ! get_paged "/repos/${repo}/actions/runs/${run}/jobs?filter=latest" jobs 100 5; then complete=0; continue; fi
+    (( PAGED_TRUNCATED )) && complete=0
     verdict=$(jq -r --argjson rid "$rid" --argjson ours "$LABELS_LC" --argjson custom "$CUSTOM_LC" '
       [.jobs[]? | select(.runner_id == $rid)] | first // empty | ([.labels[]? | ascii_downcase]) as $l |
       if ($l | length) == 0 or (($l - $ours) | length) != 0 or (($l | map(select(. as $x | $custom | index($x))) | length) == 0) then "labels" else "ok" end' "$PAGED_FILE")
@@ -24024,6 +24621,7 @@ check_assigned_job() {
     fi
     return 0
   done
+  if (( complete )); then printf '%s' $((tries + 1)) > "$(pod_dir "$pod")/verify-tries"; fi
   return 1
 }
 
@@ -24736,14 +25334,26 @@ def daily(test=False):
                or result["update"] not in {"applied", "unchanged"})
 
 
+def runtime_directory_present(path, unit):
+    """The result files live in the RuntimeDirectory= of a unit; outside that unit there is no such directory."""
+    if path.is_dir():
+        return True
+    log(f"{path} does not exist: this command only works inside its systemd unit; run: sudo systemctl start {unit}")
+    return False
+
+
 def main():
     if os.geteuid() or len(sys.argv) != 2:
         return 2
     if sys.argv[1] == "update":
+        if not runtime_directory_present(UPDATE_RESULT.parent, "h2ci-server-update.service"):
+            return 2
         return update()
     if sys.argv[1] == "preview":
         return run(*DNF, "--assumeno", "upgrade")
     if sys.argv[1] in {"daily", "test"}:
+        if not runtime_directory_present(DAILY_REPORT.parent, "h2ci-daily-maintenance.service"):
+            return 2
         return daily(test=sys.argv[1] == "test")
     return 2
 
@@ -24756,7 +25366,7 @@ chmod 644 "$R/runner/scripts/h2ci-maintenance"
 install -d "$R/runner/scripts"
 cat > "$R/runner/scripts/h2ci-telegram-notify" <<'__SIC_EOF__'
 #!/usr/bin/python3
-"""Send a fixed monitor event using credentials supplied by systemd."""
+"""Send a fixed monitor event; the bot token and chat ID come from a root-only 0600 file."""
 
 from datetime import datetime
 import http.client
@@ -24767,19 +25377,124 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from urllib.parse import urlencode
 
 EVENTS = {
     "disk-threshold": "Root filesystem reached the disk guard threshold; emergency cleanup triggered.",
     "runner-disk-guard": "Disk guard failed. Check: journalctl -u runner-disk-guard.service",
     "server-freshness": "Freshness check failed. Check: journalctl -u server-freshness.service",
+    "runner-engine-update": "Docker/GitLab Runner update failed; CI services may be held stopped. Check: tail /var/log/runner-engine-update.log; ls /var/lib/runner-engine-update/held",
     "test": "TEST: systemd monitor alert delivery verified.",
 }
 
 
+# Bot token and chat ID: two lines. Only read from this file; the token never goes into the environment or a command line.
+CREDENTIALS_FILE = Path("/etc/h2ci-monitor/telegram.credentials")
+# Repeating alerts are sent at most once per interval and event; the stamps live in /run (RuntimeDirectory= of the unit).
+STAMP_DIR = Path("/run/h2ci-telegram-notify")
+RATE_LIMIT_SECONDS = 6 * 3600
+RATE_LIMITED = frozenset({"disk-threshold", "runner-disk-guard", "server-freshness", "runner-engine-update"})
+SEND_TIMEOUT = 8
+RETRY_DELAY = 2
+RETRY_DELAY_MAX = 10
+# Child processes get no inherited environment (nothing secret can leak into them).
+CHILD_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LC_ALL": "C"}
+
+
+def log_problem(level, message):
+    """One line on stderr; under systemd the <N> prefix sets the journal priority (3 error, 4 warning)."""
+    prefix = f"<{level}>" if os.environ.get("JOURNAL_STREAM") else ""
+    print(prefix + message, file=sys.stderr)
+
+
+def load_credentials(path=None, uid=0):
+    """Return (text, None, None), or (None, kind, message) with kind "missing" or "unsafe".
+
+    The file must be a regular file owned by root with mode exactly 0600, checked on the open descriptor.
+    """
+    path = CREDENTIALS_FILE if path is None else path
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None, "missing", f"{path} does not exist"
+    except OSError as exc:
+        return None, "unsafe", f"{path} cannot be opened ({type(exc).__name__}); it must be a regular file"
+    try:
+        info = os.fstat(fd)
+        mode = stat.S_IMODE(info.st_mode)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or mode != 0o600:
+            return None, "unsafe", (f"{path} must be a regular file owned by root with mode 0600 "
+                                    f"(found uid {info.st_uid}, mode {mode:04o}); fix: chown root:root {path} && chmod 0600 {path}")
+        return os.read(fd, 4096).decode("ascii", errors="replace"), None, None
+    finally:
+        os.close(fd)
+
+
+def rate_limited(event, now=None, directory=None):
+    if event not in RATE_LIMITED:
+        return False
+    directory = STAMP_DIR if directory is None else directory
+    now = time.time() if now is None else now
+    try:
+        age = now - (directory / f"{event}.stamp").stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < RATE_LIMIT_SECONDS
+
+
+def mark_sent(event, directory=None):
+    if event not in RATE_LIMITED:
+        return
+    directory = STAMP_DIR if directory is None else directory
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+        (directory / f"{event}.stamp").touch(mode=0o600)   # also renews the time of an existing stamp
+    except OSError:
+        pass
+
+
+def retry_delay(retry_after):
+    try:
+        wanted = int(retry_after)
+    except (TypeError, ValueError, OverflowError):   # OverflowError: JSON Infinity
+        wanted = RETRY_DELAY
+    return min(max(wanted, 0), RETRY_DELAY_MAX)
+
+
+def send_message(token, chat_id, text, sleep=time.sleep):
+    """POST sendMessage once, and once more after a network error, HTTP 429 or 5xx. Returns (HTTP status or None, JSON or None)."""
+    body = urlencode({"chat_id": chat_id, "text": text})
+    path = "/bot" + token + "/sendMessage"
+    status = data = None
+    for attempt in (1, 2):
+        status, data, wait = None, None, RETRY_DELAY
+        connection = http.client.HTTPSConnection("api.telegram.org", timeout=SEND_TIMEOUT)
+        try:
+            connection.request("POST", path, body=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            response = connection.getresponse()
+            status = response.status
+            wait = response.getheader("Retry-After")
+            payload = response.read(65536)
+            try:
+                data = json.loads(payload)
+                if wait is None:
+                    wait = data["parameters"]["retry_after"]
+            except (ValueError, KeyError, TypeError):
+                pass
+        except (OSError, http.client.HTTPException):
+            pass   # no message text here: it can contain the request URL, including the token
+        finally:
+            connection.close()
+        if status == 200 or attempt == 2 or not (status is None or status == 429 or status >= 500):
+            break
+        sleep(retry_delay(wait))
+    return status, data
+
+
 def read_status(*command):
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=2).stdout.strip()
+        return subprocess.run(command, capture_output=True, text=True, timeout=2, env=CHILD_ENV).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -24881,7 +25596,7 @@ def ci_outcomes_24h():
             ("/usr/bin/journalctl", "--no-pager", "--unit=gitlab-runner.service", "SYSLOG_IDENTIFIER=gitlab-runner",
              f"--since=@{now - 86400}", f"--until=@{now}", "--output=json", "--output-fields=MESSAGE",
              "--grep=Submitting job to coordinator", f"--lines={limit + 1}"),
-            capture_output=True, text=True, timeout=2, check=True,
+            capture_output=True, text=True, timeout=2, check=True, env=CHILD_ENV,
         )
         records = result.stdout.splitlines()
         if result.stderr.strip() or len(records) > limit:
@@ -25248,16 +25963,24 @@ def main():
         return 2
     event = sys.argv[1]
     try:
-        credential = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "telegram.credentials"
-        token, chat_id = credential.read_text(encoding="ascii").splitlines()
+        raw, kind, problem = load_credentials()
+        if kind == "unsafe":
+            log_problem(3, f"Telegram alert {event} not sent: {problem}")
+            return 78
+        if kind == "missing":
+            log_problem(4, f"Telegram alert {event} not sent: {problem}; create it as described in runner/README.md")
+            # Alerts on a host without Telegram are not a failure; the daily report is, so that its absence is noticed.
+            return 1 if event == "daily" else 0
+        if rate_limited(event):
+            print(f"Telegram alert {event} suppressed: sent less than {RATE_LIMIT_SECONDS // 3600} hours ago")
+            return 0
+        token, chat_id = raw.splitlines()
         if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token) or not re.fullmatch(r"-?[0-9]+", chat_id):
             print("Invalid Telegram credentials format", file=sys.stderr)
             return 2
-        os.environ["TELEGRAM_BOT_TOKEN"] = token
-        del token
         run_id = None
         if event == "daily":
-            report = credential.with_name("maintenance.json")
+            report = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "maintenance.json"
             result = json.loads(report.read_text())
             run_id = result["run_id"]
             if not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -25265,26 +25988,20 @@ def main():
             text = daily_status(result)
         else:
             text = EVENTS[event]
-        body = urlencode({"chat_id": chat_id, "text": "[h2ci] " + text})
-        connection = http.client.HTTPSConnection("api.telegram.org", timeout=8 if event == "daily" else 10)
-        try:
-            connection.request(
-                "POST", "/bot" + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage", body=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            response = connection.getresponse()
-            if response.status != 200:
-                print(f"Telegram rejected {event}: HTTP {response.status}", file=sys.stderr)
-                return 1
-            data = json.loads(response.read(65536))
-        finally:
-            connection.close()
-        if data.get("ok") is True:
+        status, data = send_message(token, chat_id, "[h2ci] " + text)
+        if status is None:
+            print(f"Telegram unreachable for {event}", file=sys.stderr)
+            return 1
+        if status != 200:
+            print(f"Telegram rejected {event}: HTTP {status}", file=sys.stderr)
+            return 1
+        if isinstance(data, dict) and data.get("ok") is True:
             result = data["result"]
             if str(result["chat"]["id"]) == chat_id and type(result["message_id"]) is int and result["message_id"] > 0:
                 if run_id is not None:
                     receipt = Path("/run/h2ci-daily-maintenance/delivery.json")
                     receipt.write_text(json.dumps({"run_id": run_id, "message_id": result["message_id"]}))
+                mark_sent(event)
                 print(f"Telegram delivered {event}; message ID {result['message_id']}")
                 return 0
         print(f"Telegram did not confirm delivery of {event}", file=sys.stderr)
@@ -25312,7 +26029,9 @@ fi
 used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
 if (( used >= HARD_LIMIT )); then
   logger -t runner-disk-guard -- "disk ${used}% >= ${HARD_LIMIT}%, running emergency cleanup"
-  if ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
+  # Only hosts with the Telegram units (h2ci) alert; elsewhere a missing unit is normal and not logged on every run.
+  if systemctl cat h2ci-telegram-notify@disk-threshold.service >/dev/null 2>&1 &&
+     ! systemctl start --no-block h2ci-telegram-notify@disk-threshold.service; then
     logger -t runner-disk-guard -- "could not queue Telegram disk alert" || true
   fi
   RETENTION_DAYS=1 /usr/local/bin/runner-weekly-cleanup.sh
@@ -25326,14 +26045,29 @@ cat > "$R/runner/scripts/runner-engine-update.sh" <<'__SIC_EOF__'
 # Weekly upgrade of Docker CE and GitLab Runner while no CI job runs (GitLab jobs, GitHub runner pods): runner and github-runner-ctl
 # stopped gracefully, jobs checked again, Docker upgraded and restarted, gitlab-runner last; a job in between: all started again.
 # One result line in /var/log/runner-engine-update.log. Env: DRY_RUN=1 plan only; STOP_WAIT seconds for the graceful stop (1800).
+# When Docker packages were changed and the CI services cannot be restored safely, they stay stopped, the run FAILs (exit 1) and
+# a "held" marker is written; every later run first tries to recover from it (isolation, Docker, no jobs, services back).
 set -Eeuo pipefail
 LOG="${ENGINE_UPDATE_LOG:-/var/log/runner-engine-update.log}"   # overridable for tests
 DRY_RUN="${DRY_RUN:-0}"
 STOP_WAIT="${STOP_WAIT:-1800}"
 DROPIN="${ENGINE_UPDATE_DROPIN:-/etc/systemd/system/gitlab-runner.service.d/graceful-stop.conf}"
 LOCK_FILE="${ENGINE_UPDATE_LOCK:-/run/runner-engine-update.lock}"
+HELD_FILE="${ENGINE_UPDATE_HELD:-/var/lib/runner-engine-update/held}"   # overridable for tests
 PKGS=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gitlab-runner)
-note() { logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+last_note=""
+note() { last_note="$*"; logger -t runner-engine-update -- "$*" 2>/dev/null || true; echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+# A run that leaves the CI services stopped records why; the next run recovers or reports it (see recover_held).
+# It runs from the EXIT trap and must never change the exit code of the run (the services stay stopped either way).
+write_held() {
+  local reason=${last_note:-unknown} tmp
+  mkdir -p "$(dirname "$HELD_FILE")" || return 0
+  tmp=$(mktemp "$HELD_FILE.XXXXXX") || return 0
+  printf 'time=%s\nreason=%s\nctl_stopped=%s\n' "$(date -u +%FT%TZ)" "$reason" "${ctl_stopped:-0}" > "$tmp" || { rm -f "$tmp"; return 0; }
+  chmod 0644 "$tmp"   # no secret in it; health prints the reason as a normal user
+  mv -f "$tmp" "$HELD_FILE" || { rm -f "$tmp"; return 0; }
+  note "HELD CI services stay stopped; the next run re-checks isolation and restarts them (marker ${HELD_FILE})"
+}
 
 # Probe contract: 0 = updates available, 1 = none, 2 = package metadata/query error.
 probe_failed() {
@@ -25397,8 +26131,66 @@ runner_back() {
     ctl_back
   fi
 }
+# A docker error is not "no jobs".
+job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
 cleanup_services() {
-  if (( runner_stopped )); then runner_back; fi
+  if (( runner_stopped )); then
+    if can_restart_services; then runner_back; else write_held || true; fi
+  fi
+}
+# A marker from an earlier fail-closed run means the CI services were left stopped. Restart them only after the checks the normal
+# path needs (isolation rebuilt and active, Docker answers, no job); otherwise stay held and fail so that it is noticed.
+# The services are only stopped, not disabled, so a reboot brings them back: with both running (and the isolation active) the marker
+# is stale and is cleared without touching the isolation rules under live jobs; running without isolation is a loud failure.
+recover_held() {
+  [[ -e "$HELD_FILE" ]] || return 0
+  local reason jobs running=1
+  reason=$(sed -n 's/^reason=//p' "$HELD_FILE" 2>/dev/null | head -1)
+  systemctl is-active --quiet gitlab-runner || running=0
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then running=0; fi
+  if (( running )); then
+    if [[ "$DRY_RUN" == 1 ]]; then
+      note "DRY-RUN held marker is stale: the CI services are already running"
+      return 0
+    fi
+    if systemctl is-active --quiet ci-job-isolation.service; then
+      rm -f "$HELD_FILE"
+      note "OK held marker cleared: services already running (${reason:-unknown})"
+      return 0
+    fi
+    note "FAIL CI services are running but ci-job-isolation.service is not active; marker kept (${reason:-unknown})"
+    return 1
+  fi
+  if [[ "$DRY_RUN" == 1 ]]; then
+    note "DRY-RUN CI services are held since $(sed -n 's/^time=//p' "$HELD_FILE" | head -1) (${reason:-unknown}); a real run would re-check isolation and restart them"
+    return 0
+  fi
+  note "HELD marker found (${reason:-unknown}); trying to restore the CI services"
+  if ! ensure_isolation; then
+    note "FAIL CI services still held: isolation is not restored"
+    return 1
+  fi
+  if ! jobs=$(job_ids 2>/dev/null); then
+    note "FAIL CI services still held: docker does not answer"
+    return 1
+  fi
+  if [[ -n "$jobs" ]]; then
+    note "FAIL CI services still held: $(wc -w <<<"$jobs") CI job(s) running"
+    return 1
+  fi
+  systemctl start gitlab-runner || true
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE"; then systemctl start github-runner-ctl || true; fi
+  sleep 5
+  if ! systemctl is-active --quiet gitlab-runner; then
+    note "FAIL CI services still held: gitlab-runner did not start"
+    return 1
+  fi
+  if grep -qs '^ctl_stopped=1$' "$HELD_FILE" && ! systemctl is-active --quiet github-runner-ctl; then
+    note "FAIL CI services still held: github-runner-ctl did not start"
+    return 1
+  fi
+  rm -f "$HELD_FILE"
+  note "OK held CI services restored (${reason:-unknown})"
 }
 main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -25409,8 +26201,7 @@ fi
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 exec 9>"$LOCK_FILE"
 flock -n 9 || { note "SKIP another update is running"; exit 0; }
-# A docker error is not "no jobs".
-job_ids() { docker ps -q --filter "label=com.gitlab.gitlab-runner.managed=true" && docker ps -q --filter "label=io.server-init.github-runner=job"; }
+recover_held || exit 1
 if ! jobs=$(job_ids 2>/dev/null); then
   note "SKIP docker does not answer, cannot tell whether jobs run"
   exit 0
@@ -25492,19 +26283,19 @@ if (( ${#docker_pkgs[@]} )); then
   isolation_required=1
 fi
 if (( ${#docker_pkgs[@]} )) && ! upgrade "${docker_pkgs[@]}" >>"$LOG" 2>&1; then
-  note "FAIL Docker package upgrade failed, see ${LOG}"
+  note "FAIL Docker package upgrade failed, see ${LOG}; CI services left stopped"
   exit 1
 fi
 # a package scriptlet may have started the runner and it may have taken a job
 if [[ "$(runner_state)" != inactive ]]; then
   if ! stop_runner_wait; then
-    note "SKIP Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted (retry next week)"
-    exit 0
+    note "FAIL Docker packages upgraded, but gitlab-runner is busy again; Docker not restarted; CI services left stopped"
+    exit 1
   fi
 fi
 if ! no_jobs; then
-  note "SKIP Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted (retry next week)"
-  exit 0
+  note "FAIL Docker packages upgraded, but a CI job runs or docker does not answer; Docker not restarted; CI services left stopped"
+  exit 1
 fi
 bad=""
 if (( ${#docker_pkgs[@]} )); then
@@ -25804,18 +26595,37 @@ cat > "$R/runner/systemd/h2ci-telegram-notify@.service" <<'__SIC_EOF__'
 Description=Send Telegram notification for h2ci monitor event %i
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/etc/h2ci-monitor/telegram.credentials
 
+# The credentials file /etc/h2ci-monitor/telegram.credentials (root, 0600) is read and checked by the script itself: a missing
+# file is logged as a warning (a Condition would skip the unit silently), a file with the wrong owner or mode is refused.
 [Service]
 Type=oneshot
-LoadCredential=telegram.credentials:/etc/h2ci-monitor/telegram.credentials
 ExecStart=/usr/local/bin/h2ci-telegram-notify %i
-TimeoutStartSec=20s
+# Alerts: two attempts (connect and read 8 s each, plus name lookup) and a wait of at most 10 s. The daily report has a longer
+# limit in its drop-in.
+TimeoutStartSec=60s
+# Stamp files of the rate limit (the same directory for every event).
+RuntimeDirectory=h2ci-telegram-notify
+RuntimeDirectoryPreserve=yes
 NoNewPrivileges=true
 CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 LimitCORE=0
 UMask=0077
 __SIC_EOF__
@@ -25823,12 +26633,9 @@ chmod 644 "$R/runner/systemd/h2ci-telegram-notify@.service"
 
 install -d "$R/runner/systemd/h2ci-telegram-notify@daily.service.d"
 cat > "$R/runner/systemd/h2ci-telegram-notify@daily.service.d/20-maintenance.conf" <<'__SIC_EOF__'
-[Unit]
-# Missing credentials must fail the daily job, not skip it successfully.
-ConditionPathExists=
-AssertPathExists=/etc/h2ci-monitor/telegram.credentials
-
 [Service]
+# The report is built from local queries (up to about 40 s when Prometheus hangs) and then sent with one retry.
+TimeoutStartSec=90s
 LoadCredential=maintenance.json:/run/h2ci-daily-maintenance/report.json
 ReadWritePaths=/run/h2ci-daily-maintenance
 __SIC_EOF__
@@ -25867,6 +26674,8 @@ cat > "$R/runner/systemd/runner-engine-update.service" <<'__SIC_EOF__'
 [Unit]
 Description=Weekly upgrade of Docker CE and GitLab Runner when no CI job runs
 After=docker.service network-online.target
+
+OnFailure=h2ci-telegram-notify@runner-engine-update.service
 
 [Service]
 Type=oneshot
@@ -26854,6 +27663,26 @@ def runtime_drift(directory, findings):
                                  "detail": "running image reference or memory limit differs from deployed Compose"})
 
 
+# Jobs that the logging and registry-cache installers append to prometheus.yml, in whatever order the installers ran.
+PROMETHEUS_EXTRA_JOBS = (
+    ("registry-cache", "registry-cache", "127.0.0.1:5001"),
+    ("logging", "loki", "127.0.0.1:3100"),
+    ("logging", "alloy", "127.0.0.1:12345"),
+)
+
+
+def prometheus_expected(base, deployed, root):
+    """Repository prometheus.yml plus the extra jobs of the installed components, ordered as in the deployed file."""
+    blocks = {}
+    for component, job, target in PROMETHEUS_EXTRA_JOBS:
+        if (root / "opt" / component / "docker-compose.yml").exists() and f"job_name: {job}".encode() not in base:
+            blocks[job] = (f'  - job_name: {job}\n    static_configs:\n'
+                           f'      - targets: ["{target}"]\n').encode()
+    # A block that is missing from the deployed file goes last (it is reported as a difference either way).
+    position = {job: deployed.find(block) for job, block in blocks.items()}
+    return base + b"".join(blocks[job] for job in sorted(blocks, key=lambda j: (position[j] < 0, position[j])))
+
+
 def drift(repo, root=Path("/"), file_diffs=None):
     findings = []
     installed = []
@@ -26884,16 +27713,11 @@ def drift(repo, root=Path("/"), file_diffs=None):
                         relative = file.relative_to(source)
                         expected = file.read_bytes()
                         if relative.as_posix() == "prometheus/prometheus.yml":
-                            additions = (
-                                ("registry-cache", "registry-cache", "127.0.0.1:5001"),
-                                ("logging", "loki", "127.0.0.1:3100"),
-                                ("logging", "alloy", "127.0.0.1:12345"),
-                            )
-                            for component, job, target in additions:
-                                if (root / "opt" / component / "docker-compose.yml").exists():
-                                    if f"job_name: {job}".encode() not in expected:
-                                        expected += (f'  - job_name: {job}\n    static_configs:\n'
-                                                     f'      - targets: ["{target}"]\n').encode()
+                            try:
+                                deployed_bytes = (directory / relative).read_bytes()
+                            except OSError:
+                                deployed_bytes = b""   # compare_file reports the missing file
+                            expected = prometheus_expected(expected, deployed_bytes, root)
                         compare_file(file, directory / relative, findings, expected, file_diffs)
                 if (root / "opt/logging/docker-compose.yml").exists():
                     compare_file(repo / "runner/stacks/logging/grafana-datasource.yml",
@@ -26944,14 +27768,25 @@ def hub_tags(image):
             "scope": "100 most recently updated tags; stable x.y.z only, not a support/EOL check"}
 
 
+def check_update_names(text):
+    """Package names from `dnf -q check-update`. DNF wraps a long name: the version and repository continue on an
+    indented line (and the obsoleted package of an obsoleting entry is indented too), so those lines are joined first."""
+    logical = []
+    for line in text.splitlines():
+        if line[:1].isspace() and logical:
+            logical[-1] += " " + line.strip()
+        elif line.strip():
+            logical.append(line.strip())
+    pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src|ppc64le|s390x|armv7hl)\s+(\S+)\s+\S+")
+    return sorted({match.group(1) for line in logical if (match := pattern.match(line))})
+
+
 def packages():
     """Refresh metadata only. This function is never called by --check or health."""
     if shutil.which("dnf"):
         rows = run(["dnf", "-q", "--refresh", "--setopt=*.skip_if_unavailable=False", "check-update"],
                    timeout=150, accepted=(0, 100))
-        pattern = re.compile(r"^(\S+)\.(?:aarch64|x86_64|noarch|i686|src)\s+(\S+)\s+\S+")
-        updates = sorted({match.group(1) for line in rows.stdout.splitlines()
-                          if (match := pattern.match(line))})
+        updates = check_update_names(rows.stdout)
         if rows.returncode == 100 and not updates:
             raise CheckError("DNF reports updates but package list could not be parsed")
         security = run(["dnf", "-q", "--cacheonly", "updateinfo", "list", "--security"], timeout=60)
@@ -26972,12 +27807,23 @@ def packages():
 def reboot_state():
     if Path("/var/run/reboot-required").exists():
         return "required"
+    # `dnf needs-restarting -r` (the plugin that h2ci-maintenance uses) first, the old standalone binary as a fallback.
+    # A host without either, or a failing query, is "unknown": that is not a freshness error.
+    commands = []
+    if shutil.which("dnf"):
+        commands.append(["dnf", "-q", "-C", "needs-restarting", "-r"])
     if shutil.which("needs-restarting"):
-        result = run(["needs-restarting", "-r"], timeout=30, accepted=(0, 1))
+        commands.append(["needs-restarting", "-r"])
+    for argv in commands:
+        try:
+            result = run(argv, timeout=60, accepted=(0, 1))
+        except CheckError:
+            continue
+        # exit 1 can also be a generic DNF error: require the affirmative text
+        if result.returncode == 1 and "reboot is required" in result.stdout.lower():
+            return "required"
         if result.returncode == 0:
             return "not-required"
-        if "reboot is required" in result.stdout.lower():
-            return "required"
     return "unknown"
 
 
@@ -27897,6 +28743,9 @@ check_services() {
     fi
   done
 
+  if is_runner && [[ -e /var/lib/runner-engine-update/held ]]; then
+    warn "CI services are held stopped by a failed engine update ($(sed -n 's/^reason=//p' /var/lib/runner-engine-update/held 2>/dev/null | head -1)); the next runner-engine-update run recovers them, or run: sudo runner-engine-update.sh"
+  fi
   if is_runner && [[ -s /var/log/runner-engine-update.log ]]; then
     local upd
     upd=$(grep -E ' (OK|SKIP|FAIL|DRY-RUN) ' /var/log/runner-engine-update.log | tail -1 || true)
@@ -27905,6 +28754,18 @@ check_services() {
       "") ;;
       *) info "Docker/GitLab Runner update: ${upd}" ;;
     esac
+  fi
+  if is_runner && unit_exists 'h2ci-telegram-notify@.service'; then
+    local tg=/etc/h2ci-monitor/telegram.credentials
+    if (( LIMITED )); then
+      info "Telegram credentials file not checked (its directory is root-only): run health as root or with sudo"
+    elif [[ ! -e "$tg" && ! -L "$tg" ]]; then
+      info "Telegram alerts: ${tg} not created (alerts are logged as a warning, not sent)"
+    elif [[ -f "$tg" && ! -L "$tg" && "$(stat -c '%u %a' "$tg" 2>/dev/null || true)" == "0 600" ]]; then
+      ok "Telegram credentials file is root-owned, mode 0600"
+    else
+      warn "${tg} must be a regular file owned by root with mode 0600 (the notify script refuses it): sudo chown root:root ${tg} && sudo chmod 0600 ${tg}"
+    fi
   fi
   if is_runner && unit_exists ci-job-isolation.service; then
     if systemctl is-active --quiet ci-job-isolation.service 2>/dev/null; then ok "ci-job-isolation active (metadata and host services closed to jobs)"; else warn "ci-job-isolation not active: jobs can reach the metadata service (systemctl restart ci-job-isolation)"; fi

@@ -157,6 +157,28 @@ class MaintenanceTests(unittest.TestCase):
             with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], rc, output, "")):
                 self.assertEqual(probe(), expected)
 
+    def test_missing_runtime_directory_is_a_message_not_a_traceback(self):
+        main = update.__globals__["main"]
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "run" / "x"
+            for command, name, unit in (("update", "UPDATE_RESULT", "h2ci-server-update.service"),
+                                        ("daily", "DAILY_REPORT", "h2ci-daily-maintenance.service"),
+                                        ("test", "DAILY_REPORT", "h2ci-daily-maintenance.service")):
+                calls = []
+                with self.subTest(command=command), patch.object(os, "geteuid", return_value=0), \
+                     patch.object(sys, "argv", ["h2ci-maintenance", command]), \
+                     patch.dict(main.__globals__, {name: missing / "file.json", "update": lambda: calls.append("update"),
+                                                   "daily": lambda test=False: calls.append("daily")}), \
+                     patch("sys.stderr") as stderr:
+                    self.assertEqual(main(), 2)
+                text = "".join(call.args[0] for call in stderr.write.call_args_list)
+                self.assertIn(f"systemctl start {unit}", text)
+                self.assertEqual(calls, [])
+            (Path(directory) / "run" / "x").mkdir(parents=True)
+            with patch.object(os, "geteuid", return_value=0), patch.object(sys, "argv", ["h2ci-maintenance", "update"]), \
+                 patch.dict(main.__globals__, {"UPDATE_RESULT": missing / "file.json", "update": lambda: 0}):
+                self.assertEqual(main(), 0)
+
     def test_telegram_summary(self):
         lines, actions = render({"update": "unchanged", "reboot": "not needed", "freshness": "refreshed"})
         self.assertEqual(actions, [])
