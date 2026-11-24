@@ -16816,14 +16816,26 @@ def daily(test=False):
                or result["update"] not in {"applied", "unchanged"})
 
 
+def runtime_directory_present(path, unit):
+    """The result files live in the RuntimeDirectory= of a unit; outside that unit there is no such directory."""
+    if path.is_dir():
+        return True
+    log(f"{path} does not exist: this command only works inside its systemd unit; run: sudo systemctl start {unit}")
+    return False
+
+
 def main():
     if os.geteuid() or len(sys.argv) != 2:
         return 2
     if sys.argv[1] == "update":
+        if not runtime_directory_present(UPDATE_RESULT.parent, "h2ci-server-update.service"):
+            return 2
         return update()
     if sys.argv[1] == "preview":
         return run(*DNF, "--assumeno", "upgrade")
     if sys.argv[1] in {"daily", "test"}:
+        if not runtime_directory_present(DAILY_REPORT.parent, "h2ci-daily-maintenance.service"):
+            return 2
         return daily(test=sys.argv[1] == "test")
     return 2
 
@@ -25322,14 +25334,26 @@ def daily(test=False):
                or result["update"] not in {"applied", "unchanged"})
 
 
+def runtime_directory_present(path, unit):
+    """The result files live in the RuntimeDirectory= of a unit; outside that unit there is no such directory."""
+    if path.is_dir():
+        return True
+    log(f"{path} does not exist: this command only works inside its systemd unit; run: sudo systemctl start {unit}")
+    return False
+
+
 def main():
     if os.geteuid() or len(sys.argv) != 2:
         return 2
     if sys.argv[1] == "update":
+        if not runtime_directory_present(UPDATE_RESULT.parent, "h2ci-server-update.service"):
+            return 2
         return update()
     if sys.argv[1] == "preview":
         return run(*DNF, "--assumeno", "upgrade")
     if sys.argv[1] in {"daily", "test"}:
+        if not runtime_directory_present(DAILY_REPORT.parent, "h2ci-daily-maintenance.service"):
+            return 2
         return daily(test=sys.argv[1] == "test")
     return 2
 
